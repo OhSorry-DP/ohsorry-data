@@ -38,3 +38,16 @@ async function fetchAllUsers() {
 const list = await fetchAllUsers();
 fs.writeFileSync('users-list.json', JSON.stringify(list));
 console.log('users-list.json 갱신:', list.length, '명');
+
+// songs.json — 곡 마스터(공유). 신곡이 webhook 으로 들어와도 여기서 주기 갱신(변경 시에만 commit/upload).
+const songs = [];
+for (let off = 0; ; off += 1000) {
+  const r = await fetch(SB + `/rest/v1/songs?select=song_id,title,ac,legen,textage_song_id,series_no&order=song_id.asc&limit=1000&offset=${off}`, { headers: H });
+  if (!r.ok) throw new Error(`songs HTTP ${r.status}`);
+  const rows = await r.json();
+  if (!Array.isArray(rows) || !rows.length) break;
+  songs.push(...rows);
+  if (rows.length < 1000) break;
+}
+fs.writeFileSync('songs.json', JSON.stringify(songs));
+console.log('songs.json 갱신:', songs.length, '곡');

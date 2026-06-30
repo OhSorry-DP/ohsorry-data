@@ -31,13 +31,14 @@ jobs:
 
       - name: Commit & push (변경 시만)
         run: |
-          if [ -z "$(git status --porcelain users-list.json)" ]; then echo "변경 없음 — skip"; exit 0; fi
+          if [ -z "$(git status --porcelain users-list.json songs.json)" ]; then echo "변경 없음 — skip"; exit 0; fi
           git config user.name "ohsorry-bot"
           git config user.email "hanekawa4365@gmail.com"
-          git add users-list.json
-          git commit -m "auto: users-list 갱신"
+          git add users-list.json songs.json
+          git commit -m "auto: users-list/songs 갱신"
           for i in 1 2 3 4 5; do
             git pull --rebase --autostash origin main && git push && break
             echo "push 재시도 $i"; sleep 3
           done
           curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/users-list.json" || true
+          curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/songs.json" || true
