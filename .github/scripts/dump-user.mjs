@@ -26,6 +26,10 @@ async function rpcGrid(id, ps) {
   }
   return out;
 }
+// score row 슬림 — 곡메타는 공유 songs.json 으로 분리(웹이 song_id 조인). dump-data-repo.js 와 동일 유지.
+const SCORE_KEEP = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date'];
+const slimRow = (r) => { const o = {}; for (const k of SCORE_KEEP) if (r[k] !== undefined) o[k] = r[k]; return o; };
+
 async function dumpUser(id) {
   const eid = encodeURIComponent(id);
   const [user, radars, osPattern, dp, sp] = await Promise.all([
@@ -36,7 +40,7 @@ async function dumpUser(id) {
     rpcGrid(id, 1),
     rpcGrid(id, 0).catch(() => []),
   ]);
-  return { _v: new Date().toISOString(), user: user[0] || null, radars, osPattern, dp, sp };
+  return { _v: new Date().toISOString(), user: user[0] || null, radars, osPattern, dp: dp.map(slimRow), sp: sp.map(slimRow) };
 }
 
 const ids = process.argv.slice(2).filter(Boolean);
