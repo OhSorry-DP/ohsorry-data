@@ -1,10 +1,10 @@
 name: dump-users-list
 
 # 전 유저 목록(users-list.json) 주기 재생성 — 웹 fetchAllUsers 의 jsdelivr 소스.
-# 유저별 카드(user/{id}.json)는 webhook 실시간, 목록은 집계라 15분 cron(변경 시에만 commit).
+# 유저별 카드(user/{id}.json)는 webhook 실시간, 목록은 집계라 5분 cron(변경 시에만 commit).
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch: {}   # 수동 실행도 가능
 
 concurrency:
