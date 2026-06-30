@@ -7,6 +7,7 @@
 ## 구조
 - `user/{iidx_id}.json` — 유저별 데이터(웹 `fetchUserProfile` 이 받던 supabase 5종을 묶음)
   - `{ _v, user, radars, osPattern, dp[], sp[] }` (dp/sp = `make_grid_data` DP·SP raw — 변환은 웹이 기존대로)
+- `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). 집계라 유저별 webhook 이 아닌 **cron Action(15분)** 으로 갱신.
 - `version.json` — 전체 덤프 타임스탬프 + 유저 수
 
 ## 생성/갱신

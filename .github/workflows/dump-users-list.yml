@@ -1,0 +1,43 @@
+name: dump-users-list
+
+# 전 유저 목록(users-list.json) 주기 재생성 — 웹 fetchAllUsers 의 jsdelivr 소스.
+# 유저별 카드(user/{id}.json)는 webhook 실시간, 목록은 집계라 15분 cron(변경 시에만 commit).
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}   # 수동 실행도 가능
+
+concurrency:
+  group: dump-users-list
+  cancel-in-progress: true
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build users-list.json
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node .github/scripts/dump-users-list.mjs
+
+      - name: Commit & push (변경 시만)
+        run: |
+          if [ -z "$(git status --porcelain users-list.json)" ]; then echo "변경 없음 — skip"; exit 0; fi
+          git config user.name "ohsorry-bot"
+          git config user.email "hanekawa4365@gmail.com"
+          git add users-list.json
+          git commit -m "auto: users-list 갱신"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main && git push && break
+            echo "push 재시도 $i"; sleep 3
+          done
+          curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/users-list.json" || true
