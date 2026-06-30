@@ -1,0 +1,50 @@
+name: dump-user
+
+# vercel 함수(api/dump-trigger)가 보내는 repository_dispatch(dump-user) 로 기동.
+# client_payload.iidx_id 유저를 supabase 에서 재덤프 → user/{id}.json commit/push → jsdelivr purge.
+on:
+  repository_dispatch:
+    types: [dump-user]
+
+# 같은 유저 연속 업로드는 마지막 것만(이전 실행 취소). 다른 유저는 병렬.
+concurrency:
+  group: dump-${{ github.event.client_payload.iidx_id }}
+  cancel-in-progress: true
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # iidx_id 는 외부(supabase record) 유래 → 쉘에 직접 보간하지 말고 env 경유(인젝션 방지).
+    env:
+      IIDX_ID: ${{ github.event.client_payload.iidx_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Dump user from supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node .github/scripts/dump-user.mjs "$IIDX_ID"
+
+      - name: Commit & push
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then echo "변경 없음 — skip"; exit 0; fi
+          git config user.name "ohsorry-bot"
+          git config user.email "hanekawa4365@gmail.com"
+          git add user/
+          git commit -m "auto dump: $IIDX_ID"
+          # 다른 유저 Action 과 동시 push 충돌 대비 rebase + 재시도.
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main && git push && exit 0
+            echo "push 재시도 $i"; sleep 3
+          done
+          echo "push 실패"; exit 1
+
+      - name: Purge jsdelivr
+        run: curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/user/$IIDX_ID.json" || true
