@@ -14,14 +14,15 @@ const rowsOf = (slim) => (slim || []).map((r) => {
   return s ? { title: s.title, textage_song_id: s.textage_song_id, diff: r.diff, ex_score: r.ex_score, lamp: r.lamp } : null;
 }).filter(Boolean);
 
+const FORCE = process.argv.includes('--force');   // 엔진(persona.js) 개정 후 전체 재생성용
 const R = await loadPersonaResources();
 const files = fs.readdirSync('user').filter((f) => f.endsWith('.json'));
 let ok = 0, nul = 0, skip = 0, fail = 0, spOk = 0, spNul = 0;
 for (const f of files) {
   const p = path.join('user', f);
   const data = JSON.parse(fs.readFileSync(p, 'utf8'));
-  const needDp = !(data.persona && data.persona._v);
-  const needSp = !(data.spPersona && data.spPersona._v);
+  const needDp = FORCE || !(data.persona && data.persona._v);
+  const needSp = FORCE || !(data.spPersona && data.spPersona._v);
   if (!needDp && !needSp) { skip++; continue; }   // 웹훅으로 이미 생성됨
   try {
     if (needDp) {
