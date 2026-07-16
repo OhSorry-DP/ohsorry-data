@@ -320,21 +320,27 @@ export function personaFor(allCharts, R) {
   }
   const resids = (vec.__entries || []).map((e) => e && e.residual).filter((v) => typeof v === 'number');
   const overallResid = resids.length ? resids.reduce((a, b) => a + b, 0) / resids.length : null;
-  // HSTAIR 배치 적성(36dim 미포함 내부값) — featScores 가중 잔차 + 본인 평균 중심화.
-  const HSTAIR_DEFS = [
-    { key: 'HSTAIR_ONEHAND', label: '한손계단' }, { key: 'HSTAIR_SYNC', label: '쌍계단' },
-    { key: 'HSTAIR_SAMESHAPE', label: '대칭계단' }, { key: 'HSTAIR_DIFFSHAPE', label: '비대칭계단' },
+  // 배치 적성(36dim 미포함 내부값) — featScores 가중 잔차 + 본인 평균 중심화.
+  //   HSTAIR 4축(chart-level) + 나선계단 2축(손별 _L/_R → max, 계약 외 EXTRA 필드. up=오른방향(1→7)/dn=왼방향).
+  const LAYOUT_DEFS = [
+    { key: 'HSTAIR_ONEHAND', label: '한손계단', of: (sc) => sc.HSTAIR_ONEHAND },
+    { key: 'HSTAIR_SYNC', label: '쌍계단', of: (sc) => sc.HSTAIR_SYNC },
+    { key: 'HSTAIR_SAMESHAPE', label: '대칭계단', of: (sc) => sc.HSTAIR_SAMESHAPE },
+    { key: 'HSTAIR_DIFFSHAPE', label: '비대칭계단', of: (sc) => sc.HSTAIR_DIFFSHAPE },
+    { key: 'SPIRAL_UP', label: '오른나선', of: (sc) => Math.max(sc.SPIRAL_UP_L || 0, sc.SPIRAL_UP_R || 0) },
+    { key: 'SPIRAL_DN', label: '왼나선', of: (sc) => Math.max(sc.SPIRAL_DN_L || 0, sc.SPIRAL_DN_R || 0) },
   ];
   let layoutProfile = null;
   if (overallResid != null) {
     layoutProfile = [];
-    for (const def of HSTAIR_DEFS) {
+    for (const def of LAYOUT_DEFS) {
       let sumRW = 0, sumW = 0, n = 0;
       for (const e of vec.__entries || []) {
         if (!e || typeof e.residual !== 'number' || !e.chartId) continue;
         const [sid, cn] = e.chartId.split('|');
         const sc = R.featScores[sid] && R.featScores[sid][cn];
-        const v = sc && typeof sc[def.key] === 'number' ? sc[def.key] : 0;
+        const raw = sc ? def.of(sc) : 0;
+        const v = typeof raw === 'number' ? raw : 0;
         if (v < 40) continue;   // 해당 축이 유의미한 곡만(quantile 40+)
         const w = v / 100;
         sumRW += e.residual * w; sumW += w; n++;
