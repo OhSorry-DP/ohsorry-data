@@ -2,6 +2,7 @@
 //   지정 iidx_id 유저를 supabase 에서 받아 user/{id}.json 으로 갱신(웹 fetchUserProfile 의 jsdelivr 소스).
 //   ohSorryAdmin/scripts/dump-data-repo.js 의 단일유저판 — 스키마/RPC 동일하게 유지할 것.
 import fs from 'node:fs';
+import { loadPersonaResources, chartsFromGridRows, personaFor } from './persona-lib.mjs';
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -30,7 +31,7 @@ async function rpcGrid(id, ps) {
 const SCORE_KEEP = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date'];
 const slimRow = (r) => { const o = {}; for (const k of SCORE_KEEP) if (r[k] !== undefined) o[k] = r[k]; return o; };
 
-async function dumpUser(id) {
+async function dumpUser(id, personaRes) {
   const eid = encodeURIComponent(id);
   const [user, radars, osPattern, dp, sp] = await Promise.all([
     // dbr_pw 는 비밀(공개 repo·anon 노출 금지) → 명시 컬럼만 select(select=* 금지).
@@ -40,16 +41,25 @@ async function dumpUser(id) {
     rpcGrid(id, 1),
     rpcGrid(id, 0).catch(() => []),
   ]);
-  return { _v: new Date().toISOString(), user: user[0] || null, radars, osPattern, dp: dp.map(slimRow), sp: sp.map(slimRow) };
+  // ── persona (DP 성향 리포트) — raw grid rows 로 슬림 전에 산출. 실패해도 덤프 자체는 계속(기존 persona 유지). ──
+  let persona = null;
+  try {
+    persona = personaFor(chartsFromGridRows(dp, personaRes.textageMeta), personaRes);
+  } catch (e) {
+    console.error('persona 산출 실패(' + id + '):', e.message);
+    try { persona = JSON.parse(fs.readFileSync(`user/${id}.json`, 'utf8')).persona || null; } catch { /* 기존 파일 없음 */ }
+  }
+  return { _v: new Date().toISOString(), user: user[0] || null, radars, osPattern, persona, dp: dp.map(slimRow), sp: sp.map(slimRow) };
 }
 
 const ids = process.argv.slice(2).filter(Boolean);
 if (!ids.length) { console.error('iidx_id 인자 없음'); process.exit(1); }
 fs.mkdirSync('user', { recursive: true });
+const personaRes = await loadPersonaResources();
 for (const id of ids) {
   if (!/^[A-Za-z0-9]+$/.test(id)) { console.error('잘못된 iidx_id 형식:', id); process.exit(1); }
-  const data = await dumpUser(id);
+  const data = await dumpUser(id, personaRes);
   if (!data.user) { console.error('유저 없음(삭제됨?):', id); continue; }
   fs.writeFileSync(`user/${id}.json`, JSON.stringify(data));
-  console.log('덤프:', id, '| dp', data.dp.length, 'sp', data.sp.length);
+  console.log('덤프:', id, '| dp', data.dp.length, 'sp', data.sp.length, '| persona', data.persona ? 'OK' : '없음');
 }
