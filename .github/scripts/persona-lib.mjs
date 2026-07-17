@@ -358,6 +358,8 @@ export function personaFor(allCharts, R) {
     jackProfile: vec.__jackProfile || null, streamProfile: vec.__streamProfile || null,
     mixProfile: vec.__mixProfile || null, muriProfile: vec.__muriProfile || null,
     layoutProfile,
+    notesProfile: vec.__notesProfile || null,   // 지구력(노트수) 축
+    lampStats: vec.__lampStats || null,          // 풀콤보/EX하드 마스터 칭호용 FC/PFC 비중
   };
   const rich = R.personaLib.richReportOf(profile);
   const P = rich.persona;
