@@ -38,7 +38,7 @@ export async function loadPersonaResources() {
   const weaknessLib = req(path.join(tmp, 'calcWeakness.js'));
   const personaLib = req(path.join(tmp, 'persona.js'));
   const { norm } = req(path.join(tmp, 'normTitle.js'));
-  const [textageMeta, ratingJson, zasaRaw, band1, band2, band3, featScoresJson, rateRef, spSlimRaw, spArrange] = await Promise.all([
+  const [textageMeta, ratingJson, zasaRaw, band1, band2, band3, featScoresJson, rateRef, spSlimRaw, spArrange, spRateRefRaw] = await Promise.all([
     fetchJson(`${GIST_RAW}/textage-meta.json${bust}`),
     fetchJson(`${GIST_RAW}/ohSorryRating.json${bust}`),
     fetchJson(`${GIST_RAW}/zasa-data.json${bust}`),
@@ -51,7 +51,10 @@ export async function loadPersonaResources() {
     // SP persona 용 — 실패해도 DP 는 계속(spKeymaps null → spPersona 생략).
     fetchJson(`${GIST_RAW}/sp-feature-scores-slim.json${bust}`).catch(() => null),
     fetchJson(`${GIST_RAW}/sp-arrange.json${bust}`).catch(() => null),
+    fetchJson(`${GIST_RAW}/sp-rate-reference.json${bust}`).catch(() => null),   // SP 스코어링 마스터용 인구 rate 기준(gameLevel별). 없으면 SP overallResid null
   ]);
+  // SP rate 인구 기준 — gameLevel(int) → 평균 rate. spPersonaFor 가 SP overallResid(스코어링 마스터) 계산에 사용.
+  const spRateRef = (spRateRefRaw && spRateRefRaw.byGameLevel) ? spRateRefRaw.byGameLevel : null;
   const patternsMap = {};
   for (const band of [band1, band2, band3]) {
     for (const sid in band) {
@@ -97,7 +100,7 @@ export async function loadPersonaResources() {
     weaknessLib, personaLib, norm, textageMeta,
     ratingData: ratingJson.ratings,
     zasaData: Array.isArray(zasaRaw.charts) ? zasaRaw.charts : zasaRaw,
-    patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps,
+    patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef,
   };
 }
 
@@ -276,16 +279,17 @@ function computeSpBpmProfile(rows, bpmByNorm) {
 }
 
 // SP 차트 배열 → spPersona 필드. 표본/키맵 부족 시 null.
-// SP lamp 통계 (풀콤보/EX하드 마스터 칭호용) — ownSp 곡 단위 FC/PFC·EX하드+ 비중.
+// SP lamp 통계 (풀콤보/EX하드 마스터 칭호용) — **SP12(gameLevel 12) 곡** 중 FC/PFC·EX하드+ 비중.
+//   "SP12 곡의 80% 이상이 그 램프"면 칭호. 12레벨 표본 <10 이면 null(소표본 노이즈 방지).
 function spLampStats(ownSp) {
   let fc = 0, exh = 0, tot = 0;
   for (const c of ownSp) {
-    if (!c || !c.title || !c.diff) continue;
+    if (!c || !c.title || !c.diff || c.gameLevel !== 12) continue;   // SP12 곡만
     tot++; const ln = c.lampNum || 0;
     if (ln >= 7) fc++;
     if (ln >= 6) exh++;
   }
-  return tot > 0 ? { fcShare: fc / tot, exhShare: exh / tot, tot } : null;
+  return tot >= 10 ? { fcShare: fc / tot, exhShare: exh / tot, tot } : null;
 }
 
 export function spPersonaFor(ownSp, R) {
@@ -294,9 +298,18 @@ export function spPersonaFor(ownSp, R) {
   if (resid.length < MIN_CHARTS) return null;
   const feats = spFeatAptitude(resid);
   if (!feats) return null;
+  // SP overallResid — 인구 rate 기준(gameLevel별) 대비 잔차 평균. 스코어링 마스터(SP) 판정용.
+  //   feats/profiles 는 self-relative(유저 내 gameLevel 중심) 유지 — overallResid 만 인구 대비(spRateRef).
+  let spOverallResid = null;
+  if (R.spRateRef) {
+    let s = 0, n = 0;
+    for (const r of resid) { const pm = R.spRateRef[r.gl]; if (typeof pm === 'number') { s += r.rate - pm; n++; } }
+    if (n) spOverallResid = s / n;
+  }
   const profile = {
     nCharts: ownSp.length,
-    overallResid: null,   // self-relative — 램프/스코어 지향 판정 생략(스코어링 마스터도 자동 부적용)
+    isSp: true,                   // 스코어링 마스터 SP 임계(scoreMasterSp) 분기용
+    overallResid: spOverallResid, // 인구 rate 기준 대비(있으면 스코어링/만능 판정). 램프/스코어 지향 문구는 아래서 별도 억제
     feats, mirror: null, featsL: null, featsR: null,
     lampStats: spLampStats(ownSp),   // 풀콤보/EX하드 마스터 칭호 (SP scores lamp 비중)
     bpmProfile: computeSpBpmProfile(resid, R.spKeymaps.bpmByNorm),
