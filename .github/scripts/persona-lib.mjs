@@ -323,9 +323,11 @@ export function spPersonaFor(ownSp, R) {
   };
   const rich = R.personaLib.richReportOf(profile);
   const P = rich.persona;
+  const i18n = {};   // ja/en 본문(head/report) — 웹 언어 버튼용. ko 는 최상위 head/report.
+  for (const lang of ['ja', 'en']) { const r = R.personaLib.richReportOf(profile, lang); i18n[lang] = { head: r.head, report: r.report }; }
   return {
     head: rich.head, oneLiner: P.oneLiner, prose: P.prose, report: rich.report,
-    tags: P.tags, nCharts: ownSp.length, _v: new Date().toISOString(),
+    tags: P.tags, nCharts: ownSp.length, _v: new Date().toISOString(), i18n,
   };
 }
 
@@ -389,8 +391,10 @@ export function personaFor(allCharts, R) {
   };
   const rich = R.personaLib.richReportOf(profile);
   const P = rich.persona;
+  const i18n = {};   // ja/en 본문(head/report) — 웹 언어 버튼용. ko 는 최상위 head/report.
+  for (const lang of ['ja', 'en']) { const r = R.personaLib.richReportOf(profile, lang); i18n[lang] = { head: r.head, report: r.report }; }
   return {
     head: rich.head, oneLiner: P.oneLiner, prose: P.prose, report: rich.report,
-    tags: P.tags, nCharts: allCharts.length, _v: new Date().toISOString(),
+    tags: P.tags, nCharts: allCharts.length, _v: new Date().toISOString(), i18n,
   };
 }
