@@ -34,17 +34,29 @@ jobs:
 
       - name: Commit & push
         run: |
-          if [ -z "$(git status --porcelain)" ]; then echo "변경 없음 — skip"; exit 0; fi
+          if [ -z "$(git status --porcelain user/)" ]; then echo "변경 없음 — skip"; exit 0; fi
           git config user.name "ohsorry-bot"
           git config user.email "hanekawa4365@gmail.com"
-          git add user/
-          git commit -m "auto dump: $IIDX_ID"
-          # 다른 유저 Action 과 동시 push 충돌 대비 rebase + 재시도.
+          # 산출물을 임시 보관 — push 충돌 시 origin 최신 위에 재적용.
+          #   users-list.json 은 단일 라인 JSON 이라 rebase 로는 병합 불가 → 매 시도마다
+          #   origin/main 으로 reset 후 유저 파일 복원 + 목록 재병합으로 충돌 자체를 회피.
+          cp "user/$IIDX_ID.json" /tmp/dump-user-artifact.json
           for i in 1 2 3 4 5; do
-            git pull --rebase --autostash origin main && git push && exit 0
+            git fetch origin main
+            git reset --hard origin/main
+            cp /tmp/dump-user-artifact.json "user/$IIDX_ID.json"
+            # 유저 목록에도 즉시 병합 — dump-users-list cron 이 GitHub 스로틀로 1~3시간
+            # 밀려 신규 유저가 목록에 안 보이던 문제 해소(cron 은 전체 정합성 보정용 유지).
+            node .github/scripts/merge-user-into-list.mjs "user/$IIDX_ID.json"
+            if [ -z "$(git status --porcelain)" ]; then echo "변경 없음 — skip"; exit 0; fi
+            git add user/ users-list.json
+            git commit -m "auto dump: $IIDX_ID"
+            git push && exit 0
             echo "push 재시도 $i"; sleep 3
           done
           echo "push 실패"; exit 1
 
       - name: Purge jsdelivr
-        run: curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/user/$IIDX_ID.json" || true
+        run: |
+          curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/user/$IIDX_ID.json" || true
+          curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/users-list.json" || true

@@ -9,7 +9,7 @@
   - dp/sp = **슬림 score row** `{ song_id, diff, lamp, ex_score, played_version, date }` — 곡메타(title/textage_song_id/series_no/ac/legen)는 중복 제거하고 아래 `songs.json` 으로 분리. 웹이 `song_id` 로 조인.
   - persona = **DP 성향 리포트** `{ head, oneLiner, prose, report, tags[], nCharts, _v }` — 웹훅 덤프 시 [persona-lib.mjs](.github/scripts/persona-lib.mjs) 가 gist 해석엔진(persona.js/calcWeakness.js)으로 즉시 생성. 표기용: head=헤드라인 한 줄, prose=서사 요약(X/OG 카드 ≤200자), report=상세 리포트 전문(🎯🎲⚡🛠✋📝). 표본 30차트 미만이면 null.
 - `songs.json` — 곡 마스터(공유) `[{ song_id, title, ac, legen, textage_song_id, series_no }]`. 웹 `getSongsCache` 가 supabase 대신 이걸 읽음. cron(5분) 갱신.
-- `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). 집계라 **cron Action(5분)** 으로 갱신.
+- `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). 집계라 **cron Action(5분)** 으로 갱신 + **webhook 덤프(dump-user) 시 해당 유저 1명 즉시 병합**([merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs) — GitHub cron 스로틀(실제 1~3시간 지연)로 신규 유저가 목록에 안 보이던 문제 대응).
 - `version.json` — 전체 덤프 타임스탬프 + 유저 수
 
 ## 생성/갱신
@@ -35,3 +35,10 @@
 https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/user/{iidx_id}.json
 https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/version.json
 ```
+
+## 변경 이력
+
+### 2026-07-17 — webhook 덤프 시 users-list.json 즉시 병합
+- 신규 유저(특히 SP 입력)가 유저 목록에 한참 안 보이던 문제: users-list cron(`*/5`)이 GitHub Actions 스로틀로 실제 1~3시간 간격 실행되던 것이 원인(별값 계산 자체는 정상).
+- [dump-user.yml](.github/workflows/dump-user.yml): 유저 덤프 push 시 [merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs)(신규)로 해당 유저 1명을 users-list.json 에도 병합 + jsdelivr purge 추가. 목록 실시간화(전체 정합성은 기존 cron 이 계속 보정).
+- push 재시도 방식 변경: rebase → **origin/main reset 후 재적용**(users-list.json 이 단일 라인 JSON 이라 동시 실행 간 rebase 병합 불가 → 충돌 자체를 회피).
