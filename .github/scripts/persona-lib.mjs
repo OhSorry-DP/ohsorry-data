@@ -276,6 +276,18 @@ function computeSpBpmProfile(rows, bpmByNorm) {
 }
 
 // SP 차트 배열 → spPersona 필드. 표본/키맵 부족 시 null.
+// SP lamp 통계 (풀콤보/EX하드 마스터 칭호용) — ownSp 곡 단위 FC/PFC·EX하드+ 비중.
+function spLampStats(ownSp) {
+  let fc = 0, exh = 0, tot = 0;
+  for (const c of ownSp) {
+    if (!c || !c.title || !c.diff) continue;
+    tot++; const ln = c.lampNum || 0;
+    if (ln >= 7) fc++;
+    if (ln >= 6) exh++;
+  }
+  return tot > 0 ? { fcShare: fc / tot, exhShare: exh / tot, tot } : null;
+}
+
 export function spPersonaFor(ownSp, R) {
   if (!R.spKeymaps || !Array.isArray(ownSp) || ownSp.length < MIN_CHARTS) return null;
   const resid = spResidRows(ownSp, R);
@@ -284,8 +296,9 @@ export function spPersonaFor(ownSp, R) {
   if (!feats) return null;
   const profile = {
     nCharts: ownSp.length,
-    overallResid: null,   // self-relative — 램프/스코어 지향 판정 생략
+    overallResid: null,   // self-relative — 램프/스코어 지향 판정 생략(스코어링 마스터도 자동 부적용)
     feats, mirror: null, featsL: null, featsR: null,
+    lampStats: spLampStats(ownSp),   // 풀콤보/EX하드 마스터 칭호 (SP scores lamp 비중)
     bpmProfile: computeSpBpmProfile(resid, R.spKeymaps.bpmByNorm),
     kensei: computeSpKensei(resid),
     scratchProfile: tierProfileOf(resid, (sc) => { const sr = sc.SARA_RHYTHM; if (!sr || (sr.rollN || 0) < 20) return null; return tierSharesOfHist(sr.ioiSec); }),
