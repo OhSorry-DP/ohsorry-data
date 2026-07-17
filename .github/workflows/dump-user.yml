@@ -56,7 +56,22 @@ jobs:
           done
           echo "push 실패"; exit 1
 
-      - name: Purge jsdelivr
+      - name: Purge jsdelivr (검증-재시도)
+        # push 직후 즉시 purge 는 jsdelivr 오리진이 아직 구 커밋을 물고 있을 때 구본을 재캐시해
+        # 최대 12h stale 로 고착되는 레이스가 있음(2026-07-17 유저 5명 실증 — 재purge 로 해소).
+        # → purge 후 CDN 내용(sha1)을 로컬 파일과 대조, 불일치면 재purge(최대 5회).
         run: |
-          curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/user/$IIDX_ID.json" || true
-          curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/users-list.json" || true
+          purge_verify() {
+            local f="$1"
+            local want; want=$(sha1sum "$f" | cut -d' ' -f1)
+            for i in 1 2 3 4 5; do
+              curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/$f" > /dev/null || true
+              sleep 5
+              local got; got=$(curl -s "https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/$f" | sha1sum | cut -d' ' -f1)
+              if [ "$got" = "$want" ]; then echo "purge OK(시도 $i): $f"; return 0; fi
+              echo "purge 불일치 — 재시도 $i: $f"
+            done
+            echo "::warning::purge 검증 실패(최대 12h stale 가능): $f"
+          }
+          purge_verify "user/$IIDX_ID.json"
+          purge_verify "users-list.json"

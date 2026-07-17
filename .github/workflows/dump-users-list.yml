@@ -40,5 +40,18 @@ jobs:
             git pull --rebase --autostash origin main && git push && break
             echo "push 재시도 $i"; sleep 3
           done
-          curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/users-list.json" || true
-          curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/songs.json" || true
+          # purge 검증-재시도 — push 직후 즉시 purge 가 구본을 재캐시하는 레이스 방지(dump-user.yml 과 동일).
+          purge_verify() {
+            local f="$1"
+            local want; want=$(sha1sum "$f" | cut -d' ' -f1)
+            for i in 1 2 3 4 5; do
+              curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/$f" > /dev/null || true
+              sleep 5
+              local got; got=$(curl -s "https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/$f" | sha1sum | cut -d' ' -f1)
+              if [ "$got" = "$want" ]; then echo "purge OK(시도 $i): $f"; return 0; fi
+              echo "purge 불일치 — 재시도 $i: $f"
+            done
+            echo "::warning::purge 검증 실패(최대 12h stale 가능): $f"
+          }
+          purge_verify "users-list.json"
+          purge_verify "songs.json"

@@ -38,6 +38,10 @@ https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/version.json
 
 ## 변경 이력
 
+### 2026-07-17 — jsdelivr purge 검증-재시도 (stale 고착 방지)
+- push 직후 즉시 purge 가 jsdelivr 오리진의 구 커밋을 재캐시해 **최대 12h stale 로 고착**되는 레이스 실증(유저 5명 — 서열표/카드에 신규 데이터 미반영, "하나도 안 뜸" 증상). 재purge 로 즉시 해소됨을 확인.
+- [dump-user.yml](.github/workflows/dump-user.yml) / [dump-users-list.yml](.github/workflows/dump-users-list.yml): purge 후 CDN 내용 sha1 을 로컬 파일과 대조, 불일치 시 재purge(최대 5회, 5초 간격). 실패 시 warning annotation.
+
 ### 2026-07-17 — webhook 덤프 시 users-list.json 즉시 병합
 - 신규 유저(특히 SP 입력)가 유저 목록에 한참 안 보이던 문제: users-list cron(`*/5`)이 GitHub Actions 스로틀로 실제 1~3시간 간격 실행되던 것이 원인(별값 계산 자체는 정상).
 - [dump-user.yml](.github/workflows/dump-user.yml): 유저 덤프 push 시 [merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs)(신규)로 해당 유저 1명을 users-list.json 에도 병합 + jsdelivr purge 추가. 목록 실시간화(전체 정합성은 기존 cron 이 계속 보정).
