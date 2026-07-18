@@ -43,7 +43,7 @@ const slimRow = (r) => { const o = {}; for (const k of SCORE_KEEP) if (r[k] !== 
 
 async function dumpUser(id, personaRes) {
   const eid = encodeURIComponent(id);
-  const [user, radars, osPattern, dp, sp, dpRecent] = await Promise.all([
+  const [user, radars, osPattern, dp, sp, dpRecent, spRecent] = await Promise.all([
     // dbr_pw 는 비밀(공개 repo·anon 노출 금지) → 명시 컬럼만 select(select=* 금지).
     rest(`users?iidx_id=eq.${eid}&select=iidx_id,dj_name,star,ereter_star,sp_rank,dp_rank,date,native_star,sp_cpi,sp_star`),
     rest(`user_radars?iidx_id=eq.${eid}&select=*`),
@@ -51,6 +51,7 @@ async function dumpUser(id, personaRes) {
     rpcGrid(id, 1),
     rpcGrid(id, 0).catch(() => []),
     rpcUpdateHistory(id, 1).catch(() => null),   // DP 갱신 이력 — RPC 미적용/실패 시 null(필드 생략)
+    rpcUpdateHistory(id, 0).catch(() => null),   // SP 갱신 이력 — SP 연습추천 피처 recency 용
   ]);
   // ── persona (DP)/spPersona (SP) 성향 리포트 — raw grid rows 로 슬림 전에 산출. 실패해도 덤프 자체는 계속(기존값 유지). ──
   let persona = null, spPersona = null;
@@ -69,8 +70,9 @@ async function dumpUser(id, personaRes) {
   return {
     _v: new Date().toISOString(), user: user[0] || null, radars, osPattern, persona, spPersona,
     dp: dp.map(slimRow), sp: sp.map(slimRow),
-    // 최근 92일 갱신 이력 [{song_id,diff,date_kst}] — ④ 피처 recency. null 이면 키 생략(웹이 RPC fallback).
+    // 최근 92일 갱신 이력 [{song_id,diff,date_kst}] — ④/SP연습 피처 recency. null 이면 키 생략(웹이 RPC fallback).
     ...(dpRecent ? { dpRecent } : {}),
+    ...(spRecent ? { spRecent } : {}),
   };
 }
 

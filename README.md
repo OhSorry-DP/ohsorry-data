@@ -38,8 +38,8 @@ https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/version.json
 
 ## 변경 이력
 
-### 2026-07-18 — dump-user 에 dpRecent(최근 92일 갱신 이력) 필드 추가
-- [dump-user.mjs](.github/scripts/dump-user.mjs): `make_update_history` RPC(ohSorryAdmin sql/10)로 최근 92일 DP 갱신 이력 `[{song_id,diff,date_kst}]` 을 `dpRecent` 필드로 덤프 — 웹 ④ 연습추천 피처 recency(방치 가점/집중 감점)가 소비. RPC 미적용/실패 시 필드 생략(웹이 RPC fallback → 그것도 실패면 가점 0).
+### 2026-07-18 — dump-user 에 dpRecent/spRecent(최근 92일 갱신 이력) 필드 추가
+- [dump-user.mjs](.github/scripts/dump-user.mjs): `make_update_history` RPC(ohSorryAdmin sql/10)로 최근 92일 갱신 이력 `[{song_id,diff,date_kst}]` 을 `dpRecent`(DP, ps=1) / `spRecent`(SP, ps=0) 필드로 덤프 — 웹 ④(DP)·SP 연습추천 피처 recency(방치 가점/집중 감점)가 소비. RPC 미적용/실패 시 필드 생략(웹이 RPC fallback → 그것도 실패면 가점 0).
 
 ### 2026-07-17 — jsdelivr purge 검증-재시도 (stale 고착 방지)
 - push 직후 즉시 purge 가 jsdelivr 오리진의 구 커밋을 재캐시해 **최대 12h stale 로 고착**되는 레이스 실증(유저 5명 — 서열표/카드에 신규 데이터 미반영, "하나도 안 뜸" 증상). 재purge 로 즉시 해소됨을 확인.
