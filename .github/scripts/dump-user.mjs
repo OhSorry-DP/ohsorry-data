@@ -14,6 +14,16 @@ async function rest(pathq) {
   if (!r.ok) throw new Error(pathq + ' HTTP ' + r.status);
   return r.json();
 }
+// make_update_history RPC — 최근 92일 갱신(향상) 이력 (song_id, diff, date_kst).
+//   웹 ④ 연습추천 피처 recency(방치 가점/집중 감점)용. RPC 미적용(404 등)이면 null — 필드 생략(웹이 RPC fallback).
+async function rpcUpdateHistory(id, ps) {
+  const r = await fetch(SB + '/rest/v1/rpc/make_update_history', {
+    method: 'POST', headers: H, body: JSON.stringify({ p_iidx_id: id, p_days: 92, p_play_style: ps }),
+  });
+  if (!r.ok) return null;
+  const rows = await r.json();
+  return Array.isArray(rows) ? rows : null;
+}
 // make_grid_data RPC — 웹 fetchGridData 와 동일(p_iidx_id, p_play_style, limit/offset 페이징).
 async function rpcGrid(id, ps) {
   const out = []; let off = 0;
@@ -33,13 +43,14 @@ const slimRow = (r) => { const o = {}; for (const k of SCORE_KEEP) if (r[k] !== 
 
 async function dumpUser(id, personaRes) {
   const eid = encodeURIComponent(id);
-  const [user, radars, osPattern, dp, sp] = await Promise.all([
+  const [user, radars, osPattern, dp, sp, dpRecent] = await Promise.all([
     // dbr_pw 는 비밀(공개 repo·anon 노출 금지) → 명시 컬럼만 select(select=* 금지).
     rest(`users?iidx_id=eq.${eid}&select=iidx_id,dj_name,star,ereter_star,sp_rank,dp_rank,date,native_star,sp_cpi,sp_star`),
     rest(`user_radars?iidx_id=eq.${eid}&select=*`),
     rest(`user_ohsorry_radars?iidx_id=eq.${eid}&play_style=eq.1&select=*`),
     rpcGrid(id, 1),
     rpcGrid(id, 0).catch(() => []),
+    rpcUpdateHistory(id, 1).catch(() => null),   // DP 갱신 이력 — RPC 미적용/실패 시 null(필드 생략)
   ]);
   // ── persona (DP)/spPersona (SP) 성향 리포트 — raw grid rows 로 슬림 전에 산출. 실패해도 덤프 자체는 계속(기존값 유지). ──
   let persona = null, spPersona = null;
@@ -55,7 +66,12 @@ async function dumpUser(id, personaRes) {
     console.error('spPersona 산출 실패(' + id + '):', e.message);
     try { spPersona = JSON.parse(fs.readFileSync(`user/${id}.json`, 'utf8')).spPersona || null; } catch { /* 기존 파일 없음 */ }
   }
-  return { _v: new Date().toISOString(), user: user[0] || null, radars, osPattern, persona, spPersona, dp: dp.map(slimRow), sp: sp.map(slimRow) };
+  return {
+    _v: new Date().toISOString(), user: user[0] || null, radars, osPattern, persona, spPersona,
+    dp: dp.map(slimRow), sp: sp.map(slimRow),
+    // 최근 92일 갱신 이력 [{song_id,diff,date_kst}] — ④ 피처 recency. null 이면 키 생략(웹이 RPC fallback).
+    ...(dpRecent ? { dpRecent } : {}),
+  };
 }
 
 const ids = process.argv.slice(2).filter(Boolean);
