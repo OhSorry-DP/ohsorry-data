@@ -38,6 +38,13 @@ https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/version.json
 
 ## 변경 이력
 
+### 2026-07-25 — users-list cron 간격 5분 → 15분
+
+- [dump-users-list.yml](.github/workflows/dump-users-list.yml): `*/5` → `*/15`.
+- 이유: `*/5` 로 적혀 있어도 GitHub Actions 스로틀로 **실제 실행이 57분~4시간 49분 간격**이었다(실측 2026-07-24: 04:21 → 09:10 = 4h49m, 하루 10여 회). 워크플로 실패는 0건 — 실행 자체가 드롭된 것.
+- 고빈도 `schedule` 일수록 드롭 비율이 높으므로 **간격을 낮춰 실행률을 높이는 쪽**이 실질 반영이 빠르다. 표기와 실제의 괴리도 줄어든다.
+- 목록 실시간성은 이 cron 이 아니라 webhook 병합(2026-07-17 `merge-user-into-list.mjs`)이 담당한다. 이 cron 은 전체 정합성 보정용.
+
 ### 2026-07-18 — dump-user 에 dpRecent/spRecent(최근 92일 갱신 이력) 필드 추가
 - [dump-user.mjs](.github/scripts/dump-user.mjs): `make_update_history` RPC(ohSorryAdmin sql/10)로 최근 92일 갱신 이력 `[{song_id,diff,date_kst}]` 을 `dpRecent`(DP, ps=1) / `spRecent`(SP, ps=0) 필드로 덤프 — 웹 ④(DP)·SP 연습추천 피처 recency(방치 가점/집중 감점)가 소비. RPC 미적용/실패 시 필드 생략(웹이 RPC fallback → 그것도 실패면 가점 0).
 

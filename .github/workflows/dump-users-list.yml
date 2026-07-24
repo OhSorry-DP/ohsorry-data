@@ -1,10 +1,13 @@
 name: dump-users-list
 
 # 전 유저 목록(users-list.json) 주기 재생성 — 웹 fetchAllUsers 의 jsdelivr 소스.
-# 유저별 카드(user/{id}.json)는 webhook 실시간, 목록은 집계라 5분 cron(변경 시에만 commit).
+# 유저별 카드(user/{id}.json)는 webhook 실시간, 목록도 webhook 시 해당 유저만 즉시 병합
+# (merge-user-into-list.mjs). 이 cron 은 **전체 정합성 보정용**이라 15분 간격(변경 시에만 commit).
+#   ⚠️ '*/5' 였을 때 GitHub Actions 스로틀로 실제 1~5시간 간격 실행됨(실측: 04:21→09:10 = 4h49m).
+#      고빈도 schedule 일수록 드롭 비율이 높아 오히려 간격이 벌어진다 → 15분으로 낮춰 실행률을 높인다.
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch: {}   # 수동 실행도 가능
 
 concurrency:
