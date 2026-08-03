@@ -175,7 +175,10 @@ function spFeatAptitude(residRows) {
     }
     n++;
   }
-  if (n < MIN_CHARTS) return null;
+  // 표본 하한 없음 — DP(personaFor)와 대칭. DP 는 "친 곡 30곡" 게이트 하나뿐이고 계산 표본에 추가 하한을
+  //   두지 않는다. SP 만 여기와 spPersonaFor 에 resid 30 게이트가 더 있어, SP 를 587곡 친 유저도 SP12
+  //   feature score 매칭이 24곡이면 리포트가 안 나왔다(LIMT./1899/VVV). 0곡일 때만 막는다.
+  if (n === 0) return null;
   const prof = {}; for (const f of SP_FEATS) prof[f] = wsum[f] > 0 ? acc[f] / wsum[f] : 0; return prof;
 }
 function spKeyRhythmHist(sc, blocks) {
@@ -293,9 +296,11 @@ function spLampStats(ownSp) {
 }
 
 export function spPersonaFor(ownSp, R) {
+  // 게이트는 "친 SP 곡 30곡"(ownSp) 하나뿐 — DP(personaFor)와 대칭.
+  //   과거엔 resid(= SP feature score 매칭 + exScore>0, 사실상 SP12 중심) 에도 30 하한이 있어, SP 를
+  //   587곡 친 유저가 매칭 24곡이라는 이유로 리포트를 못 받았다. SP12 를 30곡 안 쳐도 생성한다.
   if (!R.spKeymaps || !Array.isArray(ownSp) || ownSp.length < MIN_CHARTS) return null;
   const resid = spResidRows(ownSp, R);
-  if (resid.length < MIN_CHARTS) return null;
   const feats = spFeatAptitude(resid);
   if (!feats) return null;
   // SP overallResid — 인구 rate 기준(gameLevel별) 대비 잔차 평균. 스코어링 마스터(SP) 판정용.
