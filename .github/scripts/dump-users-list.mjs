@@ -21,11 +21,17 @@ async function fetchAllUsers() {
     if (!res.ok) throw new Error(`users 목록 HTTP ${res.status}`);
     const rows = await res.json();
     for (const u of rows) {
-      const dp = Array.isArray(u.user_ohsorry_radars) ? u.user_ohsorry_radars.find((r) => r.play_style === 1) : null;
-      u.os_pattern_score = dp ? {
-        NOTES: dp.notes, CHORD: dp.chord, PEAK: dp.peak, CHARGE: dp.charge, SCRATCH: dp.scratch,
-        'SOF-LAN': dp.soflan, PHRASE: dp.phrase, JACK: dp.jack, TRILL: dp.trill, RAND: dp.rand,
-      } : null;
+      const radars = Array.isArray(u.user_ohsorry_radars) ? u.user_ohsorry_radars : [];
+      // play_style 로 명시 매칭 — 배열에 SP/DP 두 행이 함께 오므로 순서에 기대면 값이 뒤섞인다.
+      const pick = (ps) => {
+        const r = radars.find((x) => x.play_style === ps);
+        return r ? {
+          NOTES: r.notes, CHORD: r.chord, PEAK: r.peak, CHARGE: r.charge, SCRATCH: r.scratch,
+          'SOF-LAN': r.soflan, PHRASE: r.phrase, JACK: r.jack, TRILL: r.trill, RAND: r.rand,
+        } : null;
+      };
+      u.os_pattern_score = pick(1);      // DP
+      u.sp_pattern_score = pick(0);      // SP — 웹 SP 분석탭 피처별 랭킹/percentile 모수
       delete u.user_ohsorry_radars;
     }
     out.push(...rows);

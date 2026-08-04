@@ -38,6 +38,12 @@ https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/version.json
 
 ## 변경 이력
 
+### 2026-08-04 — SP 오소리 피처 스코어 덤프 (`sp_pattern_score` / osPattern 두 행)
+- [dump-user.mjs](.github/scripts/dump-user.mjs): `user_ohsorry_radars` 조회에서 **`play_style=eq.1` 필터 제거** → `osPattern` 에 SP(0)/DP(1) **두 행**이 담긴다. 오소리웹 SP 분석탭의 피처별 랭킹/상대평가용.
+- [merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs) · [dump-users-list.mjs](.github/scripts/dump-users-list.mjs): users-list 엔트리에 **`sp_pattern_score`**(play_style=0 의 10 피처) 추가. 기존 `os_pattern_score`(DP)도 `play_style` **명시 매칭**으로 정리.
+- ⚠️ **소비처는 반드시 `play_style` 로 골라야 한다.** 배열 순서에 기대면 SP 값이 DP 자리로 들어간다 — 웹 `osPatternFromRows` 가 `rows[0]` 을 쓰고 있어 같이 고쳤다(ohSorryWeb 2026-08-04).
+- 짝 변경: ohSorry dbConn 0.0.414(SP 계산·적재), ohSorryAdmin `sql/12_sp_feature_score.sql` + `dump-data-repo.js`, ohSorryRating SP 백필.
+
 ### 2026-07-25 — users-list cron 간격 5분 → 15분 → 30분
 
 - [dump-users-list.yml](.github/workflows/dump-users-list.yml): `*/5` → `*/15` → `*/30`.

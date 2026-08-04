@@ -13,16 +13,22 @@ const dump = JSON.parse(fs.readFileSync(path, 'utf8'));
 const u = dump.user;
 if (!u) { console.log('user 없음 — 목록 병합 skip'); process.exit(0); }
 
-// os_pattern_score — dump 의 osPattern(user_ohsorry_radars play_style=1) 에서 10 feature 추출.
-//   dump-users-list.mjs 의 nested select 추출과 동일 키.
-const dp = (Array.isArray(dump.osPattern) ? dump.osPattern : []).find((r) => r.play_style === 1) || null;
+// os_pattern_score(DP) / sp_pattern_score(SP) — dump 의 osPattern(user_ohsorry_radars 양쪽 play_style)에서 10 feature 추출.
+//   dump-users-list.mjs 의 nested select 추출과 동일 키. play_style 로 명시 매칭할 것 —
+//   배열에 SP/DP 두 행이 함께 오므로 순서에 기대면 SP 값이 DP 자리로 들어간다.
+const radars = Array.isArray(dump.osPattern) ? dump.osPattern : [];
+const pick = (ps) => {
+  const r = radars.find((x) => x.play_style === ps);
+  return r ? {
+    NOTES: r.notes, CHORD: r.chord, PEAK: r.peak, CHARGE: r.charge, SCRATCH: r.scratch,
+    'SOF-LAN': r.soflan, PHRASE: r.phrase, JACK: r.jack, TRILL: r.trill, RAND: r.rand,
+  } : null;
+};
 const entry = {
   iidx_id: u.iidx_id, dj_name: u.dj_name, star: u.star, ereter_star: u.ereter_star,
   sp_rank: u.sp_rank, dp_rank: u.dp_rank, sp_cpi: u.sp_cpi, sp_star: u.sp_star, date: u.date,
-  os_pattern_score: dp ? {
-    NOTES: dp.notes, CHORD: dp.chord, PEAK: dp.peak, CHARGE: dp.charge, SCRATCH: dp.scratch,
-    'SOF-LAN': dp.soflan, PHRASE: dp.phrase, JACK: dp.jack, TRILL: dp.trill, RAND: dp.rand,
-  } : null,
+  os_pattern_score: pick(1),
+  sp_pattern_score: pick(0),
 };
 
 let list = [];
