@@ -56,22 +56,23 @@ jobs:
           done
           echo "push 실패"; exit 1
 
-      - name: Purge jsdelivr (검증-재시도)
-        # push 직후 즉시 purge 는 jsdelivr 오리진이 아직 구 커밋을 물고 있을 때 구본을 재캐시해
-        # 최대 12h stale 로 고착되는 레이스가 있음(2026-07-17 유저 5명 실증 — 재purge 로 해소).
-        # → purge 후 CDN 내용(sha1)을 로컬 파일과 대조, 불일치면 재purge(최대 5회).
+      - name: Upload to R2 (data.iidx.in)
+        # 서빙은 R2(cf/ Worker → data.iidx.in). git 은 이력·롤백용 원본으로 남긴다.
+        #   종전 jsdelivr purge 를 대체 — `@main` 별칭 해석 캐시(12h)를 purge API 로는 못 풀어
+        #   push 직후 purge 가 구본을 12h 고착시키는 사고가 두 번 났다(2026-07-17 / 2026-08-04).
+        #   R2 는 별칭 개념이 없어 PUT 즉시 반영이고, 캐시 정책도 Worker 가 쥔다.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
         run: |
-          purge_verify() {
-            local f="$1"
-            local want; want=$(sha1sum "$f" | cut -d' ' -f1)
-            for i in 1 2 3 4 5; do
-              curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/$f" > /dev/null || true
-              sleep 5
-              local got; got=$(curl -s "https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/$f" | sha1sum | cut -d' ' -f1)
-              if [ "$got" = "$want" ]; then echo "purge OK(시도 $i): $f"; return 0; fi
-              echo "purge 불일치 — 재시도 $i: $f"
-            done
-            echo "::warning::purge 검증 실패(최대 12h stale 가능): $f"
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — R2 업로드 skip(덤프·push 는 정상)"; exit 0
+          fi
+          put() {
+            npx --yes wrangler@4 r2 object put "ohsorry-data/$1" --file="$1" \
+              --content-type="application/json; charset=utf-8" --remote || {
+                echo "::warning::R2 업로드 실패: $1"; return 1; }
+            echo "R2 OK: $1"
           }
-          purge_verify "user/$IIDX_ID.json"
-          purge_verify "users-list.json"
+          put "user/$IIDX_ID.json"
+          put "users-list.json"

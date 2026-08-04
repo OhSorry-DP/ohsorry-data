@@ -1,0 +1,18 @@
+name = "ohsorry-data"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+account_id = "607eea1b073bea6747e6e9b76f2d7b41"
+
+# ── 커스텀 도메인 (data.iidx.in) — wrangler가 DNS·SSL 자동 생성 ──
+#    training.iidx.in(ohsorryTraining/cf) 과 같은 방식.
+routes = [
+  { pattern = "data.iidx.in", custom_domain = true },
+]
+
+# ── R2: 유저 덤프 정적 데이터 (user/{id}.json, users-list.json, songs.json, version.json) ──
+# 생성: wrangler r2 bucket create ohsorry-data
+#   원본(정본)은 이 repo 의 git 이력. R2 는 그 사본을 뿌리는 서빙 계층일 뿐이라
+#   덤프 로직 사고 시 복구는 git 에서 한다(R2 는 객체 버저닝 없음).
+[[r2_buckets]]
+binding = "DATA"
+bucket_name = "ohsorry-data"

@@ -43,18 +43,22 @@ jobs:
             git pull --rebase --autostash origin main && git push && break
             echo "push 재시도 $i"; sleep 3
           done
-          # purge 검증-재시도 — push 직후 즉시 purge 가 구본을 재캐시하는 레이스 방지(dump-user.yml 과 동일).
-          purge_verify() {
-            local f="$1"
-            local want; want=$(sha1sum "$f" | cut -d' ' -f1)
-            for i in 1 2 3 4 5; do
-              curl -sS "https://purge.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/$f" > /dev/null || true
-              sleep 5
-              local got; got=$(curl -s "https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/$f" | sha1sum | cut -d' ' -f1)
-              if [ "$got" = "$want" ]; then echo "purge OK(시도 $i): $f"; return 0; fi
-              echo "purge 불일치 — 재시도 $i: $f"
-            done
-            echo "::warning::purge 검증 실패(최대 12h stale 가능): $f"
+
+      - name: Upload to R2 (data.iidx.in)
+        # 서빙은 R2(cf/ Worker → data.iidx.in). git 은 이력·롤백용 원본으로 남긴다.
+        #   종전 jsdelivr purge 를 대체 — 상세 경위는 dump-user.yml 의 같은 스텝 주석 참고.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — R2 업로드 skip(덤프·push 는 정상)"; exit 0
+          fi
+          put() {
+            npx --yes wrangler@4 r2 object put "ohsorry-data/$1" --file="$1" \
+              --content-type="application/json; charset=utf-8" --remote || {
+                echo "::warning::R2 업로드 실패: $1"; return 1; }
+            echo "R2 OK: $1"
           }
-          purge_verify "users-list.json"
-          purge_verify "songs.json"
+          put "users-list.json"
+          put "songs.json"
