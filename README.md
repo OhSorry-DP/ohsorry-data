@@ -30,13 +30,39 @@
    - Type `HTTP Request`, Method `POST`, URL `https://ohsorry.iidx.in/api/dump-trigger`
    - HTTP Header `x-webhook-secret: <위 WEBHOOK_SECRET 와 동일값>`
 
-## 서빙 (jsdelivr)
+## 서빙 (Cloudflare R2 + Worker)
 ```
-https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/user/{iidx_id}.json
-https://cdn.jsdelivr.net/gh/OhSorry-DP/ohsorry-data@main/version.json
+https://data.iidx.in/user/{iidx_id}.json
+https://data.iidx.in/users-list.json
+https://data.iidx.in/songs.json
+https://data.iidx.in/version.json
 ```
+- Worker 소스: [cf/](cf/) (`wrangler deploy`). R2 버킷 `ohsorry-data` 를 그대로 흘려보낸다.
+  허용 키만 통과(임의 객체 열람·path traversal 차단), CORS + etag 304 + `Cache-Control: max-age=60`.
+- **원본은 이 repo 의 git 이력이고 R2 는 서빙 사본이다.** R2 는 객체 버저닝이 없어
+  덤프 로직 사고 시 복구는 git 에서 한다(persona 37명 유실 전례).
+- Action 이 commit/push 후 `wrangler r2 object put` 으로 올린다 → **PUT 즉시 반영**(purge 불필요).
+  `CLOUDFLARE_API_TOKEN` secret 필요(R2 Object Read & Write). 미설정이면 warning 후 skip.
+
+> ⚠️ 종전 jsdelivr(`@main`) 는 2026-08-04 폐기. 브랜치 별칭은 "main=어느 커밋" 해석 결과를
+> 12h 캐시하는데(`x-jsd-version-type: branch` / `s-maxage=43200`) purge API 는 **파일 경로만**
+> 무효화해 그 별칭 캐시를 못 푼다. 그래서 push 직후 purge 를 걸면 아직 구 커밋을 물고 있던
+> 오리진이 구본을 재캐시하고 최대 12h 고착된다 — 아래 변경 이력의 두 사고가 모두 이것이다.
 
 ## 변경 이력
+
+### 2026-08-04 — 서빙을 jsdelivr → Cloudflare R2 + Worker (`data.iidx.in`) 로 이전
+- **문제**: jsdelivr `@main` 의 별칭 해석 캐시(12h)를 purge API 로 풀 수 없어, push 직후 purge 가
+  오히려 구본을 12h 고착시켰다. 2026-07-17(유저 5명)에 이어 2026-08-04 SP 랭킹 배포에서 재발 —
+  DB·GitHub·jsdelivr 오리진(`@커밋해시`)은 전부 최신인데 `@main` 만 구 커밋을 가리켰다.
+  재발 방지로 넣었던 `purge_verify` 5회 루프가 역설적으로 레이스를 키우고 있었다(45분 무효화 전례도 동일 원인).
+- **해결**: 서빙을 R2 로 옮기고 [cf/](cf/) Worker 가 `data.iidx.in` 으로 뿌린다. 별칭 개념이 없어
+  PUT 즉시 반영이고, 캐시 정책(`max-age=60` + etag 304)도 우리가 쥔다.
+  Worker 는 R2 객체를 JSON 파싱 없이 스트림 pass-through 라 무료 플랜(CPU 10ms/요청)으로 충분.
+- 워크플로 2종의 `purge_verify` → `wrangler r2 object put`. **git commit/push 는 그대로 유지** —
+  R2 는 객체 버저닝이 없어 롤백 수단이 git 이력뿐이다.
+- 초기 업로드: `user/` 358 + `users-list`/`songs`/`version` 3.
+- 짝 변경: ohSorryWeb `DATA_CDN_URL` → `https://data.iidx.in/`.
 
 ### 2026-08-04 — SP 오소리 피처 스코어 덤프 (`sp_pattern_score` / osPattern 두 행)
 - [dump-user.mjs](.github/scripts/dump-user.mjs): `user_ohsorry_radars` 조회에서 **`play_style=eq.1` 필터 제거** → `osPattern` 에 SP(0)/DP(1) **두 행**이 담긴다. 오소리웹 SP 분석탭의 피처별 랭킹/상대평가용.

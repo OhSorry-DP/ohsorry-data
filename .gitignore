@@ -1,0 +1,3 @@
+# wrangler 로컬 상태(미니플레어 시뮬레이터 캐시·D1/R2 로컬본). 배포와 무관.
+.wrangler/
+node_modules/
