@@ -55,6 +55,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-05 — persona 전체 재생성 (📝 요약 JA/EN 서사형 번역)
+- 엔진 개정([ohSorryRating `persona.js`](https://github.com/) `buildProse(x, lang)`) — 리치 리포트 📝 요약이
+  ko 만 서사형 문장이고 ja/en 은 피처 나열이었다. ko 문장 구조를 그대로 옮겨 3언어 모두 문장으로.
+- `backfill-personas.mjs --force` 로 **358명 전체 재생성**(DP 263 / SP 153, 실패 0).
+- 검증: 변경 354파일의 리포트 diff 가 **ja/en 요약 줄 832건뿐**((263+153)×2), ko report·prose·persona 보유 인원 변동 0.
+- R2 는 워크플로(단일 유저 PUT) 경로가 아니라 **로컬 일괄 PUT** 으로 반영.
+
 ### 2026-08-04 — 서빙을 jsdelivr → Cloudflare R2 + Worker (`data.iidx.in`) 로 이전
 - **문제**: jsdelivr `@main` 의 별칭 해석 캐시(12h)를 purge API 로 풀 수 없어, push 직후 purge 가
   오히려 구본을 12h 고착시켰다. 2026-07-17(유저 5명)에 이어 2026-08-04 SP 랭킹 배포에서 재발 —
