@@ -96,11 +96,24 @@ export async function loadPersonaResources() {
     }
     spKeymaps = { scoresByKey, noteByKey, bpmByNorm, offByKey };
   }
+  // persona usernorm 인구 통계 — repo 루트 persona-pop.json(있으면). { dp: {NOTES:{mean,sd},.., _relSd}, sp: {..} }
+  //   축별 인구 편향("누구나 낮은 축"이 전원 약점으로 잡히는 문제)을 걷어내는 데 쓴다.
+  //   없으면 persona 는 종전대로 본인 평균 중심화만 한다(하위호환) — 생성은 ohSorryAdmin/scripts/buildPersonaPop.js.
+  //   ⚠️ 실행 위치가 둘이다 — Action 은 repo 루트(cwd), ohSorryAdmin 은 자기 폴더에서 dump-data-repo.js 를
+  //      돌린다. cwd 만 보면 후자가 pop 을 못 찾아 조용히 종전 동작으로 떨어진다 → 이 파일 기준 경로도 시도.
+  let pop = null;
+  const popPaths = [
+    path.join(process.cwd(), 'persona-pop.json'),
+    path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..', 'persona-pop.json'),
+  ];
+  for (const pp of popPaths) {
+    try { pop = JSON.parse(fs.readFileSync(pp, 'utf8')); break; } catch { /* 다음 후보 */ }
+  }
   return {
     weaknessLib, personaLib, norm, textageMeta,
     ratingData: ratingJson.ratings,
     zasaData: Array.isArray(zasaRaw.charts) ? zasaRaw.charts : zasaRaw,
-    patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef,
+    patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef, pop,
   };
 }
 
@@ -312,6 +325,7 @@ export function spPersonaFor(ownSp, R) {
     if (n) spOverallResid = s / n;
   }
   const profile = {
+    pop: (R.pop && R.pop.sp) || null,   // usernorm 인구 통계(위 DP 와 동일 취지)
     nCharts: ownSp.length,
     isSp: true,                   // 스코어링 마스터 SP 임계(scoreMasterSp) 분기용
     overallResid: spOverallResid, // 인구 rate 기준 대비(있으면 스코어링/만능 판정). 램프/스코어 지향 문구는 아래서 별도 억제
@@ -334,6 +348,27 @@ export function spPersonaFor(ownSp, R) {
     head: rich.head, oneLiner: P.oneLiner, prose: P.prose, report: rich.report,
     tags: P.tags, nCharts: ownSp.length, _v: new Date().toISOString(), i18n,
   };
+}
+
+// persona 의 10피처 프로파일(feats)만 산출 — **usernorm 인구 통계 생성 전용**.
+//   personaFor/spPersonaFor 는 리포트까지 만들어 무겁고 feats 를 반환하지 않으므로, 그 앞부분(피처 계산)만
+//   떼어낸다. 계산식은 각 함수와 동일하게 유지할 것(어긋나면 인구 통계와 실제 persona 축이 달라진다).
+//   반환: { NOTES..RAND } 또는 null(표본 부족).
+export function featsFor(charts, R, isSp) {
+  if (!Array.isArray(charts) || charts.length < MIN_CHARTS) return null;
+  if (isSp) {
+    if (!R.spKeymaps) return null;
+    return spFeatAptitude(spResidRows(charts, R));
+  }
+  const vec = R.weaknessLib.calcUserWeakness({
+    allCharts: charts, patternsMap: R.patternsMap, normFn: R.norm,
+    ratingMap: R.ratingData, zasaMap: R.zasaData, rateRef: R.rateRef,
+  });
+  const feats = {};
+  for (const k of Object.keys(vec)) {
+    if (!k.startsWith('__') && R.weaknessLib.FEATS.includes(k)) feats[k] = vec[k];
+  }
+  return Object.keys(feats).length ? feats : null;
 }
 
 // 차트 배열 → persona 필드. 표본 부족/실패 시 null.
@@ -384,6 +419,8 @@ export function personaFor(allCharts, R) {
     if (!layoutProfile.length) layoutProfile = null;
   }
   const profile = {
+    // usernorm 인구 통계(있으면) — persona.js 가 축별 z 로 편향 제거 후 본인 평균 중심화한다.
+    pop: (R.pop && R.pop.dp) || null,
     nCharts: allCharts.length, overallResid, feats, mirror,
     featsL: vec.__vecL || null, featsR: vec.__vecR || null,
     bpmProfile: vec.__bpmProfile || null, kensei: vec.__kensei || null,
