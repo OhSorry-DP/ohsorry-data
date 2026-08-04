@@ -11,6 +11,10 @@
 - `songs.json` — 곡 마스터(공유) `[{ song_id, title, ac, legen, textage_song_id, series_no }]`. 웹 `getSongsCache` 가 supabase 대신 이걸 읽음. cron(5분) 갱신.
 - `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). 집계라 **cron Action(5분)** 으로 갱신 + **webhook 덤프(dump-user) 시 해당 유저 1명 즉시 병합**([merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs) — GitHub cron 스로틀(실제 1~3시간 지연)로 신규 유저가 목록에 안 보이던 문제 대응).
 - `version.json` — 전체 덤프 타임스탬프 + 유저 수
+- `persona-pop.json` — persona **usernorm(인구 정규화)** 통계 `{ dp, sp }` (각 10피처 `mean`/`sd` + `_relScale`).
+  `persona-lib` 이 읽어 `profile.pop` 으로 주입 → 축별 인구 편향 제거. 없으면 persona 는 종전 동작(하위호환).
+  생성: ohSorryAdmin `node scripts/buildPersonaPop.js`. 유저가 크게 늘거나 피처 정의가 바뀔 때만 재실행.
+  ⚠️ 웹은 이 파일을 읽지 않는다(덤프 시점 전용) — R2 업로드 대상 아님.
 
 ## 생성/갱신
 - 전체: ohSorryAdmin `node scripts/dump-data-repo.js` (전체 재덤프 + `version.json` 갱신)
