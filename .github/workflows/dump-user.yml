@@ -1,7 +1,7 @@
 name: dump-user
 
 # vercel 함수(api/dump-trigger)가 보내는 repository_dispatch(dump-user) 로 기동.
-# client_payload.iidx_id 유저를 supabase 에서 재덤프 → user/{id}.json commit/push → jsdelivr purge.
+# client_payload.iidx_id 유저를 supabase 에서 재덤프 → R2 PUT(매번, 서빙) + git commit/push(유저당 1일 1회, 이력).
 on:
   repository_dispatch:
     types: [dump-user]
@@ -26,14 +26,50 @@ jobs:
         with:
           node-version: 20
 
+      # 덤프 **전에** "이 유저를 오늘 이미 커밋했는가"를 판정한다 (유저당 1일 1커밋 제한).
+      #   기준 = 커밋되어 있는 user/{id}.json 의 `_v`(그 파일을 만든 덤프 시각)의 KST 날짜.
+      #   git log 를 안 쓰는 이유: checkout 이 shallow(fetch-depth=1)라 파일별 커밋 이력을 못 본다.
+      #   ⚠️ 커밋을 건너뛴 회차도 R2 에는 올라가므로, git 의 `_v` = "마지막으로 **커밋된** 덤프 시각"이
+      #      되어 이 판정의 기준으로 정확히 맞다(R2 의 _v 는 더 최신일 수 있음 — 의도된 분리).
+      - name: 1일 1커밋 판정
+        run: |
+          F="user/$IIDX_ID.json"
+          TODAY=$(TZ=Asia/Seoul date +%F)
+          PREV_DAY=""
+          # 기본 셸이 `bash -e` 라 실패 가능한 곳은 전부 `|| 대입`으로 받아 errexit 을 피한다
+          #   (특히 `[ -n "$X" ] && Y=...` 형태는 조건이 거짓일 때 스텝을 죽인다).
+          if [ -f "$F" ]; then
+            PREV_V=$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))._v||""))}catch(e){}' "$F") || PREV_V=""
+            if [ -n "$PREV_V" ]; then
+              PREV_DAY=$(TZ=Asia/Seoul date -d "$PREV_V" +%F 2>/dev/null) || PREV_DAY=""
+            fi
+          fi
+          if [ "$PREV_DAY" = "$TODAY" ]; then
+            echo "SKIP_COMMIT=1" >> "$GITHUB_ENV"
+            echo "오늘($TODAY KST) 이미 커밋된 유저 — git 커밋 skip, R2 만 갱신"
+          else
+            echo "SKIP_COMMIT=0" >> "$GITHUB_ENV"
+            echo "오늘 첫 덤프(직전 커밋일 ${PREV_DAY:-없음}) — git 커밋 진행"
+          fi
+
       - name: Dump user from supabase
+        id: dump
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node .github/scripts/dump-user.mjs "$IIDX_ID"
 
-      - name: Commit & push
+      - name: Commit & push (유저당 1일 1회)
+        # git 이력은 롤백용이라 하루 1스냅샷이면 충분하고, 신선도가 필요한 서빙은 아래 R2 가 매번 갱신한다.
+        #   종전엔 업로드마다(INF 자동동기화 15분 주기 포함) 커밋이 쌓여, 실측 커밋의 53.6% 가
+        #   타임스탬프(_v / persona._v / spPersona._v / user.date)만 바뀐 무의미 커밋이었다.
         run: |
+          if [ "$SKIP_COMMIT" = "1" ]; then
+            # 커밋만 건너뛰고 users-list 병합은 수행 — 뒤 R2 스텝이 최신 목록을 올리게 한다.
+            #   (git 의 users-list 는 30분 cron 이 supabase 에서 전체 재생성해 정합성을 보정)
+            node .github/scripts/merge-user-into-list.mjs "user/$IIDX_ID.json" || true
+            echo "1일 1커밋 제한 — git 커밋 skip (R2 는 갱신됨)"; exit 0
+          fi
           if [ -z "$(git status --porcelain user/)" ]; then echo "변경 없음 — skip"; exit 0; fi
           git config user.name "ohsorry-bot"
           git config user.email "hanekawa4365@gmail.com"
@@ -61,6 +97,12 @@ jobs:
         #   종전 jsdelivr purge 를 대체 — `@main` 별칭 해석 캐시(12h)를 purge API 로는 못 풀어
         #   push 직후 purge 가 구본을 12h 고착시키는 사고가 두 번 났다(2026-07-17 / 2026-08-04).
         #   R2 는 별칭 개념이 없어 PUT 즉시 반영이고, 캐시 정책도 Worker 가 쥔다.
+        #
+        # ⚠️ 커밋(1일 1회)과 달리 **PUT 은 매 업로드마다** — 서빙 신선도는 종전 그대로 유지한다.
+        #   그래서 commit/push 가 실패해도(동시 push 경합 등) 이 스텝은 돈다: 조건은 "덤프 성공"뿐.
+        #   (종전엔 push 실패 → 스텝 실패 → 기본 if:success() 로 R2 가 통째로 스킵돼,
+        #    그 유저가 다시 업로드할 때까지 R2 가 구본으로 고착됐다.)
+        if: ${{ !cancelled() && steps.dump.outcome == 'success' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
@@ -68,11 +110,18 @@ jobs:
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — R2 업로드 skip(덤프·push 는 정상)"; exit 0
           fi
+          # 한쪽이 실패해도 다른 쪽은 반드시 시도한 뒤, 하나라도 실패했으면 스텝을 실패로 끝낸다.
+          #   (종전 `... || { echo warning; return 1; }` 은 기본 셸 `bash -e` 의 errexit 에 걸려
+          #    첫 실패에서 스텝이 죽고 users-list.json PUT 이 아예 실행되지 않았다.)
+          rc=0
           put() {
-            npx --yes wrangler@4 r2 object put "ohsorry-data/$1" --file="$1" \
-              --content-type="application/json; charset=utf-8" --remote || {
-                echo "::warning::R2 업로드 실패: $1"; return 1; }
-            echo "R2 OK: $1"
+            if npx --yes wrangler@4 r2 object put "ohsorry-data/$1" --file="$1" \
+                 --content-type="application/json; charset=utf-8" --remote; then
+              echo "R2 OK: $1"
+            else
+              echo "::error::R2 업로드 실패: $1"; rc=1
+            fi
           }
           put "user/$IIDX_ID.json"
           put "users-list.json"
+          exit $rc

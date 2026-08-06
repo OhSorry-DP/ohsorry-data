@@ -20,7 +20,8 @@
 - 전체: ohSorryAdmin `node scripts/dump-data-repo.js` (전체 재덤프 + `version.json` 갱신)
 - 증분(수동): ohSorryAdmin `node scripts/dump-data-repo.js <iidx_id> ...`
 - **자동(실시간)**: 오소리 업로드 → supabase `users` upsert → Database Webhook → vercel `api/dump-trigger`
-  → `repository_dispatch(dump-user)` → 이 repo 의 `dump-user` Action 이 그 유저만 재덤프 + push + jsdelivr purge.
+  → `repository_dispatch(dump-user)` → 이 repo 의 `dump-user` Action 이 그 유저만 재덤프
+  → **R2 PUT(매번 — 서빙)** + **git commit/push(유저당 1일 1회 — 이력)**. 2026-08-06 부터 이 둘의 주기가 다르다.
   - Action: [.github/workflows/dump-user.yml](.github/workflows/dump-user.yml) / 덤프: [.github/scripts/dump-user.mjs](.github/scripts/dump-user.mjs)
   - users upsert(업로드 시작) 가 scores 보다 ~1s 먼저지만, Action 기동 지연(수십초)이 디바운스가 되어 race 없음.
 
@@ -54,6 +55,27 @@ https://data.iidx.in/version.json
 > 오리진이 구본을 재캐시하고 최대 12h 고착된다 — 아래 변경 이력의 두 사고가 모두 이것이다.
 
 ## 변경 이력
+
+### 2026-08-06 — user 덤프 git 커밋을 유저당 1일 1회로 제한 (R2 PUT 은 매번 유지)
+
+- **배경**: INF 자동동기화가 15분 주기로 **조건 없이** 업로드 → `upsert_user` 가 `date=now()` 를 쓰므로
+  웹훅이 매번 발화 → 커밋이 쌓였다. 실측: 최근 auto dump 커밋 125건 중 **53.6%(67건)** 가
+  타임스탬프(`_v` / `persona._v` / `spPersona._v` / `user.date`) 4개만 바뀐 무의미 커밋.
+- [dump-user.yml](.github/workflows/dump-user.yml): 덤프 **전에** 커밋되어 있는 `user/{id}.json` 의 `_v` 를
+  KST 날짜로 환산해 오늘과 비교 → 같으면 git 커밋/push 를 skip 한다(users-list 병합은 그대로 수행해
+  R2 에는 최신 목록이 올라감). 신규 유저·`_v` 없음·JSON 파싱 실패는 **fail-open**(커밋 진행).
+  - `git log -- <path>` 를 안 쓰는 이유: checkout 이 shallow(depth=1)라 파일별 이력을 못 본다.
+    커밋을 건너뛴 회차는 git 에 안 들어가므로 **git 의 `_v` = "마지막으로 커밋된 덤프 시각"** 이 되어
+    이 판정의 기준으로 정확히 맞는다.
+- **R2 PUT 은 종전대로 매 업로드마다** — 서빙 신선도는 불변(카드/목록은 계속 15분 주기로 최신).
+  대신 실행 조건을 "덤프 성공"으로 바꿨다(`if: !cancelled() && steps.dump.outcome == 'success'`).
+  종전엔 push 5회 실패 → `exit 1` → 기본 `if: success()` 로 **R2 스텝이 통째로 스킵**돼,
+  그 유저가 다시 업로드할 때까지 R2 가 구본으로 고착됐다(2026-08-04 동시 8건 실증).
+- R2 `put()` 이 첫 실패에서 스텝을 죽여 `users-list.json` PUT 이 아예 실행되지 않던 문제 수정 —
+  `... || { echo warning; return 1; }` 이 기본 셸 `bash -e` 의 errexit 에 걸렸다. 이제 둘 다 시도하고
+  하나라도 실패하면 스텝을 실패로 끝낸다(`::error::`).
+- ⚠️ **git 과 R2 가 의도적으로 어긋난다** — R2 는 항상 최신, git 은 유저당 최대 24시간 전 스냅샷.
+  덤프 로직 사고 시 git 롤백은 최대 하루치 차이가 난다(supabase 가 SSOT 라 재덤프로 복구 가능).
 
 ### 2026-08-05 — persona 전체 재생성 (📝 요약 JA/EN 서사형 번역)
 - 엔진 개정([ohSorryRating `persona.js`](https://github.com/) `buildProse(x, lang)`) — 리치 리포트 📝 요약이
