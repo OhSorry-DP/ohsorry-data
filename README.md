@@ -9,7 +9,7 @@
   - dp/sp = **슬림 score row** `{ song_id, diff, lamp, ex_score, played_version, date }` — 곡메타(title/textage_song_id/series_no/ac/legen)는 중복 제거하고 아래 `songs.json` 으로 분리. 웹이 `song_id` 로 조인.
   - persona = **DP 성향 리포트** `{ head, oneLiner, prose, report, tags[], nCharts, _v }` — 웹훅 덤프 시 [persona-lib.mjs](.github/scripts/persona-lib.mjs) 가 gist 해석엔진(persona.js/calcWeakness.js)으로 즉시 생성. 표기용: head=헤드라인 한 줄, prose=서사 요약(X/OG 카드 ≤200자), report=상세 리포트 전문(🎯🎲⚡🛠✋📝). 표본 30차트 미만이면 null.
 - `songs.json` — 곡 마스터(공유) `[{ song_id, title, ac, legen, textage_song_id, series_no }]`. 웹 `getSongsCache` 가 supabase 대신 이걸 읽음. cron(5분) 갱신.
-- `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). 집계라 **cron Action(5분)** 으로 갱신 + **webhook 덤프(dump-user) 시 해당 유저 1명 즉시 병합**([merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs) — GitHub cron 스로틀(실제 1~3시간 지연)로 신규 유저가 목록에 안 보이던 문제 대응).
+- `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). **실시간 갱신은 webhook 덤프(dump-user)가 R2 에 증분 병합**([merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs))으로 담당하고, supabase 전체 재생성은 **1일 1회 cron**(정합성 보정 — 삭제 유저 정리·증분 누락 복구)이다. 증분의 베이스는 git 이 아니라 **R2 현재본**이라, 커밋을 건너뛴 회차의 갱신도 누적된다.
 - `version.json` — 전체 덤프 타임스탬프 + 유저 수
 - `persona-pop.json` — persona **usernorm(인구 정규화)** 통계 `{ dp, sp }` (각 10피처 `mean`/`sd` + `_relScale`).
   `persona-lib` 이 읽어 `profile.pop` 으로 주입 → 축별 인구 편향 제거. 없으면 persona 는 종전 동작(하위호환).
@@ -55,6 +55,33 @@ https://data.iidx.in/version.json
 > 오리진이 구본을 재캐시하고 최대 12h 고착된다 — 아래 변경 이력의 두 사고가 모두 이것이다.
 
 ## 변경 이력
+
+### 2026-08-06 — users-list: R2 실시간 증분 + supabase 전체 재생성은 1일 1회
+
+바로 아래 "1일 1커밋 제한"이 만든 회귀를 막고, 목록 갱신 책임을 R2 로 옮긴다.
+
+- **문제**: `dump-user` 의 users-list 병합 베이스가 `git reset --hard origin/main` 한 **git 본**이었다.
+  커밋을 건너뛴 회차의 병합분은 git 에 없으므로, 다음 다른 유저의 실행이 그걸 덮어 **R2 의 항목이
+  이전 값으로 되돌아갔다**(예: A 10:00 커밋 → A 10:15 스킵/R2만 → B 10:20 커밋 시 A 가 10:00 으로 회귀).
+- **해결**: [dump-user.yml](.github/workflows/dump-user.yml) 이 병합 전에 **R2 현재본**을 베이스로 받아온다
+  (`wrangler r2 object get`). R2 가 누적자가 되고 git 은 하루 1스냅샷이 된다.
+  - HTTP(`data.iidx.in`)가 아니라 wrangler 직접 읽기인 이유: Worker 엣지 캐시(60초)를 우회해야 하는데
+    쿼리 cache-bust 가 안 통한다(캐시 키에서 쿼리를 버림 — [cf/src/index.js](cf/src/index.js)).
+    R2 원본 직접 읽기는 read-after-write 강한 일관성이라 방금 다른 실행이 올린 것도 보인다.
+  - ⚠️ **취득본 검증 필수** — `merge-user-into-list` 는 파싱 실패 시 빈 배열로 시작한다. 깨지거나 빈
+    파일을 베이스로 넘기면 전 유저 목록이 통째로 날아간다. "JSON 배열 + 비어있지 않음"을 확인하고
+    실패 시 git 본으로 폴백한다(검증됨: 파손·빈배열 둘 다 목록 보존).
+- [dump-users-list.yml](.github/workflows/dump-users-list.yml): cron 을 **둘로 분리**하고
+  `github.event.schedule` 로 범위를 고른다.
+  - `*/30` → **songs.json 만.** 신곡 반영이 늦으면 슬림 row 의 곡메타 조인이 비어 곡명이 안 뜬다.
+    songs 는 거의 안 바뀌어 "변경 시만 commit" 가드에 걸리므로 커밋은 잘 안 생긴다.
+  - `5 18 * * *`(KST 03:05) → **users-list + songs 전체 재생성.** 수동 실행(workflow_dispatch)도 전체.
+  - ⚠️ 전체 재생성이 도는 몇 분 사이 들어온 업로드는 덮일 수 있다(job 시작 시점의 supabase 를 읽으므로).
+    다음 dump-user 증분이 복구한다.
+- [dump-users-list.mjs](.github/scripts/dump-users-list.mjs): `--songs` / `--users` 인자로 산출물 선택
+  (인자 없으면 종전대로 둘 다).
+- `put()` errexit 버그를 이 워크플로에도 적용 — 첫 PUT 실패에서 스텝이 죽어 뒤 파일 PUT 이 통째로
+  스킵되던 문제. R2 스텝 조건도 "빌드 성공"으로 바꿔 push 실패가 서빙을 막지 않게 했다.
 
 ### 2026-08-06 — user 덤프 git 커밋을 유저당 1일 1회로 제한 (R2 PUT 은 매번 유지)
 

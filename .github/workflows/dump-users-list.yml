@@ -1,14 +1,22 @@
 name: dump-users-list
 
-# 전 유저 목록(users-list.json) 주기 재생성 — 웹 fetchAllUsers 의 jsdelivr 소스.
-# 유저별 카드(user/{id}.json)는 webhook 실시간, 목록도 webhook 시 해당 유저만 즉시 병합
-# (merge-user-into-list.mjs). 이 cron 은 **전체 정합성 보정용**이라 30분 간격(변경 시에만 commit).
+# 전 유저 목록(users-list.json) · 곡 마스터(songs.json) 재생성 — 웹 fetchAllUsers·getSongsCache 소스.
+#
+# 주기가 둘로 갈렸다 (2026-08-06):
+#   */30  → **songs.json 만.** 신곡 반영이 늦으면 슬림 row 의 곡메타 조인이 비어 곡명이 안 뜬다.
+#           songs 는 거의 안 바뀌므로 아래 "변경 시만 commit" 가드에 걸려 커밋은 잘 안 생긴다.
+#   1일 1회 → **users-list.json + songs.json 전체 재생성.** users-list 의 실시간 갱신은 dump-user 가
+#           R2 에 증분 병합(merge-user-into-list)으로 담당하고, 여기서는 정합성 보정
+#           (삭제 유저 정리 · 증분이 놓친 항목 복구)만 한다.
+#   ⚠️ 이 job 이 도는 몇 분 사이 들어온 업로드는 전체 재생성본에 덮일 수 있다(supabase 를 job 시작
+#      시점에 읽으므로). 새벽 시간대라 영향이 작고, 다음 dump-user 증분이 복구한다.
 #   ⚠️ '*/5' 였을 때 GitHub Actions 스로틀로 실제 1~5시간 간격 실행됨(실측: 04:21→09:10 = 4h49m).
 #      고빈도 schedule 일수록 드롭 비율이 높아 오히려 간격이 벌어진다 → 간격을 낮춰 실행률을 높인다.
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch: {}   # 수동 실행도 가능
+    - cron: '*/30 * * * *'   # songs.json 만
+    - cron: '5 18 * * *'     # 전체 재생성 — UTC 18:05 = KST 03:05
+  workflow_dispatch: {}      # 수동 실행은 항상 전체 재생성
 
 concurrency:
   group: dump-users-list
@@ -19,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      # schedule 문자열로 어느 cron 이 깨웠는지 구분한다(수동 실행이면 빈 값 → 전체).
+      SCHEDULE: ${{ github.event.schedule }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,27 +37,46 @@ jobs:
         with:
           node-version: 20
 
-      - name: Build users-list.json
+      - name: 재생성 범위 결정
+        run: |
+          if [ "$SCHEDULE" = "*/30 * * * *" ]; then
+            echo "BUILD_ARGS=--songs"                 >> "$GITHUB_ENV"
+            echo "FILES=songs.json"                   >> "$GITHUB_ENV"
+            echo "COMMIT_MSG=auto: songs 갱신"        >> "$GITHUB_ENV"
+            echo "범위: songs.json 만 (30분 주기)"
+          else
+            echo "BUILD_ARGS="                        >> "$GITHUB_ENV"
+            echo "FILES=users-list.json songs.json"   >> "$GITHUB_ENV"
+            echo "COMMIT_MSG=auto: users-list/songs 갱신" >> "$GITHUB_ENV"
+            echo "범위: 전체 재생성 (users-list + songs)"
+          fi
+
+      - name: Build
+        id: build
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: node .github/scripts/dump-users-list.mjs
+        # $BUILD_ARGS 는 의도적으로 unquoted — 빈 값이면 인자 없이(전체), '--songs' 면 songs 전용.
+        run: node .github/scripts/dump-users-list.mjs $BUILD_ARGS
 
       - name: Commit & push (변경 시만)
         run: |
-          if [ -z "$(git status --porcelain users-list.json songs.json)" ]; then echo "변경 없음 — skip"; exit 0; fi
+          if [ -z "$(git status --porcelain $FILES)" ]; then echo "변경 없음 — skip"; exit 0; fi
           git config user.name "ohsorry-bot"
           git config user.email "hanekawa4365@gmail.com"
-          git add users-list.json songs.json
-          git commit -m "auto: users-list/songs 갱신"
+          git add $FILES
+          git commit -m "$COMMIT_MSG"
           for i in 1 2 3 4 5; do
-            git pull --rebase --autostash origin main && git push && break
+            git pull --rebase --autostash origin main && git push && exit 0
             echo "push 재시도 $i"; sleep 3
           done
+          echo "push 실패"; exit 1
 
       - name: Upload to R2 (data.iidx.in)
         # 서빙은 R2(cf/ Worker → data.iidx.in). git 은 이력·롤백용 원본으로 남긴다.
         #   종전 jsdelivr purge 를 대체 — 상세 경위는 dump-user.yml 의 같은 스텝 주석 참고.
+        #   push 가 실패해도 서빙은 끊기지 않아야 하므로 조건은 "빌드 성공"뿐이다.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
@@ -54,11 +84,17 @@ jobs:
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — R2 업로드 skip(덤프·push 는 정상)"; exit 0
           fi
+          # 한쪽이 실패해도 나머지는 반드시 시도한 뒤, 하나라도 실패했으면 스텝을 실패로 끝낸다.
+          #   (종전 `... || { echo warning; return 1; }` 은 기본 셸 `bash -e` 의 errexit 에 걸려
+          #    첫 실패에서 스텝이 죽고 뒤 파일 PUT 이 아예 실행되지 않았다.)
+          rc=0
           put() {
-            npx --yes wrangler@4 r2 object put "ohsorry-data/$1" --file="$1" \
-              --content-type="application/json; charset=utf-8" --remote || {
-                echo "::warning::R2 업로드 실패: $1"; return 1; }
-            echo "R2 OK: $1"
+            if npx --yes wrangler@4 r2 object put "ohsorry-data/$1" --file="$1" \
+                 --content-type="application/json; charset=utf-8" --remote; then
+              echo "R2 OK: $1"
+            else
+              echo "::error::R2 업로드 실패: $1"; rc=1
+            fi
           }
-          put "users-list.json"
-          put "songs.json"
+          for f in $FILES; do put "$f"; done
+          exit $rc
