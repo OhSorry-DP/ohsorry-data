@@ -23,16 +23,68 @@ const onlyArg = process.argv.find((a) => a.startsWith('--only='));
 const LIMIT = limArg ? Number(limArg.slice(8)) : Infinity;
 const ONLY = onlyArg ? new Set(onlyArg.slice(7).split(',')) : null;
 
+// ── R2 접근 — REST 우선, 실패 시 wrangler 폴백 ────────────────────────────────
+//   ⚠️ 종전엔 유저당 `npx --yes wrangler@4` 를 2번(GET/PUT) 불렀다. npx 가 호출마다 패키지를
+//      재해석해 **호출당 2~4초** 가 붙어 369명에 30분이 걸렸다(736회 스폰이 지배적).
+//      REST 는 프로세스 스폰이 없고 동시 실행도 되므로 수 분대로 떨어진다.
+//   폴백을 남기는 이유 — 토큰 스코프에 따라 REST object API 가 막힐 수 있다. 시작 시 1회 probe 해
+//   안 되면 통째로 wrangler 경로로 내려간다(종전 동작과 동일, 느릴 뿐 결과는 같다).
+const ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID;
+const TOKEN = process.env.CLOUDFLARE_API_TOKEN;
+const REST_BASE = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/r2/buckets/${BUCKET}/objects/`;
+let useRest = !!(ACCOUNT && TOKEN);
+
 function wrangler(args) {
   return execFileSync('npx', ['--yes', 'wrangler@4', ...args], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
 }
-function r2Get(key, file) {
-  try { wrangler(['r2', 'object', 'get', `${BUCKET}/${key}`, `--file=${file}`, '--remote']); return true; }
-  catch { return false; }
+// 429/5xx 는 잠깐 쉬고 재시도 — Cloudflare API 는 계정 단위 rate limit 이 있다.
+async function restFetch(key, init, tries = 4) {
+  for (let i = 0; i < tries; i++) {
+    const r = await fetch(REST_BASE + key, {
+      ...init,
+      headers: { Authorization: `Bearer ${TOKEN}`, ...(init.headers || {}) },
+    });
+    if (r.status === 429 || r.status >= 500) {
+      if (i === tries - 1) return r;
+      await new Promise((s) => setTimeout(s, 500 * (i + 1) * (i + 1)));
+      continue;
+    }
+    return r;
+  }
 }
-function r2Put(key, file) {
-  wrangler(['r2', 'object', 'put', `${BUCKET}/${key}`, `--file=${file}`,
+async function r2GetText(key) {
+  if (useRest) {
+    const r = await restFetch(key, { method: 'GET' });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`R2 GET ${key} — HTTP ${r.status}`);
+    return await r.text();
+  }
+  const f = path.join(TMP, key.replace(/[/\\]/g, '_'));
+  try { wrangler(['r2', 'object', 'get', `${BUCKET}/${key}`, `--file=${f}`, '--remote']); }
+  catch { return null; }
+  return fs.readFileSync(f, 'utf8');
+}
+async function r2PutText(key, text) {
+  if (useRest) {
+    const r = await restFetch(key, {
+      method: 'PUT', body: text,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    });
+    if (!r.ok) throw new Error(`R2 PUT ${key} — HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+    return;
+  }
+  const f = path.join(TMP, key.replace(/[/\\]/g, '_'));
+  fs.writeFileSync(f, text);
+  wrangler(['r2', 'object', 'put', `${BUCKET}/${key}`, `--file=${f}`,
     '--content-type=application/json; charset=utf-8', '--remote']);
+}
+// 동시 실행 풀 — 순서 무관(유저별 독립)이라 단순 워커 N개로 충분.
+async function pool(items, n, fn) {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) { const idx = i++; await fn(items[idx], idx); }
+  });
+  await Promise.all(workers);
 }
 
 const songs = JSON.parse(fs.readFileSync('songs.json', 'utf8'));
@@ -50,34 +102,52 @@ if (!R.popmeanSp) console.warn('::warning::persona-popmean-sp.json 미로드 —
 let ids = fs.readdirSync('user').filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5));
 if (ONLY) ids = ids.filter((i) => ONLY.has(i));
 ids = ids.slice(0, LIMIT);
-console.log(`대상 ${ids.length}명 (R2 read-modify-write${DRY ? ', DRY RUN' : ''})`);
 
-let put = 0, miss = 0, same = 0, fail = 0, dpOk = 0, spOk = 0;
-for (const id of ids) {
-  const f = path.join(TMP, `${id}.json`);
-  if (!r2Get(`user/${id}.json`, f)) {
+// REST probe — 아무 오브젝트나 1회 GET 해 본다. 401/403 이면 토큰이 object API 를 못 쓰는 것 → wrangler 폴백.
+if (useRest && ids.length) {
+  try {
+    const r = await restFetch(`user/${ids[0]}.json`, { method: 'GET' });
+    if (r.status === 401 || r.status === 403) {
+      console.warn(`::warning::R2 REST ${r.status} — wrangler 폴백(느림). 토큰에 R2 오브젝트 권한을 주면 빨라진다`);
+      useRest = false;
+    }
+  } catch (e) { console.warn('::warning::R2 REST probe 실패 — wrangler 폴백:', e.message); useRest = false; }
+}
+// wrangler 폴백은 프로세스 스폰이라 동시 실행 이득이 없다(오히려 메모리만 먹는다) → 1.
+const conArg = process.argv.find((a) => a.startsWith('--concurrency='));
+const CONC = conArg ? Number(conArg.slice(14)) : (useRest ? 4 : 1);
+console.log(`대상 ${ids.length}명 (R2 read-modify-write / ${useRest ? 'REST' : 'wrangler'} / 동시 ${CONC}${DRY ? ' / DRY RUN' : ''})`);
+
+let put = 0, miss = 0, same = 0, fail = 0, dpOk = 0, spOk = 0, done = 0;
+await pool(ids, CONC, async (id) => {
+  const key = `user/${id}.json`;
+  let text;
+  try { text = await r2GetText(key); }
+  catch (e) { fail++; console.error('GET 실패', id, e.message); return; }
+  if (text == null) {
     // R2 에 없는 유저 — git 본을 그대로 올린다(신규/누락 보정). 롤백 위험 없음(R2 가 비어 있으므로).
     const gp = path.join('user', `${id}.json`);
-    if (!fs.existsSync(gp)) { miss++; continue; }
-    if (!DRY) { try { r2Put(`user/${id}.json`, gp); put++; } catch (e) { fail++; console.error('PUT 실패(신규)', id, e.message); } }
-    else put++;
-    continue;
+    if (!fs.existsSync(gp)) { miss++; return; }
+    if (DRY) { put++; return; }
+    try { await r2PutText(key, fs.readFileSync(gp, 'utf8')); put++; }
+    catch (e) { fail++; console.error('PUT 실패(신규)', id, e.message); }
+    return;
   }
   let data;
-  try { data = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { fail++; console.error('파싱 실패', id, e.message); continue; }
+  try { data = JSON.parse(text); } catch (e) { fail++; console.error('파싱 실패', id, e.message); return; }
   const before = JSON.stringify([data.persona, data.spPersona]);
   try {
     data.persona = personaFor(chartsFromGridRows(rowsOf(data.dp), R.textageMeta), R);
     if (data.persona) dpOk++;
     data.spPersona = spPersonaFor(spChartsFromGridRows(rowsOf(data.sp), R.textageMeta), R);
     if (data.spPersona) spOk++;
-  } catch (e) { fail++; console.error('persona 실패', id, e.message); continue; }
-  if (JSON.stringify([data.persona, data.spPersona]) === before) { same++; continue; }   // 변화 없으면 PUT 생략
-  if (DRY) { put++; continue; }
-  fs.writeFileSync(f, JSON.stringify(data));
-  try { r2Put(`user/${id}.json`, f); put++; } catch (e) { fail++; console.error('PUT 실패', id, e.message); }
-  if (put % 25 === 0) console.log(`  ${put} PUT / ${same} 무변화 / ${fail} 실패`);
-}
+  } catch (e) { fail++; console.error('persona 실패', id, e.message); return; }
+  if (JSON.stringify([data.persona, data.spPersona]) === before) { same++; return; }   // 변화 없으면 PUT 생략
+  if (DRY) { put++; return; }
+  try { await r2PutText(key, JSON.stringify(data)); put++; }
+  catch (e) { fail++; console.error('PUT 실패', id, e.message); }
+  if (++done % 50 === 0) console.log(`  ${done}/${ids.length} 처리 (PUT ${put} / 무변화 ${same} / 실패 ${fail})`);
+});
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`완료: PUT ${put} / 무변화 ${same} / R2·git 모두없음 ${miss} / 실패 ${fail} (DP ${dpOk} · SP ${spOk} 생성)`);
 if (fail) process.exit(1);

@@ -22,6 +22,10 @@ on:
         description: 'true 면 PUT 하지 않고 건수만 집계'
         required: false
         default: 'false'
+      concurrency:
+        description: '동시 처리 수 (비우면 REST 4 / wrangler 폴백 1). Cloudflare API rate limit 조심'
+        required: false
+        default: ''
 
 # 동시에 두 번 돌면 같은 오브젝트를 서로 덮어쓴다 — 직렬화.
 concurrency:
@@ -50,4 +54,5 @@ jobs:
           [ -n "${{ inputs.limit }}" ] && ARGS="$ARGS --limit=${{ inputs.limit }}"
           [ -n "${{ inputs.only }}" ] && ARGS="$ARGS --only=${{ inputs.only }}"
           [ "${{ inputs.dry }}" = "true" ] && ARGS="$ARGS --dry"
+          [ -n "${{ inputs.concurrency }}" ] && ARGS="$ARGS --concurrency=${{ inputs.concurrency }}"
           node .github/scripts/r2-repersona.mjs $ARGS
