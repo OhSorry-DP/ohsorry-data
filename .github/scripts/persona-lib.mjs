@@ -101,19 +101,24 @@ export async function loadPersonaResources() {
   //   없으면 persona 는 종전대로 본인 평균 중심화만 한다(하위호환) — 생성은 ohSorryAdmin/scripts/buildPersonaPop.js.
   //   ⚠️ 실행 위치가 둘이다 — Action 은 repo 루트(cwd), ohSorryAdmin 은 자기 폴더에서 dump-data-repo.js 를
   //      돌린다. cwd 만 보면 후자가 pop 을 못 찾아 조용히 종전 동작으로 떨어진다 → 이 파일 기준 경로도 시도.
-  let pop = null;
-  const popPaths = [
-    path.join(process.cwd(), 'persona-pop.json'),
-    path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..', 'persona-pop.json'),
-  ];
-  for (const pp of popPaths) {
-    try { pop = JSON.parse(fs.readFileSync(pp, 'utf8')); break; } catch { /* 다음 후보 */ }
-  }
+  const localJson = (name) => {
+    const cands = [
+      path.join(process.cwd(), name),
+      path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..', name),
+    ];
+    for (const pp of cands) { try { return JSON.parse(fs.readFileSync(pp, 'utf8')); } catch { /* 다음 후보 */ } }
+    return null;
+  };
+  const pop = localJson('persona-pop.json');
+  // 배치/무리/지구력 축 usernorm — repo 루트 persona-popmean.json (ohSorryRating gen-persona-popmean.js 산출물).
+  //   ⚠️ **DP 전용**. supabase make_grid_data(전 레벨) DP 잔차로 잰 통계라 SP 에 주입하면 스케일이 어긋난다.
+  //   없으면 persona 는 종전 raw 경로(자기중심화만) — 하위호환.
+  const popmean = localJson('persona-popmean.json');
   return {
     weaknessLib, personaLib, norm, textageMeta,
     ratingData: ratingJson.ratings,
     zasaData: Array.isArray(zasaRaw.charts) ? zasaRaw.charts : zasaRaw,
-    patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef, pop,
+    patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef, pop, popmean,
   };
 }
 
@@ -397,6 +402,18 @@ export function personaFor(allCharts, R) {
     { key: 'HSTAIR_DIFFSHAPE', label: '비대칭계단', of: (sc) => sc.HSTAIR_DIFFSHAPE },
     { key: 'SPIRAL_UP', label: '오른나선', of: (sc) => Math.max(sc.SPIRAL_UP_L || 0, sc.SPIRAL_UP_R || 0) },
     { key: 'SPIRAL_DN', label: '왼나선', of: (sc) => Math.max(sc.SPIRAL_DN_L || 0, sc.SPIRAL_DN_R || 0) },
+    // 2026-08-07 확장 — ohSorryRating dump-all-user-personas.js LAYOUT_DEFS 와 동일 유지.
+    //   HANDS 계층 7(양손 상호작용) + 배치/리듬 3. 손별(_L/_R)은 max 로 한 축 취급(SPIRAL 동형).
+    { key: 'HANDS_LHAND', label: '왼손주도', of: (sc) => sc.HANDS_LHAND },
+    { key: 'HANDS_RHAND', label: '오른손주도', of: (sc) => sc.HANDS_RHAND },
+    { key: 'HANDS_SAME', label: '대칭계단', of: (sc) => sc.HANDS_SAME },
+    { key: 'HANDS_DIFF', label: '비대칭계단', of: (sc) => sc.HANDS_DIFF },
+    { key: 'HANDS_CROSS', label: '교차', of: (sc) => sc.HANDS_CROSS },
+    { key: 'HANDS_INDEP', label: '양손독립', of: (sc) => sc.HANDS_INDEP },
+    { key: 'HANDS_ROLE', label: '역할분리', of: (sc) => sc.HANDS_ROLE },
+    { key: 'JUMP_WIDE', label: '도약', of: (sc) => Math.max(sc.JUMP_WIDE_L || 0, sc.JUMP_WIDE_R || 0) },
+    { key: 'PHRASE_LOOP_FAST', label: '고속반복', of: (sc) => Math.max(sc.PHRASE_LOOP_FAST_L || 0, sc.PHRASE_LOOP_FAST_R || 0) },
+    { key: 'PEAK_CHORD_SIZE', label: '최대동시', of: (sc) => Math.max(sc.PEAK_CHORD_SIZE_L || 0, sc.PEAK_CHORD_SIZE_R || 0) },
   ];
   let layoutProfile = null;
   if (overallResid != null) {
@@ -421,6 +438,9 @@ export function personaFor(allCharts, R) {
   const profile = {
     // usernorm 인구 통계(있으면) — persona.js 가 축별 z 로 편향 제거 후 본인 평균 중심화한다.
     pop: (R.pop && R.pop.dp) || null,
+    // 배치(16축)/무리/지구력 축 usernorm — DP 전용. 없으면 persona 가 종전 raw 경로로 폴백.
+    popAxes: (R.popmean && R.popmean.axes) || null,
+    popDerived: (R.popmean && R.popmean.derived) || null,
     nCharts: allCharts.length, overallResid, feats, mirror,
     featsL: vec.__vecL || null, featsR: vec.__vecR || null,
     bpmProfile: vec.__bpmProfile || null, kensei: vec.__kensei || null,

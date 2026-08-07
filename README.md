@@ -56,6 +56,15 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-07 — persona 배치 축 usernorm (`persona-popmean.json`)
+
+배치/무리/지구력 축의 인구 μ/σ 를 repo 루트에 싣는다. `persona-pop.json`(10피처 usernorm)과 같은 방식 — `persona-lib.mjs` 가 로컬 파일로 읽어 profile 에 `popAxes`/`popDerived` 로 주입한다.
+
+- 없으면 persona 가 종전 raw 경로(자기중심화만)로 폴백 — 하위호환.
+- ⚠️ **DP 전용**. supabase `make_grid_data`(전 레벨) DP 잔차로 잰 통계라 SP profile 에 주입하면 스케일이 어긋난다.
+- 생성은 `ohSorryRating/scripts/analyze/dp/gen-persona-popmean.js` (전수 스윕 jsonl → 2-pass). 언어화 규칙·계층 구조는 ohSorryRating CHANGELOG 참조.
+- 갱신 시점: 배치 축을 추가/변경했거나 유저 모집단이 크게 늘었을 때. 상시 파이프라인 아님.
+
 ### 2026-08-06 — users-list: R2 실시간 증분 + supabase 전체 재생성은 1일 1회
 
 바로 아래 "1일 1커밋 제한"이 만든 회귀를 막고, 목록 갱신 책임을 R2 로 옮긴다.
