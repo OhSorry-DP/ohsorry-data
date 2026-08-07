@@ -1,0 +1,53 @@
+name: repersona-r2
+
+# R2 서빙본의 persona/spPersona 만 제자리 재생성 (수동 기동, supabase 재조회 0).
+#   persona.js / persona-popmean(.sp).json 을 개정한 뒤 **기존 유저에게 즉시 반영**할 때 쓴다.
+#   평소엔 유저가 플레이할 때 dump-user 가 알아서 갱신하므로 이 워크플로는 필요 없다.
+#
+# ⚠️ git → R2 **단순 PUT 금지**. dump-user 는 R2 는 매 덤프마다 / git 은 유저당 1일 1커밋이라
+#    R2 가 git 보다 최신일 수 있고, git 본을 올리면 그 유저 점수가 롤백된다.
+#    그래서 스크립트가 R2 를 읽어 persona 필드만 갈아끼우고 되쓴다(read-modify-write).
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: '처리할 최대 유저 수 (스모크용, 비우면 전체)'
+        required: false
+        default: ''
+      only:
+        description: '특정 iidx_id 만 (콤마 구분, 비우면 전체)'
+        required: false
+        default: ''
+      dry:
+        description: 'true 면 PUT 하지 않고 건수만 집계'
+        required: false
+        default: 'false'
+
+# 동시에 두 번 돌면 같은 오브젝트를 서로 덮어쓴다 — 직렬화.
+concurrency:
+  group: repersona-r2
+  cancel-in-progress: false
+
+jobs:
+  repersona:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Repersona on R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN 미설정 — R2 접근 불가"; exit 1
+          fi
+          ARGS=""
+          [ -n "${{ inputs.limit }}" ] && ARGS="$ARGS --limit=${{ inputs.limit }}"
+          [ -n "${{ inputs.only }}" ] && ARGS="$ARGS --only=${{ inputs.only }}"
+          [ "${{ inputs.dry }}" = "true" ] && ARGS="$ARGS --dry"
+          node .github/scripts/r2-repersona.mjs $ARGS
