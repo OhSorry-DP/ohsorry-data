@@ -114,11 +114,12 @@ export async function loadPersonaResources() {
   //   ⚠️ **DP 전용**. supabase make_grid_data(전 레벨) DP 잔차로 잰 통계라 SP 에 주입하면 스케일이 어긋난다.
   //   없으면 persona 는 종전 raw 경로(자기중심화만) — 하위호환.
   const popmean = localJson('persona-popmean.json');
+  const popmeanSp = localJson('persona-popmean-sp.json');   // SP 판 — 축·스케일이 달라 파일이 별개다
   return {
     weaknessLib, personaLib, norm, textageMeta,
     ratingData: ratingJson.ratings,
     zasaData: Array.isArray(zasaRaw.charts) ? zasaRaw.charts : zasaRaw,
-    patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef, pop, popmean,
+    patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef, pop, popmean, popmeanSp,
   };
 }
 
@@ -259,6 +260,41 @@ const SP_MURI_DEFS = [
   { key: 'hardTrill', label: '무리트릴', gate: 2, scale: 10, of: (o) => (o.hardL || 0) + (o.hardR || 0) },
   { key: 'stair', label: '겹계단', gate: 2, scale: 10, of: (o) => o.stair || 0 },
 ];
+// 배치 적성 축 (2026-08-08) — sp-feature-scores 의 SP 배치축 가중 잔차 + 본인 평균 중심화.
+//   ⚠️ ohSorryRating/scripts/analyze/sp/dump-sp-user-personas.js 의 SP_LAYOUT_DEFS 및
+//      persona.js SP_LAYOUT_GROUPS 와 **3곳이 1:1** 이어야 한다. 한쪽만 바꾸면 그룹 평균이 조용히 빈다.
+//   ⚠️ KEIMA(계마)는 DP 전용 개념이라 제외. HSTAIR/HANDS 는 DP 의 1P↔2P 상호작용이라 SP 에 없다.
+const SP_LAYOUT_DEFS = [
+  { key: 'DOUBLE_STAIR', label: '겹계단' },
+  { key: 'SPIRAL_UP', label: '오른나선' },
+  { key: 'SPIRAL_DN', label: '왼나선' },
+  { key: 'TRILL_K4', label: '중앙트릴34' },
+  { key: 'TRILL_K35', label: '중앙트릴35' },
+  { key: 'TRILL_K24', label: '중앙트릴24' },
+  { key: 'JUMP_WIDE', label: '도약' },
+  { key: 'PHRASE_LOOP_FAST', label: '고속반복' },
+  { key: 'PEAK_CHORD_SIZE', label: '최대동시' },
+];
+function computeSpLayoutProfile(rows) {
+  if (!rows.length) return null;
+  let allSum = 0;
+  for (const r of rows) allSum += r.resid;
+  const center = allSum / rows.length;
+  const out = [];
+  for (const def of SP_LAYOUT_DEFS) {
+    let sumRW = 0, sumW = 0, n = 0;
+    for (const r of rows) {
+      const v = (r.sc && r.sc[def.key]) || 0;
+      if (v < 40) continue;
+      const w = v / 100;
+      sumRW += r.resid * w; sumW += w; n++;
+    }
+    if (sumW <= 0 || n < 10) continue;
+    out.push({ key: def.key, label: def.label, mean: sumRW / sumW - center, n });
+  }
+  return out.length ? out : null;
+}
+
 function computeSpMuriProfile(rows, offByKey) {
   let allSum = 0, allN = 0;
   for (const r of rows) { allSum += r.resid; allN++; }
@@ -344,6 +380,11 @@ export function spPersonaFor(ownSp, R) {
     streamProfile: tierProfileOf(resid, (sc) => tierSharesOfHist(spKeyRhythmHist(sc, ['all']))),
     mixProfile: computeSpMixProfile(resid),
     muriProfile: computeSpMuriProfile(resid, R.spKeymaps.offByKey),
+    layoutProfile: computeSpLayoutProfile(resid),
+    // 배치/무리 축 usernorm — **SP 전용 파일**. DP 것(persona-popmean.json)과 섞으면 안 된다:
+    //   실측 μ 부호가 반대고(SP 음수 / DP 양수) 스케일이 5배 차이난다.
+    popAxes: (R.popmeanSp && R.popmeanSp.axes) || null,
+    popDerived: (R.popmeanSp && R.popmeanSp.derived) || null,
   };
   const rich = R.personaLib.richReportOf(profile);
   const P = rich.persona;

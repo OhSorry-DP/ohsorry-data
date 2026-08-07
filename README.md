@@ -56,6 +56,14 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-08 — SP persona 배치 섹션 + `persona-popmean-sp.json`
+
+`spPersonaFor` 에 `layoutProfile`(SP 배치 9축)을 붙이고 SP 전용 usernorm baseline 을 싣는다.
+
+- ⚠️ **`persona-popmean.json`(DP)과 절대 섞지 말 것** — 실측 μ 부호가 반대(SP 음수 / DP 양수)고 σ 스케일이 5배 차이난다. SP 는 gl-mean 중심 self-relative, DP 는 rateRef 절대 잔차라서다. 그래서 파일과 주입 필드(`popmeanSp`)를 분리했다.
+- `SP_LAYOUT_DEFS` 는 **3곳 동기화** — 여기 / `ohSorryRating/scripts/analyze/sp/dump-sp-user-personas.js` / `ohSorryRating/modules/persona.js`(그룹).
+- 생성은 `gen-persona-popmean.js <sp-user-personas.jsonl> --sp`.
+
 ### 2026-08-07 — persona 배치 축 usernorm (`persona-popmean.json`)
 
 배치/무리/지구력 축의 인구 μ/σ 를 repo 루트에 싣는다. `persona-pop.json`(10피처 usernorm)과 같은 방식 — `persona-lib.mjs` 가 로컬 파일로 읽어 profile 에 `popAxes`/`popDerived` 로 주입한다.
