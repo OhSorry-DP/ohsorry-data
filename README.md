@@ -56,6 +56,15 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-08 — persona 배치 그룹 재편에 맞춰 popmean 2종 재생성
+
+ohSorryRating 이 배치 `배치·리듬`(기타 묶음) 그룹을 **손이동·고속반복·피크 중 동시치기 3개 그룹**으로 쪼개면서 파생 키가 바뀌었다. 그 산출물을 여기로 옮긴다.
+
+- `persona-popmean.json` (DP) — n 265→**266**. `lay.jumpwide`·`lay.loopfast`·`lay.peakchord` 신설, 구 `lay.etc` 제거. `lay.groupDev` σ 0.159→0.183(그룹 수 4→6).
+- `persona-popmean-sp.json` (SP) — n 159→**160**. `lay.spjump`·`lay.sploop`·`lay.sppeak` 신설.
+- 두 파일 모두 **전수 재덤프 후** 생성했다(DP 266명 / SP 160명). ⚠️ 부분 덤프로 돌리면 `MIN_USERS`(30) 미달로 전 축이 빈 파일이 나온다.
+- 기존 유저 반영은 `repersona-r2` 워크플로(persona.js gist 갱신 후 실행).
+
 ### 2026-08-08 — SP persona 배치 섹션 + `persona-popmean-sp.json`
 
 `spPersonaFor` 에 `layoutProfile`(SP 배치 9축)을 붙이고 SP 전용 usernorm baseline 을 싣는다.
