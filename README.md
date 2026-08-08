@@ -1,6 +1,6 @@
 # ohsorry-data
 
-오소리 정적 데이터 저장소 — supabase 덤프본을 **jsdelivr CDN** 으로 서빙해 supabase egress 를 줄인다.
+오소리 정적 데이터 저장소 — supabase 덤프본을 **Cloudflare R2 + Worker(`data.iidx.in`)** 로 서빙해 supabase egress 를 줄인다. (2026-08-04 jsdelivr 에서 이전 — 아래 §서빙 참고. 이 repo 는 원본·이력 보관 겸 R2 업로드 소스다.)
 
 > ⚠️ **자동 생성 — 직접 편집 금지.** ohSorryAdmin `scripts/dump-data-repo.js` 가 supabase 에서 덤프.
 
