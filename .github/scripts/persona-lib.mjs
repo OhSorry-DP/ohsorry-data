@@ -455,6 +455,15 @@ export function personaFor(allCharts, R) {
     { key: 'JUMP_WIDE', label: '도약', of: (sc) => Math.max(sc.JUMP_WIDE_L || 0, sc.JUMP_WIDE_R || 0) },
     { key: 'PHRASE_LOOP_FAST', label: '고속반복', of: (sc) => Math.max(sc.PHRASE_LOOP_FAST_L || 0, sc.PHRASE_LOOP_FAST_R || 0) },
     { key: 'PEAK_CHORD_SIZE', label: '최대동시', of: (sc) => Math.max(sc.PEAK_CHORD_SIZE_L || 0, sc.PEAK_CHORD_SIZE_R || 0) },
+    // 차지 세부 6축 (2026-08-08) — 산식이 같아 여기 얹지만 **배치 축이 아니다**.
+    //   persona.js 는 LAYOUT_GROUPS 에 넣지 않고 🎲개인차의 '차지 상세' 줄에서만 소비한다(CN_AXES).
+    //   ⚠️ ohSorryRating dump-all-user-personas.js LAYOUT_DEFS 와 동일 유지.
+    { key: 'CN_SOLO', label: '단독차지', of: (sc) => Math.max(sc.CN_SOLO_L || 0, sc.CN_SOLO_R || 0) },
+    { key: 'CN_CHORD', label: '차지동시', of: (sc) => Math.max(sc.CN_CHORD_L || 0, sc.CN_CHORD_R || 0) },
+    { key: 'CN_MIX', label: '차지혼재', of: (sc) => Math.max(sc.CN_MIX_L || 0, sc.CN_MIX_R || 0) },
+    { key: 'CN_REPEAT', label: '차지연타', of: (sc) => Math.max(sc.CN_REPEAT_L || 0, sc.CN_REPEAT_R || 0) },
+    { key: 'CN_SHAPE', label: '차지이동', of: (sc) => Math.max(sc.CN_SHAPE_L || 0, sc.CN_SHAPE_R || 0) },
+    { key: 'CN_HOLD', label: '누른채처리', of: (sc) => Math.max(sc.CN_HOLD_L || 0, sc.CN_HOLD_R || 0) },
   ];
   let layoutProfile = null;
   if (overallResid != null) {
