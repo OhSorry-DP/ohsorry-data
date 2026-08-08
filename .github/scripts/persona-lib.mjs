@@ -179,7 +179,14 @@ function spResidRows(ownSp, R) {
   const glAgg = {};
   for (const r of rows) { if (!glAgg[r.gl]) glAgg[r.gl] = { sum: 0, n: 0 }; glAgg[r.gl].sum += r.rate; glAgg[r.gl].n++; }
   const glMean = {}; for (const g in glAgg) glMean[g] = glAgg[g].sum / glAgg[g].n;
-  for (const r of rows) r.resid = r.rate - glMean[r.gl];
+  // 잔차 기준선(2026-08-08) — R.spRateRef(인구 평균 rate)가 있으면 **인구 대비**로 잰다(DP rateRef 와 같은 사상).
+  //   종전 self-relative 는 SP 유저풀이 10~20명이던 시절의 임시안. 실력이 값에서 지워져 고수에게도
+  //   "대부분의 배치가 연습이 필요하다" 가 붙었다. 표에 없는 gameLevel 만 self 로 폴백한다.
+  //   ⚠️ ohSorryRating/scripts/analyze/sp/dump-sp-user-personas.js 의 spResidRows 와 1:1 동기.
+  for (const r of rows) {
+    const pm = R.spRateRef ? R.spRateRef[r.gl] : null;
+    r.resid = r.rate - (typeof pm === 'number' ? pm : glMean[r.gl]);
+  }
   return rows;
 }
 // 피처 적성(강도 가중 잔차) — 웹 spUserProfile(클리어 구성)과 다름, 리포트 목적의 적성 축.
@@ -365,14 +372,10 @@ export function spPersonaFor(ownSp, R) {
   const resid = spResidRows(ownSp, R);
   const feats = spFeatAptitude(resid);
   if (!feats) return null;
-  // SP overallResid — 인구 rate 기준(gameLevel별) 대비 잔차 평균. 스코어링 마스터(SP) 판정용.
-  //   feats/profiles 는 self-relative(유저 내 gameLevel 중심) 유지 — overallResid 만 인구 대비(spRateRef).
+  // SP overallResid — 인구 rate 기준 대비 잔차 평균. 스코어링 마스터(SP) 판정 + 배치/무리 축 중심화 기준.
+  //   2026-08-08 부터 resid 자체가 인구 기준이라 그 평균이 곧 overallResid 다(종전엔 여기서만 따로 계산했다).
   let spOverallResid = null;
-  if (R.spRateRef) {
-    let s = 0, n = 0;
-    for (const r of resid) { const pm = R.spRateRef[r.gl]; if (typeof pm === 'number') { s += r.rate - pm; n++; } }
-    if (n) spOverallResid = s / n;
-  }
+  if (R.spRateRef && resid.length) spOverallResid = resid.reduce((a, r) => a + r.resid, 0) / resid.length;
   const profile = {
     pop: (R.pop && R.pop.sp) || null,   // usernorm 인구 통계(위 DP 와 동일 취지)
     nCharts: ownSp.length,

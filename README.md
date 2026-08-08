@@ -56,6 +56,15 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-08 — SP persona 잔차 기준선을 인구 rate 기준으로 전환
+
+`spResidRows` 가 `rate − **본인의** gameLevel 평균`(self-relative)으로 재던 것을 **인구 평균 rate**(`sp-rate-reference.json` 의 `byGameLevel`) 기준으로 바꿨다. SP 유저풀이 10~20명이던 시절의 임시안이라 실력이 값에서 지워졌고, SP★16 유저에게도 "대부분의 배치가 연습이 필요하다" 가 붙었다.
+
+- `overallResid` 는 잔차 평균으로 통합(종전엔 여기서만 따로 계산). 이제 `feats`/`layoutProfile`/`muriProfile`/`bpmProfile`/`kensei`/스크·키리듬이 전부 인구 기준 위에 선다.
+- ⚠️ `ohSorryRating/scripts/analyze/sp/dump-sp-user-personas.js` 의 `spResidRows` 와 **1:1 동기**. 한쪽만 바꾸면 분석본과 서빙본이 조용히 갈린다.
+- `persona-popmean-sp.json` 은 이 기준으로 재생성한 것으로 교체(축 μ −0.4~−2.0 → −1.0~−3.0). 스케일이 다르니 **둘을 섞으면 안 된다**.
+- 검증(161명): 전반 판정별 SP★ 중앙값 `골고루 12.40 / 무난 7.40 / 연습 필요 3.20`, `overallResid ↔ SP★ r = 0.782`.
+
 ### 2026-08-08 — persona 배치 그룹 재편에 맞춰 popmean 2종 재생성
 
 ohSorryRating 이 배치 `배치·리듬`(기타 묶음) 그룹을 **손이동·고속반복·피크 중 동시치기 3개 그룹**으로 쪼개면서 파생 키가 바뀌었다. 그 산출물을 여기로 옮긴다.
