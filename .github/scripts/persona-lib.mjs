@@ -274,6 +274,14 @@ const SP_LAYOUT_DEFS = [
   { key: 'JUMP_WIDE', label: '도약' },
   { key: 'PHRASE_LOOP_FAST', label: '고속반복' },
   { key: 'PEAK_CHORD_SIZE', label: '최대동시' },
+  // 차지 세부 6축 (2026-08-08) — 배치 축이 아니라 CHARGE 하위 축(persona.js CN_AXES 가 소비).
+  //   ⚠️ SP 는 1P-side 단일이라 `_L`/`_R` 이 없다. ohSorryRating dump-sp-user-personas.js 와 1:1.
+  { key: 'CN_SOLO', label: '단독차지' },
+  { key: 'CN_CHORD', label: '차지동시' },
+  { key: 'CN_MIX', label: '차지혼재' },
+  { key: 'CN_REPEAT', label: '차지연타' },
+  { key: 'CN_SHAPE', label: '차지이동' },
+  { key: 'CN_HOLD', label: '누른채처리' },
 ];
 function computeSpLayoutProfile(rows) {
   if (!rows.length) return null;
