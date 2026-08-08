@@ -64,6 +64,7 @@ https://data.iidx.in/version.json
 - ⚠️ `ohSorryRating/scripts/analyze/sp/dump-sp-user-personas.js` 의 `spResidRows` 와 **1:1 동기**. 한쪽만 바꾸면 분석본과 서빙본이 조용히 갈린다.
 - `persona-popmean-sp.json` 은 이 기준으로 재생성한 것으로 교체(축 μ −0.4~−2.0 → −1.0~−3.0). 스케일이 다르니 **둘을 섞으면 안 된다**.
 - 검증(161명): 전반 판정별 SP★ 중앙값 `골고루 12.40 / 무난 7.40 / 연습 필요 3.20`, `overallResid ↔ SP★ r = 0.782`.
+- ⚠️ **`persona-pop.json` 의 sp 도 같이 재생성해야 한다**(10피처 usernorm). 기준선이 바뀌면 축 분포가 통째로 달라진다 — 실측 SP `sd 0.16 → 10.34`(65배). 옛 sd 로 새 잔차를 나누면 z 가 65배로 뻥튀기돼 `물량(-63.1, 압도적)` 같은 값이 나온다(스모크에서 잡았다). 생성은 `ohSorryAdmin/scripts/buildPersonaPop.js`. DP 는 기준선 무변경이라 `_relSd 4.844 → 4.841` 로 사실상 그대로.
 
 ### 2026-08-08 — persona 배치 그룹 재편에 맞춰 popmean 2종 재생성
 
