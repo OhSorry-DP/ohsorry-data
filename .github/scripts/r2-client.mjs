@@ -14,7 +14,9 @@
 //      `W/"<md5>"` 를 붙인다. 따옴표만 벗기면 md5 와 절대 안 맞는다.
 //   ③ **429/5xx 재시도** — Cloudflare API 는 계정 단위 rate limit 이 있다.
 //
-// 환경: CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN 이 있으면 REST, 없으면 wrangler 폴백.
+// 환경: CLOUDFLARE_ACCOUNT_ID + 토큰이 있으면 REST, 없으면 wrangler 폴백.
+//   토큰은 CLOUDFLARE_R2_TOKEN(로컬 .env — CF 토큰이 DNS·Pages·R2 용도별 3개라 이름으로 구분) 우선,
+//   없으면 CLOUDFLARE_API_TOKEN(Actions 시크릿 이름 — R2 권한 있는 토큰이 이 이름으로 등록돼 있다).
 // CJS 에서도 쓸 수 있다 — `await import(pathToFileURL(p).href)` (dump-data-repo.js 선례).
 
 import fs from 'node:fs';
@@ -27,7 +29,7 @@ export const BUCKET = 'ohsorry-data';
 export const CDN = 'https://data.iidx.in/';
 
 const ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID || '607eea1b073bea6747e6e9b76f2d7b41';
-const TOKEN = process.env.CLOUDFLARE_API_TOKEN;
+const TOKEN = process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN;
 const REST_BASE = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/r2/buckets/${BUCKET}/objects/`;
 
 export const useRest = !!(ACCOUNT && TOKEN);

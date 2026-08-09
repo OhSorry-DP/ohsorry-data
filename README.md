@@ -69,6 +69,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-09 — r2-client 토큰을 `CLOUDFLARE_R2_TOKEN` 우선으로
+
+- [r2-client.mjs](.github/scripts/r2-client.mjs): REST 토큰을 `CLOUDFLARE_R2_TOKEN`(로컬 .env) 우선, 없으면 `CLOUDFLARE_API_TOKEN`(Actions 시크릿 이름)으로.
+- **왜** — 로컬 `.env` 의 CF 토큰이 용도별로 3개(DNS·Pages·R2)가 되면서 이름으로 구분하게 됐다. 종전 로컬 `CLOUDFLARE_API_TOKEN` 은 DNS 토큰이라 **R2 권한이 없어**(실측 403) 로컬 실행(dump-data-repo 등)의 REST 가 조용히 실패했다. Actions 는 R2 권한 있는 토큰이 `CLOUDFLARE_API_TOKEN` 시크릿으로 등록돼 있어 **무영향**.
+
 ### 2026-08-09 — git 데이터 커밋 중단, R2 가 유일본 (CF 통합 §4)
 
 - [dump-user.yml](.github/workflows/dump-user.yml) / [dump-users-list.yml](.github/workflows/dump-users-list.yml): **commit/push 스텝 제거.** 권한도 `contents: write` → `read`. 덤프 산출물은 R2 PUT 만 한다.
