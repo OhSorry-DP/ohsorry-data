@@ -19,6 +19,21 @@ const USER_RE = /^user\/[A-Za-z0-9]+\.json$/;
 //   user/ 슬림 덤프로는 불가능한 supabase 복원의 원본이다.
 //   user/ 와 분리한 이유: 카드 첫 로딩에 딸려오면 응답이 느려지는데, 정작 필요한 건 모달을 열 때뿐이다.
 const HIST_RE = /^hist\/[A-Za-z0-9]+\.json$/;
+// lib/ · data/ — 종전 gist `c3da608…` 이 뿌리던 코어 JS·데이터 JSON (CF 통합 §3).
+//   gist raw 는 `max-age=300` 고정이라 캐시를 우리가 못 쥐었다. R2 로 옮기면 Worker 가 쥔다.
+//   파일명에 `.`·`+` 가 들어가는 것이 실재한다(`OSR13.5+.js`, `patterns-dp-0810.json`) → 문자 클래스에 포함.
+//   `..` 는 위 keyOf 가 먼저 막으므로 여기서 `.` 을 허용해도 traversal 이 되지 않는다.
+const LIB_RE = /^lib\/[A-Za-z0-9._+-]+\.(js|css)$/;
+const DATA_RE = /^data\/[A-Za-z0-9._+-]+\.json$/;
+
+// 확장자별 content-type. 종전엔 전부 application/json 으로 내보냈는데, JSON 만 서빙할 때는
+//   맞았지만 lib/ 의 JS·CSS 까지 그렇게 내보내면 `<link rel=stylesheet>` 같은 소비처가 깨진다.
+const CT = {
+  js: 'application/javascript; charset=utf-8',
+  css: 'text/css; charset=utf-8',
+  json: 'application/json; charset=utf-8',
+};
+const contentTypeOf = (key) => CT[key.slice(key.lastIndexOf('.') + 1).toLowerCase()] || 'application/octet-stream';
 
 // 브라우저 캐시는 짧게 — 덤프는 webhook 으로 수시 갱신되므로 신선도가 우선.
 //   엣지(Cache API)도 같은 값으로 두어 R2 Class B 읽기를 줄인다.
@@ -48,6 +63,8 @@ function keyOf(pathname) {
   if (ALLOWED_ROOT.has(key)) return key;
   if (USER_RE.test(key)) return key;
   if (HIST_RE.test(key)) return key;
+  if (LIB_RE.test(key)) return key;
+  if (DATA_RE.test(key)) return key;
   return null;
 }
 
@@ -82,7 +99,7 @@ export default {
 
     const res = new Response(obj.body, {
       headers: {
-        'content-type': 'application/json; charset=utf-8',
+        'content-type': contentTypeOf(key),
         'cache-control': CACHE_CONTROL,
         etag: obj.httpEtag,
         ...corsHeaders(),

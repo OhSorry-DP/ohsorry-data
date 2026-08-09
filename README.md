@@ -69,6 +69,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-09 — Worker 에 `lib/`·`data/` 허용 + 확장자별 content-type (CF 통합 §3)
+
+- [cf/src/index.js](cf/src/index.js): 허용키에 `lib/<name>.(js|css)` · `data/<name>.json` 추가 — 종전 gist `c3da608…` 이 뿌리던 코어 JS·데이터 JSON 42개의 이전 대상. gist raw 는 `max-age=300` 고정이라 캐시를 우리가 못 쥐었는데 R2 로 오면 Worker 가 쥔다.
+- **content-type 을 확장자로 결정**하도록 변경 — 종전엔 전부 `application/json` 이었다. JSON 만 서빙할 땐 맞았지만 JS·CSS 까지 그렇게 내보내면 `<link rel=stylesheet>` 같은 소비처가 깨진다.
+- 파일명 문자 클래스에 `.`·`+` 를 포함 — `OSR13.5+.js`·`patterns-dp-0810.json` 이 실재한다. `..` 는 `keyOf` 가 먼저 막으므로 traversal 위험 없음.
+- 배포는 ohSorryAdmin `scripts/publishAsset.js`(gist + R2 이중 배포).
+
 ### 2026-08-09 — R2 스냅샷 백업 신설 (일별 30 + 월별 12 · CF 통합 §2)
 
 - **[snapshot-r2.mjs](.github/scripts/snapshot-r2.mjs)** + **[snapshot-r2.yml](.github/workflows/snapshot-r2.yml)** — `user/` + `hist/` + 루트 JSON 을 tar.gz 한 덩어리로 묶어 `snapshot/` 에 보관. cron **UTC 19:00 = KST 04:00**(전체 재생성 KST 03:05 직후라 정합성 보정이 반영된 상태를 담는다). KST 1일이면 monthly 도 같이 만든다 — 다운로드를 재사용하므로 추가 비용이 없다.
