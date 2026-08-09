@@ -78,6 +78,8 @@ https://data.iidx.in/version.json
 - 상태는 `mirror/gist-state.json`(Worker 허용키가 아니라 비공개). **실패가 있으면 상태를 갱신하지 않는다** — 갱신하면 `updated_at` 게이트에 걸려 실패분이 영영 안 올라간다.
 - ⚠️ **etag 비교 시 `W/` 접두사를 벗긴다** — node fetch 가 gzip 을 요청해 CF 가 약한 검증자를 준다. 안 벗기면 매 회차 전 파일을 재업로드한다(§1 백필에서 겪은 것과 같은 함정).
 - ⚠️⚠️ **gist 쓰기를 중단하는 순간(§3 ③) 이 워크플로를 반드시 끄거나 지울 것.** 그때부터 R2 가 최신이고 gist 는 화석인데, 미러가 계속 돌면 **낡은 gist 내용으로 R2 를 되돌린다.** 같은 이유로 이중 배포 기간에는 "R2 에만" 수동 업로드해서도 안 된다.
+- **초기 이관 완료(2026-08-09)** — `force=true` 로 42개 전부, 실패 0, 약 3초. 검증: content-type 확장자대로, 내용 gist 와 md5 일치, `OSR13.5+.js` 정상, 비허용 키(`lib/evil.txt`·`data/*.js`·`mirror/gist-state.json`) 전부 404. 재실행 시 게이트가 걸려 파일 취득 0.
+- 📌 이 시점에서 **읽는 쪽은 아직 아무도 없다** — 웹·INF 모두 gist 를 본다.
 
 ### 2026-08-09 — Worker 에 `lib/`·`data/` 허용 + 확장자별 content-type (CF 통합 §3)
 
