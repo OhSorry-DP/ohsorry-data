@@ -15,6 +15,11 @@
   - DBR 행도 담지만 웹 `fetchDbrScores` 는 아직 supabase 직접 조회다 — DBR 쓰기가 `users` 웹훅을 안 깨워 다음 업로드 전까지 hist 에 안 들어오기 때문(계획 §1 참고).
   - **`.gitignore` 대상** — 전 유저 44.5MB 라 커밋하면 이미 219MB 인 `.git` 을 다시 부풀린다. 롤백은 git 이 아니라 R2 스냅샷(계획 §2)이 맡는다.
   - 갱신은 **변경분만** — 덤프 때 (행수, 최신 `date`) 프로브로 R2 현재본과 대조해 같으면 `scores` 전체 재조회를 건너뛴다. 매번 전체를 읽으면 덤프 1회 supabase 읽기가 +94% 늘어난다(실측 2026-08-09).
+- `snapshot/daily/YYYY-MM-DD.tar.gz` · `snapshot/monthly/YYYY-MM.tar.gz` — **백업**(git 에 없음 · R2 전용). `user/` + `hist/` + 루트 JSON 을 한 덩어리로 압축. 보존 **일별 30 + 월별 12**.
+  - **R2 는 객체 버저닝이 없다** → 계획 §4 로 git 데이터 커밋을 중단하면 이게 **유일한 롤백 수단**이다. 월별만으로는 최대 한 달치를 잃으므로 일별이 필수.
+  - ⚠️ **sanity check 후에만 생성** — 유실은 스냅샷으로 복구되지만 오염은 오염을 굳힌다. 직전 스냅샷 대비 유저 수·이력 행수·persona 보유 인원이 5% 넘게 줄면 만들지 않고 실패로 알린다(persona 37명 유실 전례).
+  - ⚠️ **Worker 허용키가 아니다** — `data.iidx.in` 으로 서빙되지 않는다(백업이지 컨텐츠가 아니다). 접근은 wrangler/REST 로만.
+  - `snapshot/index.json` = 회차별 통계(유저 수·이력 행수·persona 보유·용량). 다음 회차 sanity check 의 기준선.
 - `songs.json` — 곡 마스터(공유) `[{ song_id, title, ac, legen, textage_song_id, series_no }]`. 웹 `getSongsCache` 가 supabase 대신 이걸 읽음. cron(5분) 갱신.
 - `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). **실시간 갱신은 webhook 덤프(dump-user)가 R2 에 증분 병합**([merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs))으로 담당하고, supabase 전체 재생성은 **1일 1회 cron**(정합성 보정 — 삭제 유저 정리·증분 누락 복구)이다. 증분의 베이스는 git 이 아니라 **R2 현재본**이라, 커밋을 건너뛴 회차의 갱신도 누적된다.
 - `version.json` — 전체 덤프 타임스탬프 + 유저 수
@@ -63,6 +68,17 @@ https://data.iidx.in/version.json
 > 오리진이 구본을 재캐시하고 최대 12h 고착된다 — 아래 변경 이력의 두 사고가 모두 이것이다.
 
 ## 변경 이력
+
+### 2026-08-09 — R2 스냅샷 백업 신설 (일별 30 + 월별 12 · CF 통합 §2)
+
+- **[snapshot-r2.mjs](.github/scripts/snapshot-r2.mjs)** + **[snapshot-r2.yml](.github/workflows/snapshot-r2.yml)** — `user/` + `hist/` + 루트 JSON 을 tar.gz 한 덩어리로 묶어 `snapshot/` 에 보관. cron **UTC 19:00 = KST 04:00**(전체 재생성 KST 03:05 직후라 정합성 보정이 반영된 상태를 담는다). KST 1일이면 monthly 도 같이 만든다 — 다운로드를 재사용하므로 추가 비용이 없다.
+- **왜** — R2 는 객체 버저닝이 없다. §4 로 git 데이터 커밋을 중단하면 이게 유일한 롤백 수단이 된다. 낱개 복사가 아니라 tar.gz 인 이유는 371×2 개를 개별로 두면 Class A 요청만 늘고 관리가 번거롭기 때문.
+- ⚠️ **sanity check 후에만 생성** — 직전 스냅샷(`snapshot/index.json`) 대비 유저 수·이력 행수·persona/spPersona 보유 인원이 5%(`--max-drop`) 넘게 줄면 **만들지 않고 `::error::` 로 실패**시킨다. 임계 이하 감소는 `⚠️` 로 표시만. 첫 회차엔 대조 대상이 없으므로 **`user/` 누락 비율**을 절대 가드로 따로 본다.
+- **보존 정리는 객체 목록 API 를 쓰지 않는다** — 키가 날짜로 결정되므로 지울 키를 직접 계산한다(daily 는 31~40일 전, monthly 는 13~15개월 전). 실행을 한 번 걸러도 유실 없이 정리되고, 없는 키 DELETE 는 무해하다.
+- R2 접근은 **REST 우선 + wrangler 폴백** — 정본 [r2-repersona.mjs](.github/scripts/r2-repersona.mjs) 와 같은 구조. GET 이 742회라 REST 가 필수다. 단 **tar.gz 단일 PUT 은 wrangler** — 호출이 1회뿐이라 스폰 비용이 무의미하고 큰 파일 멀티파트를 알아서 처리한다.
+- ⚠️ `snapshot/` 은 **Worker 허용키가 아니다** — 서빙 대상이 아니라 백업이다.
+- 검증(2026-08-09, dry): 다운로드·통계·tar 정상, **압축률 12%**(원본 2.6MB → 0.3MB, 전체 환산 ~15MB로 계획 추정 32MB보다 작다). sanity check 4개 시나리오 — 동일/소폭감소는 통과, 이력 6.2% 급감·persona 87.5% 급감은 차단. 보존 키 계산 정확(KST 2026-08-09 기준 daily 07-10 이전 · monthly 2025-08 이전).
+- ⚠️ tar 에 절대경로를 넘기지 않는다 — GNU tar 가 `C:\` 의 콜론을 원격 호스트로 읽어 죽는다(로컬 dry 실측). `cwd` + 상대경로로 통일.
 
 ### 2026-08-09 — 무손실 점수 이력 `hist/{id}.json` 신설 (R2 전용 · CF 통합 §1)
 

@@ -1,0 +1,59 @@
+name: snapshot-r2
+
+# R2 서빙본(user/ + hist/ + 공유 JSON)을 tar.gz 로 묶어 snapshot/ 에 보관.
+#
+# 왜: **R2 는 객체 버저닝이 없다**(2026-08-09 확인). CF 통합 계획 §4 로 git 데이터 커밋을 중단하면
+#     이 스냅샷이 **유일한 롤백 수단**이 된다. 그래서 월별만으로는 부족하고 일별이 필수다.
+#     보존 = daily 30 + monthly 12 (≈1.34GB, R2 무료 10GB 내).
+#
+# ⚠️ sanity check 없이는 만들지 않는다 — 유실은 스냅샷으로 복구되지만 **오염은 그대로 굳는다.**
+#    직전 스냅샷 대비 유저 수·이력 행수·persona 보유 인원이 5% 넘게 줄면 만들지 않고 실패로 알린다.
+#
+# 시각: UTC 19:00 = **KST 04:00**. dump-users-list 의 전체 재생성(KST 03:05)이 끝난 뒤라
+#       정합성 보정이 반영된 상태를 담는다. KST 1일이면 monthly 도 같이 만든다(다운로드 1회 재사용).
+on:
+  schedule:
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: 'daily / monthly / auto (비우면 auto — 항상 daily, KST 1일이면 monthly 도)'
+        required: false
+        default: 'auto'
+      dry:
+        description: 'true 면 PUT·DELETE 없이 집계와 sanity check 만'
+        required: false
+        default: 'false'
+      max_drop:
+        description: '급감 판정 임계(%) — 기본 5'
+        required: false
+        default: ''
+
+# 같은 스냅샷 키를 두 실행이 동시에 쓰면 서로 덮어쓴다 — 직렬화(취소하지 않는다).
+concurrency:
+  group: snapshot-r2
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Snapshot R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+        run: |
+          # 폴백(wrangler)은 객체당 프로세스 스폰이라 742회 GET 에 쓸 수 없다 → 토큰 없으면 중단.
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN 미설정 — R2 접근 불가"; exit 1
+          fi
+          ARGS="--kind=${{ inputs.kind || 'auto' }}"
+          [ "${{ inputs.dry }}" = "true" ] && ARGS="$ARGS --dry"
+          [ -n "${{ inputs.max_drop }}" ] && ARGS="$ARGS --max-drop=${{ inputs.max_drop }}"
+          node .github/scripts/snapshot-r2.mjs $ARGS
