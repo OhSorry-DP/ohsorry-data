@@ -99,20 +99,37 @@ const R = await loadPersonaResources();
 if (!R.popmean) console.warn('::warning::persona-popmean.json 미로드 — DP 가 raw 경로로 생성된다');
 if (!R.popmeanSp) console.warn('::warning::persona-popmean-sp.json 미로드 — SP 가 raw 경로로 생성된다');
 
-let ids = fs.readdirSync('user').filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5));
-if (ONLY) ids = ids.filter((i) => ONLY.has(i));
-ids = ids.slice(0, LIMIT);
-
-// REST probe — 아무 오브젝트나 1회 GET 해 본다. 401/403 이면 토큰이 object API 를 못 쓰는 것 → wrangler 폴백.
-if (useRest && ids.length) {
+// REST probe — 고정 키(users-list.json)를 1회 GET 해 본다. 401/403 이면 토큰이 object API 를
+//   못 쓰는 것 → wrangler 폴백. **유저 목록보다 먼저** 해야 한다(아래 목록 취득도 이 경로를 탄다).
+if (useRest) {
   try {
-    const r = await restFetch(`user/${ids[0]}.json`, { method: 'GET' });
+    const r = await restFetch('users-list.json', { method: 'GET' });
     if (r.status === 401 || r.status === 403) {
       console.warn(`::warning::R2 REST ${r.status} — wrangler 폴백(느림). 토큰에 R2 오브젝트 권한을 주면 빨라진다`);
       useRest = false;
     }
   } catch (e) { console.warn('::warning::R2 REST probe 실패 — wrangler 폴백:', e.message); useRest = false; }
 }
+
+// 대상 유저 목록은 **R2 의 users-list.json** 에서 받는다.
+//   ⚠️ 종전엔 git 의 `user/` 폴더를 readdir 했는데, §4(2026-08-09)로 데이터 커밋을 중단해
+//   그 폴더가 그 시점에서 굳었다. 그대로 두면 이후 가입한 유저가 영영 대상에서 빠진다.
+//   R2 취득에 실패하면 굳은 git 폴더로 폴백한다(없는 것보다는 낫다 — 경고를 남긴다).
+let ids = [];
+try {
+  const listText = await r2GetText('users-list.json');
+  const list = listText ? JSON.parse(listText) : null;
+  if (!Array.isArray(list) || !list.length) throw new Error('users-list 비었음');
+  ids = list.map((u) => u.iidx_id).filter((x) => /^[A-Za-z0-9]+$/.test(String(x || '')));
+  console.log(`대상 목록 = R2 users-list.json (${ids.length}명)`);
+} catch (e) {
+  console.warn(`::warning::R2 users-list 취득 실패(${e.message}) — git user/ 폴더로 폴백(§4 이후 굳은 목록이라 신규 유저가 빠질 수 있다)`);
+  try { ids = fs.readdirSync('user').filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); }
+  catch { ids = []; }
+}
+if (!ids.length) { console.error('::error::대상 유저 목록이 비었다 — 중단'); process.exit(1); }
+if (ONLY) ids = ids.filter((i) => ONLY.has(i));
+ids = ids.slice(0, LIMIT);
 // wrangler 폴백은 프로세스 스폰이라 동시 실행 이득이 없다(오히려 메모리만 먹는다) → 1.
 const conArg = process.argv.find((a) => a.startsWith('--concurrency='));
 const CONC = conArg ? Number(conArg.slice(14)) : (useRest ? 4 : 1);

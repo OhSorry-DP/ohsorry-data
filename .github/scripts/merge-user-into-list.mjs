@@ -31,9 +31,20 @@ const entry = {
   sp_pattern_score: pick(0),
 };
 
-let list = [];
-try { list = JSON.parse(fs.readFileSync('users-list.json', 'utf8')); } catch { /* 최초/파손 → 새로 만들지 않고 빈 배열에 추가 */ }
-if (!Array.isArray(list)) list = [];
+// ⚠️ 베이스가 없거나 깨졌으면 **중단한다**(CF 통합 §4).
+//   종전엔 빈 배열로 시작했다. git 이 데이터를 들고 있을 때는 그래도 다음 cron 전체 재생성이
+//   복구했지만, §4 로 git 커밋을 중단한 뒤로는 **R2 가 유일본**이라 빈 배열을 병합해 PUT 하면
+//   전 유저 목록이 그대로 날아간다. 취득 실패는 조용히 넘기지 말고 실패로 끝내는 게 맞다.
+//   (워크플로가 R2 현재본을 users-list.json 으로 내려놓은 뒤 이 스크립트를 부른다.)
+const ALLOW_EMPTY = process.argv.includes('--allow-empty');   // 최초 부트스트랩 전용
+let list = null;
+try { list = JSON.parse(fs.readFileSync('users-list.json', 'utf8')); } catch (e) { list = null; }
+if (!Array.isArray(list) || (!list.length && !ALLOW_EMPTY)) {
+  console.error('::error::users-list.json 베이스가 없거나 비었다 — 병합 중단.'
+    + ' 빈 목록을 PUT 하면 전 유저가 사라진다. R2 취득 실패를 먼저 확인할 것'
+    + ' (의도적 최초 생성이면 --allow-empty).');
+  process.exit(1);
+}
 const i = list.findIndex((x) => x && x.iidx_id === u.iidx_id);
 if (i >= 0) list[i] = entry; else list.push(entry);  // star=null 신규는 정렬상 뒤가 맞고, 웹은 클라이언트 재정렬하므로 append 로 충분
 fs.writeFileSync('users-list.json', JSON.stringify(list));

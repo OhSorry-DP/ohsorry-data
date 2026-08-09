@@ -1,7 +1,13 @@
 name: dump-user
 
 # vercel 함수(api/dump-trigger)가 보내는 repository_dispatch(dump-user) 로 기동.
-# client_payload.iidx_id 유저를 supabase 에서 재덤프 → R2 PUT(매번, 서빙) + git commit/push(유저당 1일 1회, 이력).
+# client_payload.iidx_id 유저를 supabase 에서 재덤프 → **R2 PUT 만** 한다.
+#
+# ⚠️ git 데이터 커밋은 2026-08-09 중단했다(CF 통합 §4). 종전엔 유저당 1일 1회 커밋해 이력·롤백
+#    원본을 git 이 들고 있었는데, .git 이 219.7MB / 커밋 13,571개까지 불었고 계속 늘고 있었다.
+#    롤백 수단은 이제 **R2 스냅샷**(§2, 일별 30 + 월별 12)이 맡는다 — hist 가 무손실(§1)이라
+#    오히려 복원력이 낫다. 기존 git 이력은 지우지 않는다(더 늘지 않을 뿐).
+#    → 이 워크플로에는 더 이상 git 쓰기가 없고, repo 는 코드 전용이다.
 on:
   repository_dispatch:
     types: [dump-user]
@@ -14,8 +20,9 @@ concurrency:
 jobs:
   dump:
     runs-on: ubuntu-latest
+    # §4 로 git 쓰기가 사라져 write 권한이 필요 없다 — 최소 권한으로 낮춘다.
     permissions:
-      contents: write
+      contents: read
     # iidx_id 는 외부(supabase record) 유래 → 쉘에 직접 보간하지 말고 env 경유(인젝션 방지).
     env:
       IIDX_ID: ${{ github.event.client_payload.iidx_id }}
@@ -25,32 +32,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      # 덤프 **전에** "이 유저를 오늘 이미 커밋했는가"를 판정한다 (유저당 1일 1커밋 제한).
-      #   기준 = 커밋되어 있는 user/{id}.json 의 `_v`(그 파일을 만든 덤프 시각)의 KST 날짜.
-      #   git log 를 안 쓰는 이유: checkout 이 shallow(fetch-depth=1)라 파일별 커밋 이력을 못 본다.
-      #   ⚠️ 커밋을 건너뛴 회차도 R2 에는 올라가므로, git 의 `_v` = "마지막으로 **커밋된** 덤프 시각"이
-      #      되어 이 판정의 기준으로 정확히 맞다(R2 의 _v 는 더 최신일 수 있음 — 의도된 분리).
-      - name: 1일 1커밋 판정
-        run: |
-          F="user/$IIDX_ID.json"
-          TODAY=$(TZ=Asia/Seoul date +%F)
-          PREV_DAY=""
-          # 기본 셸이 `bash -e` 라 실패 가능한 곳은 전부 `|| 대입`으로 받아 errexit 을 피한다
-          #   (특히 `[ -n "$X" ] && Y=...` 형태는 조건이 거짓일 때 스텝을 죽인다).
-          if [ -f "$F" ]; then
-            PREV_V=$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))._v||""))}catch(e){}' "$F") || PREV_V=""
-            if [ -n "$PREV_V" ]; then
-              PREV_DAY=$(TZ=Asia/Seoul date -d "$PREV_V" +%F 2>/dev/null) || PREV_DAY=""
-            fi
-          fi
-          if [ "$PREV_DAY" = "$TODAY" ]; then
-            echo "SKIP_COMMIT=1" >> "$GITHUB_ENV"
-            echo "오늘($TODAY KST) 이미 커밋된 유저 — git 커밋 skip, R2 만 갱신"
-          else
-            echo "SKIP_COMMIT=0" >> "$GITHUB_ENV"
-            echo "오늘 첫 덤프(직전 커밋일 ${PREV_DAY:-없음}) — git 커밋 진행"
-          fi
 
       # hist(무손실 점수 이력) 현재본을 R2 에서 미리 받아둔다.
       #   덤프 스크립트가 이걸 (행수, 최신 date) 프로브와 대조해 **변경이 없으면 scores 전체 재조회를 건너뛴다.**
@@ -82,86 +63,50 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node .github/scripts/dump-user.mjs "$IIDX_ID"
 
-      - name: Commit & push (유저당 1일 1회)
-        # git 이력은 롤백용이라 하루 1스냅샷이면 충분하고, 신선도가 필요한 서빙은 아래 R2 가 매번 갱신한다.
-        #   종전엔 업로드마다(INF 자동동기화 15분 주기 포함) 커밋이 쌓여, 실측 커밋의 53.6% 가
-        #   타임스탬프(_v / persona._v / spPersona._v / user.date)만 바뀐 무의미 커밋이었다.
+      - name: users-list 증분 병합 (R2 현재본 기준)
+        # 이 유저 1명을 전 유저 목록에 즉시 반영한다(신규 유저가 목록에 한참 안 보이던 문제 해소).
+        #   전체 정합성(삭제 유저 정리·증분 누락 복구)은 dump-users-list 의 1일 1회 전체 재생성이 담당.
+        #
+        # 베이스는 **R2 현재본**이다 — §4 로 git 데이터 커밋을 중단해 R2 가 유일본이 됐다.
+        #   HTTP(data.iidx.in) 대신 wrangler 직접 읽기인 이유: Worker 엣지 캐시(60초)를 우회해야
+        #   하는데 쿼리 cache-bust 가 안 통한다(캐시 키에서 쿼리를 버림 — cf/src/index.js).
+        #   R2 원본 직접 읽기는 read-after-write 강한 일관성이라 방금 다른 실행이 올린 것도 보인다.
+        #
+        # ⚠️ 취득/검증 실패 시 **중단한다.** 종전엔 git 본으로 폴백했지만 이제 git 에 데이터가 없다.
+        #   빈·깨진 베이스로 병합해 PUT 하면 전 유저 목록이 통째로 날아간다(merge 스크립트에도 자체 가드).
+        #   중단해도 서빙은 멀쩡하다 — R2 의 기존 users-list.json 이 그대로 남고, 이 유저의 user/·hist/ 는
+        #   다음 스텝이 올린다. 목록 반영만 다음 회차나 1일 1회 전체 재생성으로 밀린다.
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
         run: |
-          # ── users-list 병합 베이스를 R2 최신본으로 ──────────────────────────────────────
-          #  git 의 users-list 는 "커밋된 것"까지만이라, 1일 1커밋 제한 이후로는 커밋을 건너뛴
-          #  회차의 병합분이 빠져 있다. 그걸 베이스로 쓰면 다음 실행이 앞 실행의 갱신을 되돌린다.
-          #  → R2 현재본을 베이스로 삼아 **R2 가 누적자**가 되게 한다(git 은 하루 1스냅샷).
-          #  HTTP(data.iidx.in) 대신 wrangler 직접 읽기인 이유: Worker 엣지 캐시(60초)를 우회해야
-          #  하는데 쿼리 cache-bust 가 안 통한다(캐시 키에서 쿼리를 버림 — cf/src/index.js).
-          #  R2 원본 직접 읽기는 read-after-write 강한 일관성이라 방금 다른 실행이 올린 것도 보인다.
-          R2_LIST=""
-          rm -f /tmp/r2-users-list.json
-          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
-            # ⚠️ 검증은 생략 불가 — merge-user-into-list 는 파싱 실패 시 빈 배열로 시작한다.
-            #    깨지거나 빈 파일을 베이스로 넘기면 **전 유저 목록이 통째로 날아간다.**
-            if npx --yes wrangler@4 r2 object get "ohsorry-data/users-list.json" \
-                 --file=/tmp/r2-users-list.json --remote >/dev/null 2>&1 \
-               && node -e 'const a=JSON.parse(require("fs").readFileSync("/tmp/r2-users-list.json","utf8"));if(!Array.isArray(a)||!a.length)process.exit(1);console.log("users-list 베이스 = R2 최신본 ("+a.length+"명)")' 2>/dev/null; then
-              R2_LIST=/tmp/r2-users-list.json
-            else
-              echo "::warning::R2 users-list 취득/검증 실패 — git 본을 베이스로 사용(1일 1회 전체 재생성이 보정)"
-            fi
-          else
-            echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — git 본을 베이스로 사용"
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN 미설정 — users-list 병합 불가"; exit 1
           fi
-
-          if [ "$SKIP_COMMIT" = "1" ]; then
-            # 커밋만 건너뛰고 users-list 병합은 수행 — 뒤 R2 스텝이 최신 목록을 올리게 한다.
-            #   (전체 정합성은 dump-users-list 의 1일 1회 전체 재생성이 보정)
-            if [ -n "$R2_LIST" ]; then cp "$R2_LIST" users-list.json; fi
-            node .github/scripts/merge-user-into-list.mjs "user/$IIDX_ID.json" || true
-            echo "1일 1커밋 제한 — git 커밋 skip (R2 는 갱신됨)"; exit 0
+          rm -f users-list.json
+          if ! npx --yes wrangler@4 r2 object get "ohsorry-data/users-list.json" \
+                 --file=users-list.json --remote >/dev/null 2>&1; then
+            echo "::error::R2 users-list 취득 실패 — 병합 중단(빈 목록 PUT 방지)"; exit 1
           fi
-          if [ -z "$(git status --porcelain user/)" ]; then echo "변경 없음 — skip"; exit 0; fi
-          git config user.name "ohsorry-bot"
-          git config user.email "hanekawa4365@gmail.com"
-          # 산출물을 임시 보관 — push 충돌 시 origin 최신 위에 재적용.
-          #   users-list.json 은 단일 라인 JSON 이라 rebase 로는 병합 불가 → 매 시도마다
-          #   origin/main 으로 reset 후 유저 파일 복원 + 목록 재병합으로 충돌 자체를 회피.
-          cp "user/$IIDX_ID.json" /tmp/dump-user-artifact.json
-          for i in 1 2 3 4 5; do
-            git fetch origin main
-            git reset --hard origin/main
-            cp /tmp/dump-user-artifact.json "user/$IIDX_ID.json"
-            # 유저 목록에도 즉시 병합 — dump-users-list cron 이 GitHub 스로틀로 1~3시간
-            # 밀려 신규 유저가 목록에 안 보이던 문제 해소(cron 은 전체 정합성 보정용 유지).
-            #   reset 이 users-list 를 git 본으로 되돌리므로 매 시도마다 R2 본을 다시 얹는다
-            #   (R2 취득은 루프 밖 1회 — wrangler 를 5번 부르지 않는다).
-            if [ -n "$R2_LIST" ]; then cp "$R2_LIST" users-list.json; fi
-            node .github/scripts/merge-user-into-list.mjs "user/$IIDX_ID.json"
-            if [ -z "$(git status --porcelain)" ]; then echo "변경 없음 — skip"; exit 0; fi
-            git add user/ users-list.json
-            git commit -m "auto dump: $IIDX_ID"
-            git push && exit 0
-            echo "push 재시도 $i"; sleep 3
-          done
-          echo "push 실패"; exit 1
+          node -e 'const a=JSON.parse(require("fs").readFileSync("users-list.json","utf8"));if(!Array.isArray(a)||!a.length)process.exit(1);console.log("users-list 베이스 = R2 현재본 ("+a.length+"명)")'
+          node .github/scripts/merge-user-into-list.mjs "user/$IIDX_ID.json"
 
       - name: Upload to R2 (data.iidx.in)
-        # 서빙은 R2(cf/ Worker → data.iidx.in). git 은 이력·롤백용 원본으로 남긴다.
+        # 서빙 = R2(cf/ Worker → data.iidx.in). **§4 이후 R2 가 유일본이다**(git 데이터 커밋 중단).
         #   종전 jsdelivr purge 를 대체 — `@main` 별칭 해석 캐시(12h)를 purge API 로는 못 풀어
         #   push 직후 purge 가 구본을 12h 고착시키는 사고가 두 번 났다(2026-07-17 / 2026-08-04).
         #   R2 는 별칭 개념이 없어 PUT 즉시 반영이고, 캐시 정책도 Worker 가 쥔다.
         #
-        # ⚠️ 커밋(1일 1회)과 달리 **PUT 은 매 업로드마다** — 서빙 신선도는 종전 그대로 유지한다.
-        #   그래서 commit/push 가 실패해도(동시 push 경합 등) 이 스텝은 돈다: 조건은 "덤프 성공"뿐.
-        #   (종전엔 push 실패 → 스텝 실패 → 기본 if:success() 로 R2 가 통째로 스킵돼,
-        #    그 유저가 다시 업로드할 때까지 R2 가 구본으로 고착됐다.)
+        # ⚠️ 조건이 "덤프 성공"뿐인 것은 의도다 — 앞 스텝(users-list 병합)이 실패해도 이 유저의
+        #   user/·hist/ 는 올라가야 한다. 목록 반영만 늦어지고 카드 자체는 최신이 된다.
+        #   (users-list.json 은 병합이 중단되면 파일이 없을 수 있어 아래에서 존재 확인 후 PUT 한다.)
         if: ${{ !cancelled() && steps.dump.outcome == 'success' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — R2 업로드 skip(덤프·push 는 정상)"; exit 0
+            echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — R2 업로드 skip"; exit 0
           fi
           # 한쪽이 실패해도 다른 쪽은 반드시 시도한 뒤, 하나라도 실패했으면 스텝을 실패로 끝낸다.
           #   (종전 `... || { echo warning; return 1; }` 은 기본 셸 `bash -e` 의 errexit 에 걸려
@@ -176,8 +121,9 @@ jobs:
             fi
           }
           put "user/$IIDX_ID.json"
-          put "users-list.json"
-          # hist 는 git 에 없으므로 R2 PUT 이 유일한 보관 경로다. 변경이 없어 재생성을 건너뛴 회차도
-          #   그대로 다시 올린다(내용 동일 · ingress 무료 · Class A 는 월 100만 중 하루 70여 회).
+          # 병합이 중단됐으면 파일이 없다 — 그 경우 PUT 하지 않는다(있는 목록을 건드리지 않는 게 안전).
+          if [ -f "users-list.json" ]; then put "users-list.json"; else echo "::warning::users-list.json 없음(병합 중단) — PUT skip"; fi
+          # hist 도 R2 PUT 이 유일한 보관 경로다. 변경이 없어 재생성을 건너뛴 회차도 그대로 다시
+          #   올린다(내용 동일 · ingress 무료 · Class A 는 월 100만 중 하루 70여 회).
           if [ -f "hist/$IIDX_ID.json" ]; then put "hist/$IIDX_ID.json"; else echo "::warning::hist 파일 없음 — PUT skip"; fi
           exit $rc

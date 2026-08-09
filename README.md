@@ -69,6 +69,16 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-09 — git 데이터 커밋 중단, R2 가 유일본 (CF 통합 §4)
+
+- [dump-user.yml](.github/workflows/dump-user.yml) / [dump-users-list.yml](.github/workflows/dump-users-list.yml): **commit/push 스텝 제거.** 권한도 `contents: write` → `read`. 덤프 산출물은 R2 PUT 만 한다.
+- **왜** — `.git` 이 219.7MB / 커밋 13,571개까지 불었고 계속 늘고 있었다. 롤백 수단은 이제 **R2 스냅샷**(§2, 일별 30 + 월별 12)이 맡는다. hist 가 무손실(§1)이라 오히려 복원력이 낫다. 기존 git 이력은 지우지 않는다 — 더 늘지 않을 뿐.
+- `dump-user.yml` 의 **"1일 1커밋 판정" 스텝 삭제** — 커밋 자체가 없어져 판정할 것이 없다.
+- ⚠️ **`merge-user-into-list.mjs` 가 빈 베이스에서 중단한다** — 종전엔 파싱 실패 시 빈 배열로 시작했다. git 이 데이터를 들고 있을 때는 cron 전체 재생성이 복구했지만, 이제 **R2 가 유일본**이라 빈 목록을 PUT 하면 전 유저가 사라진다. 워크플로도 R2 취득 실패 시 폴백 없이 중단한다(종전엔 git 본 폴백).
+  - 중단해도 서빙은 멀쩡하다 — R2 의 기존 목록이 남고, 그 유저의 `user/`·`hist/` 는 다음 스텝이 올린다. 목록 반영만 다음 회차/전체 재생성으로 밀린다.
+- ⚠️ **`r2-repersona.mjs` 의 대상 목록을 R2 `users-list.json` 기준으로 변경** — 종전엔 git 의 `user/` 폴더를 readdir 했는데, 커밋을 멈추면 그 폴더가 그 시점에서 굳어 **이후 가입한 유저가 영영 대상에서 빠진다.** REST probe 도 고정 키(`users-list.json`)로 옮겨 목록 취득보다 먼저 돌게 했다.
+- 📌 **repo 의 `user/`·`users-list.json`·`songs.json`·`version.json` 은 이 시점의 스냅샷으로 굳는다.** 현재값이 아니다 — 현재값은 R2(`data.iidx.in`)뿐이다. 이 파일들을 소스로 R2 에 PUT 하지 말 것(유저 점수가 롤백된다).
+
 ### 2026-08-09 — gist → R2 미러 워크플로 신설 (이중 배포 안전망 · CF 통합 §3)
 
 - **[mirror-gist-r2.mjs](.github/scripts/mirror-gist-r2.mjs)** + **[mirror-gist-r2.yml](.github/workflows/mirror-gist-r2.yml)** — gist `c3da608…` 의 현재 내용을 `lib/`·`data/` 로 미러. cron `*/30`.
