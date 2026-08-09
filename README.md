@@ -77,7 +77,9 @@ https://data.iidx.in/version.json
 - **보존 정리는 객체 목록 API 를 쓰지 않는다** — 키가 날짜로 결정되므로 지울 키를 직접 계산한다(daily 는 31~40일 전, monthly 는 13~15개월 전). 실행을 한 번 걸러도 유실 없이 정리되고, 없는 키 DELETE 는 무해하다.
 - R2 접근은 **REST 우선 + wrangler 폴백** — 정본 [r2-repersona.mjs](.github/scripts/r2-repersona.mjs) 와 같은 구조. GET 이 742회라 REST 가 필수다. 단 **tar.gz 단일 PUT 은 wrangler** — 호출이 1회뿐이라 스폰 비용이 무의미하고 큰 파일 멀티파트를 알아서 처리한다.
 - ⚠️ `snapshot/` 은 **Worker 허용키가 아니다** — 서빙 대상이 아니라 백업이다.
-- 검증(2026-08-09, dry): 다운로드·통계·tar 정상, **압축률 12%**(원본 2.6MB → 0.3MB, 전체 환산 ~15MB로 계획 추정 32MB보다 작다). sanity check 4개 시나리오 — 동일/소폭감소는 통과, 이력 6.2% 급감·persona 87.5% 급감은 차단. 보존 키 계산 정확(KST 2026-08-09 기준 daily 07-10 이전 · monthly 2025-08 이전).
+- **첫 회차 실행 완료(2026-08-09)** — `snapshot/daily/2026-08-09.tar.gz`. 371명 / hist 728,388행 / persona 267 / spPersona 164, 원본 **129.0MB → 10.9MB(8%)**. 742 GET 39초, 전체 42초. 보존 정리 13/13 키 처리. 스냅샷 42개 총량 ≈ **458MB**(계획 추정 1.34GB보다 여유).
+- 검증: R2 에서 되받아 압축 해제 → `user/` 371 + `hist/` 371 + 루트 JSON 3개, 총 행수·persona 수가 실행 로그와 **정확히 일치**, hist row 8필드 온전. `data.iidx.in/snapshot/...` 은 `경로 없음`(비공개 확인).
+- sanity check 4개 시나리오(dry) — 동일/소폭감소(2.2%)는 통과, 이력 6.2% 급감·persona 87.5% 급감은 차단. 보존 키 계산 정확(KST 2026-08-09 기준 daily 07-10 이전 · monthly 2025-08 이전).
 - ⚠️ tar 에 절대경로를 넘기지 않는다 — GNU tar 가 `C:\` 의 콜론을 원격 호스트로 읽어 죽는다(로컬 dry 실측). `cwd` + 상대경로로 통일.
 
 ### 2026-08-09 — 무손실 점수 이력 `hist/{id}.json` 신설 (R2 전용 · CF 통합 §1)
