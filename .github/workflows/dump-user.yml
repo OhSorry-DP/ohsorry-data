@@ -52,6 +52,29 @@ jobs:
             echo "오늘 첫 덤프(직전 커밋일 ${PREV_DAY:-없음}) — git 커밋 진행"
           fi
 
+      # hist(무손실 점수 이력) 현재본을 R2 에서 미리 받아둔다.
+      #   덤프 스크립트가 이걸 (행수, 최신 date) 프로브와 대조해 **변경이 없으면 scores 전체 재조회를 건너뛴다.**
+      #   webhook 은 users.date 갱신만으로도 발화하므로(INF 15분 자동동기화) 점수가 안 바뀐 회차가 많은데,
+      #   매번 전체를 읽으면 덤프 1회 supabase 읽기가 +94% 늘어난다(실측 2026-08-09).
+      #   취득 실패는 무해 — 파일이 없으면 전체 재생성으로 떨어진다(정확성은 그쪽이 상위).
+      #   ⚠️ hist 는 git 에 없다(.gitignore) — R2 가 유일한 보관처이므로 베이스도 R2 에서 받는다.
+      - name: R2 hist 현재본 받기
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+        run: |
+          mkdir -p hist
+          F="hist/$IIDX_ID.json"
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — hist 전체 재생성"; exit 0
+          fi
+          if npx --yes wrangler@4 r2 object get "ohsorry-data/$F" --file="$F" --remote >/dev/null 2>&1 \
+             && node -e 'const a=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(!Array.isArray(a)||!a.length)process.exit(1);console.log("hist 베이스 = R2 현재본 ("+a.length+"행)")' "$F" 2>/dev/null; then
+            :
+          else
+            rm -f "$F"; echo "R2 hist 없음/무효 — 전체 생성"
+          fi
+
       - name: Dump user from supabase
         id: dump
         env:
@@ -154,4 +177,7 @@ jobs:
           }
           put "user/$IIDX_ID.json"
           put "users-list.json"
+          # hist 는 git 에 없으므로 R2 PUT 이 유일한 보관 경로다. 변경이 없어 재생성을 건너뛴 회차도
+          #   그대로 다시 올린다(내용 동일 · ingress 무료 · Class A 는 월 100만 중 하루 70여 회).
+          if [ -f "hist/$IIDX_ID.json" ]; then put "hist/$IIDX_ID.json"; else echo "::warning::hist 파일 없음 — PUT skip"; fi
           exit $rc

@@ -8,6 +8,13 @@
 - `user/{iidx_id}.json` — 유저별 데이터. `{ _v, user, radars, osPattern, persona, dp[], sp[] }`
   - dp/sp = **슬림 score row** `{ song_id, diff, lamp, ex_score, played_version, date }` — 곡메타(title/textage_song_id/series_no/ac/legen)는 중복 제거하고 아래 `songs.json` 으로 분리. 웹이 `song_id` 로 조인.
   - persona = **DP 성향 리포트** `{ head, oneLiner, prose, report, tags[], nCharts, _v }` — 웹훅 덤프 시 [persona-lib.mjs](.github/scripts/persona-lib.mjs) 가 gist 해석엔진(persona.js/calcWeakness.js)으로 즉시 생성. 표기용: head=헤드라인 한 줄, prose=서사 요약(X/OG 카드 ≤200자), report=상세 리포트 전문(🎯🎲⚡🛠✋📝). 표본 30차트 미만이면 null.
+- `hist/{iidx_id}.json` — **무손실 점수 이력**(git 에 없음 · R2 전용). `scores` 전 행·전 필드를 배열형으로:
+  `[[song_id, diff, lamp, ex_score, played_version, date, date_kst, play_style], ...]`. DBR(`played_version=-10`) 포함.
+  - `user/` 의 dp/sp 는 "곡별 최신 1행 · 슬림"이라 `iidx_id`·`date_kst`·`play_style` 이 없어 **supabase 복원이 안 된다.** hist 가 그 복원 원본이다(계획: `d:/work/docs/cf-consolidation.md` §1).
+  - 소비처: 웹 `fetchChartScoreHistory`(랭킹모달 점수추이). `user/` 에 합치지 않은 건 카드 첫 로딩에 매번 딸려오면 느려지기 때문.
+  - DBR 행도 담지만 웹 `fetchDbrScores` 는 아직 supabase 직접 조회다 — DBR 쓰기가 `users` 웹훅을 안 깨워 다음 업로드 전까지 hist 에 안 들어오기 때문(계획 §1 참고).
+  - **`.gitignore` 대상** — 전 유저 44.5MB 라 커밋하면 이미 219MB 인 `.git` 을 다시 부풀린다. 롤백은 git 이 아니라 R2 스냅샷(계획 §2)이 맡는다.
+  - 갱신은 **변경분만** — 덤프 때 (행수, 최신 `date`) 프로브로 R2 현재본과 대조해 같으면 `scores` 전체 재조회를 건너뛴다. 매번 전체를 읽으면 덤프 1회 supabase 읽기가 +94% 늘어난다(실측 2026-08-09).
 - `songs.json` — 곡 마스터(공유) `[{ song_id, title, ac, legen, textage_song_id, series_no }]`. 웹 `getSongsCache` 가 supabase 대신 이걸 읽음. cron(5분) 갱신.
 - `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). **실시간 갱신은 webhook 덤프(dump-user)가 R2 에 증분 병합**([merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs))으로 담당하고, supabase 전체 재생성은 **1일 1회 cron**(정합성 보정 — 삭제 유저 정리·증분 누락 복구)이다. 증분의 베이스는 git 이 아니라 **R2 현재본**이라, 커밋을 건너뛴 회차의 갱신도 누적된다.
 - `version.json` — 전체 덤프 타임스탬프 + 유저 수
@@ -38,6 +45,7 @@
 ## 서빙 (Cloudflare R2 + Worker)
 ```
 https://data.iidx.in/user/{iidx_id}.json
+https://data.iidx.in/hist/{iidx_id}.json
 https://data.iidx.in/users-list.json
 https://data.iidx.in/songs.json
 https://data.iidx.in/version.json
@@ -55,6 +63,18 @@ https://data.iidx.in/version.json
 > 오리진이 구본을 재캐시하고 최대 12h 고착된다 — 아래 변경 이력의 두 사고가 모두 이것이다.
 
 ## 변경 이력
+
+### 2026-08-09 — 무손실 점수 이력 `hist/{id}.json` 신설 (R2 전용 · CF 통합 §1)
+
+- [dump-user.mjs](.github/scripts/dump-user.mjs): `fetchUserHist` / `histProbe` / `histUnchanged` / `updateHistFile` 추가. `scores` 전 행·전 필드를 배열형 `hist/{id}.json` 으로. DBR(`played_version=-10`) 포함, `score_id` 오름차순 페이징.
+- **왜** — `user/` 덤프는 곡별 최신 1행 슬림이라 스냅샷을 떠도 supabase 를 복원할 수 없다(`iidx_id`·`date_kst`·`play_style` 없음). 계획 §2 월별/일별 스냅샷이 의미를 가지려면 이게 먼저다.
+- **변경분만 재생성** — (행수 `count=exact`, 최신 `date` 1행) 프로브로 R2 현재본과 대조. 응답 본문이 사실상 없어 egress ~0. webhook 은 `users.date` 갱신만으로도 발화해(INF 15분 자동동기화) 점수가 안 바뀐 회차가 많은데, 매번 전체를 읽으면 덤프 1회 supabase 읽기가 **516KB → 1000KB(+94%)** 로 늘어난다(실측 2026-08-09, 하루 ~70회 덤프 = 월 800MB).
+- [dump-user.yml](.github/workflows/dump-user.yml): 덤프 전 `wrangler r2 object get` 으로 hist 현재본 취득(실패해도 무해 — 전체 재생성으로 폴백) + R2 PUT 대상에 hist 추가.
+- [cf/src/index.js](cf/src/index.js): 허용키에 `hist/[A-Za-z0-9]+.json` 추가.
+- `.gitignore` 에 `hist/` — 전 유저 44.5MB. 롤백 수단은 git 이 아니라 계획 §2 스냅샷.
+- 있던 이력이 0행이 되면 **덮어쓰지 않고 실패**시킨다(R2 가 유일한 보관처라 빈 파일이 곧 유실).
+- 검증(2026-08-09): hist 행수 == supabase `count` (3,274), 곡·난이도·스타일 유니크 1,819 == `user/` 덤프 dp+sp 1,819. DBR 상위 5명 `fetchDbrScores` 재현 결과 전원 동일. 점수추이 `playStyle` 지정 70건 전건 동일.
+- 웹 소비는 점수추이(`fetchChartScoreHistory`)만 전환. `fetchDbrScores` 는 supabase 유지 — DBR 쓰기가 `users` 웹훅을 안 깨워 다음 업로드 전까지 hist 에 반영되지 않는다.
 
 ### 2026-08-08 — SP persona 잔차 기준선을 인구 rate 기준으로 전환
 

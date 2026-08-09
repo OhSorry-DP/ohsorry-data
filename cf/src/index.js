@@ -15,6 +15,10 @@
 
 const ALLOWED_ROOT = new Set(['users-list.json', 'songs.json', 'version.json']);
 const USER_RE = /^user\/[A-Za-z0-9]+\.json$/;
+// hist/{id}.json — 무손실 점수 이력(scores 전 행·전 필드 배열형). 웹 랭킹모달의 점수 추이 그래프 소스이자,
+//   user/ 슬림 덤프로는 불가능한 supabase 복원의 원본이다.
+//   user/ 와 분리한 이유: 카드 첫 로딩에 딸려오면 응답이 느려지는데, 정작 필요한 건 모달을 열 때뿐이다.
+const HIST_RE = /^hist\/[A-Za-z0-9]+\.json$/;
 
 // 브라우저 캐시는 짧게 — 덤프는 webhook 으로 수시 갱신되므로 신선도가 우선.
 //   엣지(Cache API)도 같은 값으로 두어 R2 Class B 읽기를 줄인다.
@@ -43,6 +47,7 @@ function keyOf(pathname) {
   if (key.includes('..') || key.includes('//')) return null;
   if (ALLOWED_ROOT.has(key)) return key;
   if (USER_RE.test(key)) return key;
+  if (HIST_RE.test(key)) return key;
   return null;
 }
 
