@@ -1,0 +1,59 @@
+name: mirror-gist-r2
+
+# gist `c3da608…` → R2(`lib/`·`data/`) 미러 — CF 통합 §3 이중 배포 기간의 **안전망**.
+#
+# 왜: 주요 배포 경로는 공용 퍼블리셔(ohSorryAdmin/scripts/publishAsset.js)가 gist·R2 양쪽에 동시에
+#     올리지만, gist 를 갱신하는 생산자는 그 외에도 있다(parseTextage / fetchEreterData /
+#     fetchZasaData / uploadGist). 생산자를 하나씩 쫓으면 새로 생길 때마다 또 놓치므로,
+#     gist 전체를 주기적으로 흘려보내 빠짐없이 덮는다.
+#
+# ⚠️⚠️ **gist 쓰기를 중단하는 순간(§3 ③) 이 워크플로를 반드시 끄거나 지울 것.**
+#     그때부터 R2 가 최신이고 gist 는 화석이 되는데, 미러가 계속 돌면 낡은 gist 내용으로 R2 를 되돌린다.
+#     같은 이유로 이중 배포 기간에는 "R2 에만" 수동 업로드해서도 안 된다.
+#
+# 비용: gist 메타 1회 GET 으로 updated_at 을 보고 직전과 같으면 파일을 하나도 받지 않는다.
+#       바뀐 회차에만 전 파일을 받아 md5 를 R2 etag 와 대조하고 다른 것만 올린다.
+#       ⚠️ '*/5' 같은 고빈도 schedule 은 GitHub Actions 가 실행을 드롭한다(dump-users-list 실측
+#          1~5시간 간격) → 30분으로 둬서 실제 실행률을 높인다. 어차피 즉시성이 필요한 경로는
+#          퍼블리셔가 이미 동시 배포로 덮고 있고 이건 안전망이다.
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: 'true 면 PUT 없이 차이만 집계'
+        required: false
+        default: 'false'
+      force:
+        description: 'true 면 updated_at 게이트 무시하고 전수 대조(상태 복구용)'
+        required: false
+        default: 'false'
+
+# 두 실행이 겹치면 같은 키를 서로 덮어쓴다 — 직렬화.
+concurrency:
+  group: mirror-gist-r2
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Mirror gist → R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN 미설정 — R2 접근 불가"; exit 1
+          fi
+          ARGS=""
+          [ "${{ inputs.dry }}" = "true" ] && ARGS="$ARGS --dry"
+          [ "${{ inputs.force }}" = "true" ] && ARGS="$ARGS --force"
+          node .github/scripts/mirror-gist-r2.mjs $ARGS

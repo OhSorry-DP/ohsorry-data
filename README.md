@@ -69,6 +69,16 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-09 — gist → R2 미러 워크플로 신설 (이중 배포 안전망 · CF 통합 §3)
+
+- **[mirror-gist-r2.mjs](.github/scripts/mirror-gist-r2.mjs)** + **[mirror-gist-r2.yml](.github/workflows/mirror-gist-r2.yml)** — gist `c3da608…` 의 현재 내용을 `lib/`·`data/` 로 미러. cron `*/30`.
+- **왜** — 주요 배포 경로는 공용 퍼블리셔(ohSorryAdmin `publishAsset.js`)가 gist·R2 양쪽에 동시에 올리지만, gist 를 갱신하는 생산자는 그 외에도 있다(`parseTextage`·`fetchEreterData`·`fetchZasaData`·`uploadGist`). 생산자를 하나씩 쫓으면 **새로 생길 때마다 또 놓치므로**, gist 전체를 주기적으로 흘려보내 빠짐없이 덮는다.
+- **비용** — gist 메타 1회 GET 으로 `updated_at` 을 보고 직전과 같으면 **파일을 하나도 받지 않는다.** 바뀐 회차에만 전 파일을 받아 md5 를 R2 etag 와 대조하고 다른 것만 올린다. gist 는 공개라 인증도 불필요(시크릿 하나 덜 둔다).
+- `--force` 는 `updated_at` 게이트를 무시한 전수 대조 — **초기 이관도 이걸로 한다**(로컬 wrangler 로 42회 스폰하는 것보다 빠르고 안전).
+- 상태는 `mirror/gist-state.json`(Worker 허용키가 아니라 비공개). **실패가 있으면 상태를 갱신하지 않는다** — 갱신하면 `updated_at` 게이트에 걸려 실패분이 영영 안 올라간다.
+- ⚠️ **etag 비교 시 `W/` 접두사를 벗긴다** — node fetch 가 gzip 을 요청해 CF 가 약한 검증자를 준다. 안 벗기면 매 회차 전 파일을 재업로드한다(§1 백필에서 겪은 것과 같은 함정).
+- ⚠️⚠️ **gist 쓰기를 중단하는 순간(§3 ③) 이 워크플로를 반드시 끄거나 지울 것.** 그때부터 R2 가 최신이고 gist 는 화석인데, 미러가 계속 돌면 **낡은 gist 내용으로 R2 를 되돌린다.** 같은 이유로 이중 배포 기간에는 "R2 에만" 수동 업로드해서도 안 된다.
+
 ### 2026-08-09 — Worker 에 `lib/`·`data/` 허용 + 확장자별 content-type (CF 통합 §3)
 
 - [cf/src/index.js](cf/src/index.js): 허용키에 `lib/<name>.(js|css)` · `data/<name>.json` 추가 — 종전 gist `c3da608…` 이 뿌리던 코어 JS·데이터 JSON 42개의 이전 대상. gist raw 는 `max-age=300` 고정이라 캐시를 우리가 못 쥐었는데 R2 로 오면 Worker 가 쥔다.
