@@ -78,6 +78,7 @@ https://data.iidx.in/version.json
   - 중단해도 서빙은 멀쩡하다 — R2 의 기존 목록이 남고, 그 유저의 `user/`·`hist/` 는 다음 스텝이 올린다. 목록 반영만 다음 회차/전체 재생성으로 밀린다.
 - ⚠️ **`r2-repersona.mjs` 의 대상 목록을 R2 `users-list.json` 기준으로 변경** — 종전엔 git 의 `user/` 폴더를 readdir 했는데, 커밋을 멈추면 그 폴더가 그 시점에서 굳어 **이후 가입한 유저가 영영 대상에서 빠진다.** REST probe 도 고정 키(`users-list.json`)로 옮겨 목록 취득보다 먼저 돌게 했다.
 - 📌 **repo 의 `user/`·`users-list.json`·`songs.json`·`version.json` 은 이 시점의 스냅샷으로 굳는다.** 현재값이 아니다 — 현재값은 R2(`data.iidx.in`)뿐이다. 이 파일들을 소스로 R2 에 PUT 하지 말 것(유저 점수가 롤백된다).
+- 검증(2026-08-09): `dump-user` 실유저 트리거·`dump-users-list` 수동 실행 모두 전 스텝 success, **git 커밋 0**, R2 만 갱신. 서빙 확인 — users-list 371명 / songs 2,216곡 / 카드 `_v` 방금 시각 / hist 3,274행 / persona 정상.
 
 ### 2026-08-09 — gist → R2 미러 워크플로 신설 (이중 배포 안전망 · CF 통합 §3)
 
