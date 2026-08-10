@@ -148,6 +148,22 @@ export function chartsFromGridRows(rows, textageMeta) {
   return out;
 }
 
+// 스코어링 마스터 칭호용 — 어나더+(ANOTHER/LEGGENDARIA) 채보 중 MAX-권(스코어율 ≥ 17/18) 비율.
+//   noteOf(c): 차트 → 노트수 (DP 는 c.noteCount 직접, SP 는 spKeymaps.noteByKey 조회). 표본 <30 이면 null(소표본 방지).
+//   ⚠️ ohSorryRating dump-all/dump-sp 스크립트의 동명 계산과 1:1 동기.
+function maxMinusStatsOf(charts, noteOf) {
+  let hit = 0, tot = 0;
+  for (const c of charts) {
+    if (!c || (c.diff !== 'ANOTHER' && c.diff !== 'LEGGENDARIA')) continue;
+    if (typeof c.exScore !== 'number' || c.exScore <= 0) continue;
+    const nc = noteOf(c);
+    if (typeof nc !== 'number' || nc <= 0) continue;
+    tot++;
+    if (c.exScore / (nc * 2) >= 17 / 18) hit++;
+  }
+  return tot >= 30 ? { share: hit / tot, tot } : null;
+}
+
 // ── SP persona (dump-sp-user-personas.js 이식 — self-relative 잔차, mirror/손별/overallResid 없음) ──
 
 // SP raw grid rows(play_style=0) → ownSp 차트 배열 (gameLevel 은 textage 레벨).
@@ -379,10 +395,12 @@ export function spPersonaFor(ownSp, R) {
   const profile = {
     pop: (R.pop && R.pop.sp) || null,   // usernorm 인구 통계(위 DP 와 동일 취지)
     nCharts: ownSp.length,
-    isSp: true,                   // 스코어링 마스터 SP 임계(scoreMasterSp) 분기용
-    overallResid: spOverallResid, // 인구 rate 기준 대비(있으면 스코어링/만능 판정). 램프/스코어 지향 문구는 아래서 별도 억제
+    isSp: true,                   // SP 분기용 (견제스크 용어·배치 임계 완화 등)
+    overallResid: spOverallResid, // 인구 rate 기준 대비(만능형 하한·스코어/램프지향 문구·중심화용)
     feats, mirror: null, featsL: null, featsR: null,
     lampStats: spLampStats(ownSp),   // 풀콤보/EX하드 마스터 칭호 (SP scores lamp 비중)
+    // 스코어링 마스터 — 어나더+ MAX-권 비율 (노트수는 SP 키맵 조회. 2026-08-10 기준 교체)
+    maxMinusStats: maxMinusStatsOf(ownSp, (c) => R.spKeymaps.noteByKey.get(R.norm(c.title) + '|' + c.diff)),
     bpmProfile: computeSpBpmProfile(resid, R.spKeymaps.bpmByNorm),
     kensei: computeSpKensei(resid),
     scratchProfile: tierProfileOf(resid, (sc) => { const sr = sc.SARA_RHYTHM; if (!sr || (sr.rollN || 0) < 20) return null; return tierSharesOfHist(sr.ioiSec); }),
@@ -511,6 +529,7 @@ export function personaFor(allCharts, R) {
     layoutProfile,
     notesProfile: vec.__notesProfile || null,   // 지구력(노트수) 축
     lampStats: vec.__lampStats || null,          // 풀콤보/EX하드 마스터 칭호용 FC/PFC 비중
+    maxMinusStats: maxMinusStatsOf(allCharts, (c) => c.noteCount),   // 스코어링 마스터 — 어나더+ MAX-권 비율 (2026-08-10 기준 교체)
   };
   const rich = R.personaLib.richReportOf(profile);
   const P = rich.persona;

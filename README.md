@@ -69,6 +69,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-10 — 스코어링 마스터 칭호 기준 교체 (persona-lib)
+
+- [persona-lib.mjs](.github/scripts/persona-lib.mjs): `maxMinusStatsOf()` 신설 — **어나더+(ANOTHER/LEGGENDARIA) 채보 중 MAX-권(스코어율 ≥ 17/18) 비율**을 DP(`c.noteCount`)/SP(`spKeymaps.noteByKey` 조회) profile 에 `maxMinusStats: { share, tot }` 로 주입(표본 <30 이면 null). 판정 자체는 persona.js(gist) 가 `share ≥ 0.70` 으로 수행 — 종전 overallResid p90 기준 폐기.
+- **왜** — SP 부여율이 인구 표류로 설계(~10%)에서 17.4%까지 벌어짐. 새 기준 실측: DP 7.9% / SP 3.8%. ⚠️ ohSorryRating 의 persona.js·dump 스크립트 2종과 **4곳 산식 1:1 동기** — 반영에는 persona.js gist 재배포 + 이 repo push + 전수 백필(r2-repersona) 필요.
+
 ### 2026-08-09 — r2-client 토큰을 `CLOUDFLARE_R2_TOKEN` 우선으로
 
 - [r2-client.mjs](.github/scripts/r2-client.mjs): REST 토큰을 `CLOUDFLARE_R2_TOKEN`(로컬 .env) 우선, 없으면 `CLOUDFLARE_API_TOKEN`(Actions 시크릿 이름)으로.
