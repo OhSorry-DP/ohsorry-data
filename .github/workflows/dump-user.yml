@@ -63,19 +63,27 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node .github/scripts/dump-user.mjs "$IIDX_ID"
 
-      - name: users-list 증분 병합 (R2 현재본 기준)
+      - name: users-list 증분 병합 + R2 반영 (GET→PUT→검증→재시도)
         # 이 유저 1명을 전 유저 목록에 즉시 반영한다(신규 유저가 목록에 한참 안 보이던 문제 해소).
         #   전체 정합성(삭제 유저 정리·증분 누락 복구)은 dump-users-list 의 1일 1회 전체 재생성이 담당.
         #
-        # 베이스는 **R2 현재본**이다 — §4 로 git 데이터 커밋을 중단해 R2 가 유일본이 됐다.
+        # ⚠️ GET/PUT 을 **스크립트가 직접** 한다 (2026-08-14 변경).
+        #   종전에는 이 스텝에서 GET 하고 한참 뒤 "Upload to R2" 스텝에서 PUT 해서 레이스 창이
+        #   수십 초로 벌어져 있었다. read-modify-write 라 그 사이 다른 실행이 PUT 하면 덮인다.
+        #   별값 백필로 386명을 한꺼번에 UPDATE 하자 webhook 386개가 동시에 돌며
+        #   **users-list 의 40.3%(253명 중 102명)가 옛 값으로 덮였다.**
+        #   → 스크립트가 GET→merge→PUT 을 붙여서 창을 최소화하고, PUT 뒤 다시 읽어 검증한 뒤
+        #     덮였으면 지수 백오프+지터로 최대 5회 재시도한다.
+        #   (wrangler 는 `--if-match` 를 지원하지 않아 낙관적 잠금을 쓸 수 없다. 검증-재시도가 차선.)
+        #
+        # 베이스는 **R2 현재본**이다 — git 데이터 커밋을 중단해 R2 가 유일본이 됐다.
         #   HTTP(data.iidx.in) 대신 wrangler 직접 읽기인 이유: Worker 엣지 캐시(60초)를 우회해야
         #   하는데 쿼리 cache-bust 가 안 통한다(캐시 키에서 쿼리를 버림 — cf/src/index.js).
         #   R2 원본 직접 읽기는 read-after-write 강한 일관성이라 방금 다른 실행이 올린 것도 보인다.
         #
-        # ⚠️ 취득/검증 실패 시 **중단한다.** 종전엔 git 본으로 폴백했지만 이제 git 에 데이터가 없다.
-        #   빈·깨진 베이스로 병합해 PUT 하면 전 유저 목록이 통째로 날아간다(merge 스크립트에도 자체 가드).
+        # ⚠️ 취득/검증 실패 시 **중단한다.** 빈·깨진 베이스로 PUT 하면 전 유저 목록이 통째로 날아간다.
         #   중단해도 서빙은 멀쩡하다 — R2 의 기존 users-list.json 이 그대로 남고, 이 유저의 user/·hist/ 는
-        #   다음 스텝이 올린다. 목록 반영만 다음 회차나 1일 1회 전체 재생성으로 밀린다.
+        #   다음 스텝이 올린다. 목록 반영만 1일 1회 전체 재생성으로 밀린다.
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
@@ -83,12 +91,6 @@ jobs:
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "::error::CLOUDFLARE_API_TOKEN 미설정 — users-list 병합 불가"; exit 1
           fi
-          rm -f users-list.json
-          if ! npx --yes wrangler@4 r2 object get "ohsorry-data/users-list.json" \
-                 --file=users-list.json --remote >/dev/null 2>&1; then
-            echo "::error::R2 users-list 취득 실패 — 병합 중단(빈 목록 PUT 방지)"; exit 1
-          fi
-          node -e 'const a=JSON.parse(require("fs").readFileSync("users-list.json","utf8"));if(!Array.isArray(a)||!a.length)process.exit(1);console.log("users-list 베이스 = R2 현재본 ("+a.length+"명)")'
           node .github/scripts/merge-user-into-list.mjs "user/$IIDX_ID.json"
 
       - name: Upload to R2 (data.iidx.in)
@@ -121,8 +123,9 @@ jobs:
             fi
           }
           put "user/$IIDX_ID.json"
-          # 병합이 중단됐으면 파일이 없다 — 그 경우 PUT 하지 않는다(있는 목록을 건드리지 않는 게 안전).
-          if [ -f "users-list.json" ]; then put "users-list.json"; else echo "::warning::users-list.json 없음(병합 중단) — PUT skip"; fi
+          # users-list.json 은 여기서 PUT 하지 않는다 — 앞 스텝의 merge 스크립트가 GET→PUT→검증까지
+          #   담당한다(레이스 창 최소화, 2026-08-14). 여기서 또 올리면 검증을 통과한 최신본을
+          #   이 잡의 낡은 로컬 사본으로 되돌려버린다.
           # hist 도 R2 PUT 이 유일한 보관 경로다. 변경이 없어 재생성을 건너뛴 회차도 그대로 다시
           #   올린다(내용 동일 · ingress 무료 · Class A 는 월 100만 중 하루 70여 회).
           if [ -f "hist/$IIDX_ID.json" ]; then put "hist/$IIDX_ID.json"; else echo "::warning::hist 파일 없음 — PUT skip"; fi

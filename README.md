@@ -69,6 +69,19 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-14 — users-list 병합에 검증-재시도 도입 (동시쓰기 레이스 실증 후)
+
+- **무슨 일이 있었나**: 별값 백필로 `users` 386명을 한꺼번에 UPDATE → Database Webhook 이 **386번 발화** → `dump-user` 386개가 동시에 실행. `users-list.json` 은 read-modify-write 라 겹친 실행끼리 서로를 덮어써 **253명 중 102명(40.3%)이 옛 값으로 고착**됐다. 목록 자체(386명·결손 0)는 온전했지만 개별 star 값이 뒤처졌다.
+- **근본 원인**: 종전 워크플로는 **병합 스텝에서 GET 하고, 한참 뒤 업로드 스텝에서 PUT** 했다. 그 사이(수십 초)가 통째로 레이스 창이었다. 평소엔 동시 실행이 드물어 잘 안 터지지만, 대량 업데이트가 한 번 들어오면 40% 가 어긋난다.
+- **수정** — [merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs) 가 **GET → merge → PUT → 검증 → 재시도**를 전부 담당한다:
+  - GET 직후 바로 PUT 해 **레이스 창을 최소화**
+  - PUT 뒤 다시 읽어 **내 항목의 `date` 가 실제로 반영됐는지 검증**, 덮였으면 **지수 백오프 + 지터로 최대 5회 재시도**
+  - 5회 모두 실패하면 `::error::` 로 남기고 종료 — 카드(`user/`·`hist/`)는 다음 스텝이 정상 업로드하므로 서빙은 멀쩡하고, 목록만 1일 1회 전체 재생성으로 밀린다
+  - `--no-upload`(로컬 병합만) 옵션 추가 — 테스트용
+- [dump-user.yml](.github/workflows/dump-user.yml): 병합 스텝의 `wrangler r2 object get` 제거(스크립트가 담당), **업로드 스텝의 `users-list.json` PUT 제거** — 여기서 또 올리면 검증을 통과한 최신본을 이 잡의 낡은 로컬 사본으로 되돌린다.
+- ⚠️ **`wrangler` 는 `--if-match` 를 지원하지 않는다**(옵션 자체가 없음). 낙관적 잠금(조건부 PUT)을 쓰려면 S3 API 직접 호출 + 별도 Access Key 가 필요하다. 검증-재시도는 차선책이며, 완전한 상호배제가 아니다 — 최종 보정은 여전히 1일 1회 전체 재생성이 담당한다.
+- 📌 **users 를 대량 UPDATE 하는 작업(백필 등)은 webhook 을 인원수만큼 발화시킨다.** 386개가 큐에 쌓여 전부 빠지는 데 40여 분이 걸렸다. 앞으로 대량 백필 시에는 이 점을 감안할 것.
+
 ### 2026-08-10 — 스코어링 마스터 칭호 기준 교체 (persona-lib)
 
 - [persona-lib.mjs](.github/scripts/persona-lib.mjs): `maxMinusStatsOf()` 신설 — **어나더+(ANOTHER/LEGGENDARIA) 채보 중 MAX-권(스코어율 ≥ 17/18) 비율**을 DP(`c.noteCount`)/SP(`spKeymaps.noteByKey` 조회) profile 에 `maxMinusStats: { share, tot }` 로 주입(표본 <30 이면 null). 판정 자체는 persona.js(gist) 가 `share ≥ 0.70` 으로 수행 — 종전 overallResid p90 기준 폐기.
