@@ -69,6 +69,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-15 — scores 에 bp(미스카운트)/note_count(총 노트수) 컬럼 추가
+
+- [dump-user.mjs](.github/scripts/dump-user.mjs): `SCORE_KEEP`/`HIST_COLS` 끝에 `bp`, `note_count` 추가 — 기존 소비처(웹 `HIST_I` 등)가 위치기반 인덱스라 배열 중간이 아닌 끝에 추가.
+- **왜** — INFOhSorry(Reflux TSV 메모리 리딩)는 이미 missCount/noteCount 를 파싱하고 있었지만 supabase upsert row 에는 빠져있어 저장이 안 되고 있었다. `scores` 테이블에 두 컬럼 추가 + `upsert_scores` RPC 재정의(`ohSorryAdmin/sql/14_scores_bp_notecount.sql`, 운영 DB 적용 완료) 후 R2 덤프 파이프라인도 맞춰 반영.
+- ⚠️ INFOhSorry 쪽 실제 업로드 코드(`supabaseSync.ts`)는 아직 두 값을 안 보냄 — 당장은 두 컬럼 다 NULL 로 쌓인다. 후속 작업 필요.
+
 ### 2026-08-14 — users-list 병합에 검증-재시도 도입 (동시쓰기 레이스 실증 후)
 
 - **무슨 일이 있었나**: 별값 백필로 `users` 386명을 한꺼번에 UPDATE → Database Webhook 이 **386번 발화** → `dump-user` 386개가 동시에 실행. `users-list.json` 은 read-modify-write 라 겹친 실행끼리 서로를 덮어써 **253명 중 102명(40.3%)이 옛 값으로 고착**됐다. 목록 자체(386명·결손 0)는 온전했지만 개별 star 값이 뒤처졌다.

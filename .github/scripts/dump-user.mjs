@@ -39,7 +39,7 @@ async function rpcGrid(id, ps) {
   return out;
 }
 // score row 슬림 — 곡메타는 공유 songs.json 으로 분리(웹이 song_id 조인). dump-data-repo.js 와 동일 유지.
-const SCORE_KEEP = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date'];
+const SCORE_KEEP = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'bp', 'note_count'];
 const slimRow = (r) => { const o = {}; for (const k of SCORE_KEEP) if (r[k] !== undefined) o[k] = r[k]; return o; };
 
 // ⚠️ 단일 정본 — ohSorryAdmin/scripts/dump-data-repo.js(전체·증분 덤프)가 이 함수를 import 해서 쓴다.
@@ -93,7 +93,7 @@ export async function dumpUser(id, personaRes, opts = {}) {
 // - user/{id}.json 에 합치지 않는다 — 히스토리는 랭킹모달을 열 때만 필요한데 카드 첫 로딩에
 //   매번 딸려오면 응답이 느려진다.
 // - DBR(played_version=-10)도 포함 — 웹 fetchDbrScores 가 이걸로 읽는다.
-export const HIST_COLS = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'date_kst', 'play_style'];
+export const HIST_COLS = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'date_kst', 'play_style', 'bp', 'note_count'];
 const HIST_DATE_I = HIST_COLS.indexOf('date');
 
 // scores 전 행 → 배열형. score_id 오름차순으로 페이징(안정 정렬이 없으면 offset 페이징이 행을 흘린다).
