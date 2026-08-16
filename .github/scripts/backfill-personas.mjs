@@ -18,7 +18,7 @@ const songById = new Map(songs.map((s) => [s.song_id, s]));
 // 슬림 row → grid row 형태 복원 (title/textage_song_id 는 songs.json 조인)
 const rowsOf = (slim) => (slim || []).map((r) => {
   const s = songById.get(r.song_id);
-  return s ? { title: s.title, textage_song_id: s.textage_song_id, diff: r.diff, ex_score: r.ex_score, lamp: r.lamp } : null;
+  return s ? { title: s.title, textage_song_id: s.textage_song_id, diff: r.diff, ex_score: r.ex_score, lamp: r.lamp, bp: r.bp } : null;
 }).filter(Boolean);
 
 const FORCE = process.argv.includes('--force');   // 엔진(persona.js) 개정 후 전체 재생성용

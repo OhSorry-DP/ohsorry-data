@@ -69,6 +69,14 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-16 — persona 산출 경로에서 bp(미스카운트) 누락 수정
+
+`ohSorryRating/modules/calcWeakness.js`(같은 날 개정, gist 배포됨)가 `missCount` 있는 차트에 한해 잔차를 보정하도록 바뀌었는데, 이 repo 의 persona 산출 체인은 raw row 에서 `bp` 를 읽고도 중간에서 버리고 있어 웹훅 즉시생성·백필 어느 쪽도 보정이 반영되지 않고 있었다.
+
+- [.github/scripts/persona-lib.mjs](.github/scripts/persona-lib.mjs) `chartsFromGridRows`: 반환 차트 객체에 `missCount: r.bp` 추가.
+- [.github/scripts/backfill-personas.mjs](.github/scripts/backfill-personas.mjs), [.github/scripts/r2-repersona.mjs](.github/scripts/r2-repersona.mjs) `rowsOf`: 슬림 row → grid row 복원 시 `bp` 필드 보존(누락돼 있었음).
+- 확인: `scores` 테이블 기준 현재 `bp` 보유 유저는 DP/SP 합쳐 2명(`C200074777849`, `15116402`)뿐 — bp 도입 초기라 극소수.
+
 ### 2026-08-15 — scores 에 bp(미스카운트)/note_count(총 노트수) 컬럼 추가
 
 - [dump-user.mjs](.github/scripts/dump-user.mjs): `SCORE_KEEP`/`HIST_COLS` 끝에 `bp`, `note_count` 추가 — 기존 소비처(웹 `HIST_I` 등)가 위치기반 인덱스라 배열 중간이 아닌 끝에 추가.

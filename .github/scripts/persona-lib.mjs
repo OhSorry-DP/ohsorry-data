@@ -143,6 +143,7 @@ export function chartsFromGridRows(rows, textageMeta) {
     out.push({
       title: r.title, diff, exScore: typeof r.ex_score === 'number' ? r.ex_score : 0,
       noteCount, gameLevel, lamp: lampNum, lampNum,
+      missCount: typeof r.bp === 'number' ? r.bp : null,   // bp(미스카운트) — calcUserWeakness 의 bp 반영 보정용
     });
   }
   return out;
