@@ -1,6 +1,10 @@
-// mirror-gist-r2.mjs — gist `c3da608…` 의 현재 내용을 R2(`lib/`·`data/`)로 미러 (CF 통합 §3 이중 배포 안전망)
+// mirror-gist-r2.mjs — gist 2개(GIST_TARGETS)의 현재 내용을 R2(`lib/`·`data/`)로 미러
+//   ① `c3da608…`(코드번들+대용량 JSON, CF 통합 §3 이중 배포 안전망, 전 파일) — 아래 "왜 미러가 필요한가" 참고.
+//   ② `30c3ba6f…`(운영 메타 gist)의 series-name.json·service-status.json 만 — 브라우저 직결 익명 fetch 가
+//      GitHub 쪽 429 로 막히기 시작해(2026-08-17) R2 CDN 경유로 안정화. gist 는 계속 수동편집 정본, 이 미러가
+//      30분 cron 으로 뒤따라 R2 를 갱신(GIST_TARGETS 의 `only` 로 이 2파일만 필터).
 //
-// 왜 미러가 필요한가:
+// 왜 미러가 필요한가(① 기준):
 //   §3 은 gist 파일 42개를 R2 로 옮기는데, INFOhSorry 구버전이 계속 gist 를 보므로 당분간 **양쪽을
 //   같은 내용으로 유지**해야 한다. 주요 배포 경로는 공용 퍼블리셔(ohSorryAdmin/scripts/publishAsset.js)가
 //   양쪽에 동시에 올리지만, gist 를 갱신하는 생산자는 그 외에도 있다 —
@@ -22,15 +26,31 @@
 
 import crypto from 'node:crypto';
 
-const GIST_ID = 'c3da608194c44f431abd2f1a7a4a9f5e';
 const BUCKET = 'ohsorry-data';
 const CDN = 'https://data.iidx.in/';
-// 상태 파일 — Worker 허용키가 아니라 공개되지 않는다(`mirror/` 는 allowlist 에 없음).
-const STATE_KEY = 'mirror/gist-state.json';
 
 // gist 에만 남는 파일 — 이관 대상이 아니다(publishAsset.js 의 GIST_ONLY 와 같은 목록).
 //   ohsorry.js = 북마클릿 본체(사용자 즐겨찾기에 raw URL 이 박혀 회수 불가) · 2-calc-score.js = 그 구버전 redirect.
 const GIST_ONLY = new Set(['ohsorry.js', '2-calc-score.js']);
+
+// 미러 대상 gist 목록 — 상태 파일(mirror/…)이 gist 별로 따로 있어야 updated_at 게이트가 서로 안 섞인다.
+//   ⚠ 상태 파일 키는 Worker 허용키가 아니라 공개되지 않는다(`mirror/` 는 allowlist 에 없음).
+const GIST_TARGETS = [
+  {
+    // 코드번들 + 대용량 JSON 데이터 gist(§3 이중 배포 안전망 본래 대상). 전 파일 미러.
+    id: 'c3da608194c44f431abd2f1a7a4a9f5e',
+    stateKey: 'mirror/gist-state.json',
+    only: null,
+  },
+  {
+    // 운영용 메타 gist(offsets/series-name/service-status/view-count-map). 이 중 브라우저가 직접
+    // 읽는 두 파일만 R2 로도 미러 — GitHub gist raw 익명 요청이 429 로 막히기 시작해(2026-08-17) 안정화.
+    // offsets.json(INF 전용) · view-count-map.json(동결·미사용)은 미러 대상 아님.
+    id: '30c3ba6f87df9847291c42ea216a8d2a',
+    stateKey: 'mirror/gist-state-ops.json',
+    only: new Set(['series-name.json', 'service-status.json']),
+  },
+];
 
 const arg = (n, d = null) => { const a = process.argv.find((x) => x.startsWith(`--${n}=`)); return a ? a.slice(n.length + 3) : d; };
 const DRY = process.argv.includes('--dry');
@@ -101,8 +121,8 @@ async function pool(items, n, fn) {
 
 // gist 는 공개라 인증 없이 읽는다(토큰 불필요 = 시크릿을 하나 덜 둔다).
 //   미인증 API 는 IP 당 60req/h 인데 이 스크립트는 회차당 1회만 쓴다.
-async function gistGet() {
-  const r = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+async function gistGet(gistId) {
+  const r = await fetch(`https://api.github.com/gists/${gistId}`, {
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'mirror-gist-r2/1.0' },
   });
   if (!r.ok) throw new Error(`gist GET HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
@@ -117,21 +137,23 @@ async function gistFileText(f) {
   return f.content ?? null;
 }
 
-(async () => {
-  const meta = await gistGet();
+// gist 1개를 R2 로 미러. 반환값 { fail } 로 실패 건수를 바깥 집계에 전달.
+async function mirrorOne(target) {
+  const prefix = `[${target.id.slice(0, 8)}]`;
+  const meta = await gistGet(target.id);
   const updatedAt = meta.updated_at;
 
   let state = null;
-  try { const t = await r2GetText(STATE_KEY); state = t ? JSON.parse(t) : null; } catch { /* 없거나 깨짐 → 전수 */ }
+  try { const t = await r2GetText(target.stateKey); state = t ? JSON.parse(t) : null; } catch { /* 없거나 깨짐 → 전수 */ }
 
   if (!FORCE && state && state.updatedAt === updatedAt) {
-    console.log(`gist 변경 없음 (updated_at ${updatedAt}) — 파일 취득 없이 종료`);
-    return;
+    console.log(`${prefix} gist 변경 없음 (updated_at ${updatedAt}) — 파일 취득 없이 종료`);
+    return { fail: 0 };
   }
-  console.log(`gist updated_at ${updatedAt}` + (state ? ` (직전 ${state.updatedAt})` : ' (상태 없음 — 전수 대조)') + (FORCE ? ' [force]' : ''));
+  console.log(`${prefix} gist updated_at ${updatedAt}` + (state ? ` (직전 ${state.updatedAt})` : ' (상태 없음 — 전수 대조)') + (FORCE ? ' [force]' : ''));
 
   const names = Object.keys(meta.files || {}).sort()
-    .filter((n) => !GIST_ONLY.has(n) && r2KeyOf(n));
+    .filter((n) => !GIST_ONLY.has(n) && r2KeyOf(n) && (!target.only || target.only.has(n)));
 
   let put = 0, same = 0, fail = 0, skipped = 0;
   const fails = [];
@@ -142,23 +164,37 @@ async function gistFileText(f) {
       if (text == null) { fail++; fails.push(`${name}: 내용 취득 실패`); return; }
       const remote = await cdnEtag(key);
       if (remote && remote === md5(text)) { same++; return; }
-      if (DRY) { console.log(`  [dry] ${name} → ${key} (${text.length}B)`); put++; return; }
+      if (DRY) { console.log(`${prefix}  [dry] ${name} → ${key} (${text.length}B)`); put++; return; }
       const r = await r2Put(key, text, ctOf(name));
-      if (r.ok) { console.log(`  ✓ ${name} → ${key} (${text.length}B)`); put++; }
+      if (r.ok) { console.log(`${prefix}  ✓ ${name} → ${key} (${text.length}B)`); put++; }
       else { fail++; fails.push(`${name}: ${r.msg}`); }
     } catch (e) { fail++; fails.push(`${name}: ${e.message}`); }
   });
 
-  console.log(`\n미러 완료: 갱신 ${put} / 동일 ${same} / 실패 ${fail}` + (skipped ? ` / skip ${skipped}` : ''));
-  if (fails.length) console.error('::error::' + fails.slice(0, 10).join(' | '));
+  console.log(`${prefix} 미러 완료: 갱신 ${put} / 동일 ${same} / 실패 ${fail}` + (skipped ? ` / skip ${skipped}` : ''));
+  if (fails.length) console.error(`${prefix} ::error::` + fails.slice(0, 10).join(' | '));
 
   // ⚠️ 실패가 있으면 상태를 갱신하지 않는다 — 다음 회차가 다시 시도하게 둔다.
   //    (갱신해버리면 updated_at 게이트에 걸려 실패분이 영영 안 올라간다.)
   if (!DRY && !fail) {
-    await r2Put(STATE_KEY, JSON.stringify({ updatedAt, at: new Date().toISOString(), files: names.length }),
+    await r2Put(target.stateKey, JSON.stringify({ updatedAt, at: new Date().toISOString(), files: names.length }),
       'application/json; charset=utf-8');
   } else if (fail) {
-    console.error('::error::실패가 있어 상태를 갱신하지 않는다 — 다음 회차가 재시도한다');
-    process.exitCode = 1;
+    console.error(`${prefix} ::error::실패가 있어 상태를 갱신하지 않는다 — 다음 회차가 재시도한다`);
   }
+  return { fail };
+}
+
+(async () => {
+  let anyFail = false;
+  for (const target of GIST_TARGETS) {
+    try {
+      const r = await mirrorOne(target);
+      if (r.fail) anyFail = true;
+    } catch (e) {
+      console.error(`[${target.id.slice(0, 8)}] ::error::미러 실패:`, e.message);
+      anyFail = true;
+    }
+  }
+  if (anyFail) process.exitCode = 1;
 })().catch((e) => { console.error('::error::미러 실패:', e.message); process.exit(1); });
