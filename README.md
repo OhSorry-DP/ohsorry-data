@@ -69,6 +69,14 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-24 — SP persona 배치축 개편 반영 (레인 의존 축 제거 + 축연타)
+
+`ohSorryRating/modules/persona.js` 가 같은 날 개정됐다(gist 배포). SP 는 대부분 RANDOM + 고정 손배치라 정배 기준 레인 축(나선·중앙트릴·손이동)이 의미가 없어 배치 그룹에서 빠지고, RANDOM 불변인 **축연타(`AXIS_SPEED`)** 가 들어왔다. 사유·실측은 ohSorryRating CHANGELOG 참조.
+
+- [.github/scripts/persona-lib.mjs](.github/scripts/persona-lib.mjs) `SP_LAYOUT_DEFS` 에 `AXIS_SPEED` 공급 추가 — 웹훅 즉시생성이 새 축을 못 채우면 배치 그룹이 통째로 빈다. `ohSorryRating` 의 같은 이름 상수와 1:1.
+- [persona-popmean-sp.json](persona-popmean-sp.json) 교체(n=161 → 190) — 축 목록이 바뀌면 `lay.all`/`lay.groupDev` 분포가 통째로 달라진다. 구본을 두면 `AXIS_SPEED` 가 μ/σ 없이 raw 잔차로 나와 `축연타: 약함 (-7.7 편차)` 처럼 찍힌다.
+- 기존 유저 반영은 `repersona-r2` 워크플로 수동 기동(persona/spPersona 필드만 read-modify-write).
+
 ### 2026-08-16 — persona 산출 경로에서 bp(미스카운트) 누락 수정
 
 `ohSorryRating/modules/calcWeakness.js`(같은 날 개정, gist 배포됨)가 `missCount` 있는 차트에 한해 잔차를 보정하도록 바뀌었는데, 이 repo 의 persona 산출 체인은 raw row 에서 `bp` 를 읽고도 중간에서 버리고 있어 웹훅 즉시생성·백필 어느 쪽도 보정이 반영되지 않고 있었다.

@@ -290,6 +290,9 @@ const SP_MURI_DEFS = [
 //   ⚠️ KEIMA(계마)는 DP 전용 개념이라 제외. HSTAIR/HANDS 는 DP 의 1P↔2P 상호작용이라 SP 에 없다.
 const SP_LAYOUT_DEFS = [
   { key: 'DOUBLE_STAIR', label: '겹계단' },
+  //   축연타 (2026-08-24) — RANDOM 불변 축. sp-feature-scores 의 AXIS_SPEED 를 노출만 추가.
+  { key: 'AXIS_SPEED', label: '축연타' },
+  //   ⚠️ 나선 2·중앙트릴 3·JUMP_WIDE 는 persona.js SP_LAYOUT_GROUPS 에서 빠졌다(레인 의존). 공급만 유지.
   { key: 'SPIRAL_UP', label: '오른나선' },
   { key: 'SPIRAL_DN', label: '왼나선' },
   { key: 'TRILL_K4', label: '중앙트릴34' },
