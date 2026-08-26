@@ -38,6 +38,12 @@ export async function loadPersonaResources() {
   const weaknessLib = req(path.join(tmp, 'calcWeakness.js'));
   const personaLib = req(path.join(tmp, 'persona.js'));
   const { norm } = req(path.join(tmp, 'normTitle.js'));
+  // r★ 모듈은 신규 배포 전 과도기에도 기존 덤프를 막지 않도록 optional. 없으면 호출부가 이전값을 보존한다.
+  let userRateStarLib = null;
+  try {
+    fs.writeFileSync(path.join(tmp, 'userRateStar.js'), await fetchText(`${GIST_RAW}/userRateStar.js${bust}`));
+    userRateStarLib = req(path.join(tmp, 'userRateStar.js'));
+  } catch { /* 아직 미배포 */ }
   const [textageMeta, ratingJson, zasaRaw, band1, band2, band3, featScoresJson, rateRef, spSlimRaw, spArrange, spRateRefRaw] = await Promise.all([
     fetchJson(`${GIST_RAW}/textage-meta.json${bust}`),
     fetchJson(`${GIST_RAW}/ohSorryRating.json${bust}`),
@@ -116,8 +122,9 @@ export async function loadPersonaResources() {
   const popmean = localJson('persona-popmean.json');
   const popmeanSp = localJson('persona-popmean-sp.json');   // SP 판 — 축·스케일이 달라 파일이 별개다
   return {
-    weaknessLib, personaLib, norm, textageMeta,
+    weaknessLib, personaLib, userRateStarLib, norm, textageMeta,
     ratingData: ratingJson.ratings,
+    rateStarScale: ratingJson.rateStar && ratingJson.rateStar.scale,
     zasaData: Array.isArray(zasaRaw.charts) ? zasaRaw.charts : zasaRaw,
     patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef, pop, popmean, popmeanSp,
   };

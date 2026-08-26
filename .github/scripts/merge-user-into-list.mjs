@@ -51,7 +51,7 @@ const pick = (ps) => {
   } : null;
 };
 const entry = {
-  iidx_id: u.iidx_id, dj_name: u.dj_name, star: u.star, ereter_star: u.ereter_star,
+  iidx_id: u.iidx_id, dj_name: u.dj_name, star: u.star, r_star: u.r_star, ereter_star: u.ereter_star,
   sp_rank: u.sp_rank, dp_rank: u.dp_rank, sp_cpi: u.sp_cpi, sp_star: u.sp_star, date: u.date,
   os_pattern_score: pick(1),
   sp_pattern_score: pick(0),
@@ -82,8 +82,12 @@ function readBase() {
 
 function mergeInto(list) {
   const i = list.findIndex((x) => x && x.iidx_id === u.iidx_id);
+  // 모듈/R2 일시 실패로 이번 덤프의 r_star가 비었어도 목록의 정상값까지 지우지 않는다.
+  const mergedEntry = i >= 0 && typeof entry.r_star !== 'number' && typeof list[i].r_star === 'number'
+    ? { ...entry, r_star: list[i].r_star }
+    : entry;
   // star=null 신규는 정렬상 뒤가 맞고, 웹은 클라이언트 재정렬하므로 append 로 충분
-  if (i >= 0) list[i] = entry; else list.push(entry);
+  if (i >= 0) list[i] = mergedEntry; else list.push(mergedEntry);
   return { list, isNew: i < 0 };
 }
 

@@ -33,6 +33,18 @@ jobs:
         with:
           node-version: 20
 
+      # r★ 래칫과 persona 실패 시 보존에 쓸 기존 유저 덤프. 없으면 최초 계산으로 진행한다.
+      - name: R2 user 현재본 받기
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+        run: |
+          mkdir -p user
+          F="user/$IIDX_ID.json"
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            npx --yes wrangler@4 r2 object get "ohsorry-data/$F" --file="$F" --remote >/dev/null 2>&1 || rm -f "$F"
+          fi
+
       # hist(무손실 점수 이력) 현재본을 R2 에서 미리 받아둔다.
       #   덤프 스크립트가 이걸 (행수, 최신 date) 프로브와 대조해 **변경이 없으면 scores 전체 재조회를 건너뛴다.**
       #   webhook 은 users.date 갱신만으로도 발화하므로(INF 15분 자동동기화) 점수가 안 바뀐 회차가 많은데,
