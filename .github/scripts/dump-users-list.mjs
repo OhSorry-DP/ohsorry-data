@@ -24,19 +24,12 @@ if (!SB || !KEY) { console.error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 없�
 const H = { apikey: KEY, Authorization: 'Bearer ' + KEY };
 
 async function fetchAllUsers() {
-  // r_star는 DB 컬럼이 아니라 webhook 산출값이다. 일일 전체 재생성이 기존 값을 지우지 않도록
-  // R2 현재 users-list를 정본으로 읽어 같은 iidx_id의 값만 보존한다.
-  const currentRes = await fetch('https://data.iidx.in/users-list.json?t=' + Date.now(), { cache: 'no-store' });
-  if (!currentRes.ok) throw new Error(`기존 users-list 조회 HTTP ${currentRes.status} — r_star 유실 방지를 위해 중단`);
-  const current = await currentRes.json();
-  if (!Array.isArray(current)) throw new Error('기존 users-list 형식 오류 — r_star 유실 방지를 위해 중단');
-  const rStarById = new Map(current.filter((u) => u && typeof u.r_star === 'number').map((u) => [String(u.iidx_id), u.r_star]));
   const out = [];
   const pageSize = 1000;
   let offset = 0;
   while (true) {
     const url = SB
-      + '/rest/v1/users?select=iidx_id,dj_name,star,ereter_star,sp_rank,dp_rank,sp_cpi,sp_star,date,'
+      + '/rest/v1/users?select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,sp_cpi,sp_star,date,'
       + 'user_ohsorry_radars(play_style,notes,chord,peak,charge,scratch,soflan,phrase,jack,trill,rand)'
       + `&order=star.desc.nullslast&limit=${pageSize}&offset=${offset}`;
     const res = await fetch(url, { headers: H });
@@ -54,7 +47,6 @@ async function fetchAllUsers() {
       };
       u.os_pattern_score = pick(1);      // DP
       u.sp_pattern_score = pick(0);      // SP — 웹 SP 분석탭 피처별 랭킹/percentile 모수
-      u.r_star = rStarById.has(String(u.iidx_id)) ? rStarById.get(String(u.iidx_id)) : null;
       delete u.user_ohsorry_radars;
     }
     out.push(...rows);

@@ -33,7 +33,7 @@ jobs:
         with:
           node-version: 20
 
-      # r★ 래칫과 persona 실패 시 보존에 쓸 기존 유저 덤프. 없으면 최초 계산으로 진행한다.
+      # persona/spPersona 산출 실패 시 기존값 보존에 쓸 현재 유저 덤프.
       - name: R2 user 현재본 받기
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

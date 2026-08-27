@@ -82,12 +82,9 @@ function readBase() {
 
 function mergeInto(list) {
   const i = list.findIndex((x) => x && x.iidx_id === u.iidx_id);
-  // 모듈/R2 일시 실패로 이번 덤프의 r_star가 비었어도 목록의 정상값까지 지우지 않는다.
-  const mergedEntry = i >= 0 && typeof entry.r_star !== 'number' && typeof list[i].r_star === 'number'
-    ? { ...entry, r_star: list[i].r_star }
-    : entry;
+  // r_star를 포함한 user row는 DB 조회값이 정본이다. null도 그대로 반영한다.
   // star=null 신규는 정렬상 뒤가 맞고, 웹은 클라이언트 재정렬하므로 append 로 충분
-  if (i >= 0) list[i] = mergedEntry; else list.push(mergedEntry);
+  if (i >= 0) list[i] = entry; else list.push(entry);
   return { list, isNew: i < 0 };
 }
 

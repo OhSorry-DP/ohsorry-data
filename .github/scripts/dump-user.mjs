@@ -49,12 +49,10 @@ const slimRow = (r) => { const o = {}; for (const k of SCORE_KEEP) if (r[k] !== 
 //   (Action 은 repo 루트에서 실행되므로 기본값 '.', ohSorryAdmin 은 DATA_REPO 절대경로를 넘긴다)
 export async function dumpUser(id, personaRes, opts = {}) {
   const baseDir = opts.baseDir || '.';
-  let previous = null;
-  try { previous = JSON.parse(fs.readFileSync(`${baseDir}/user/${id}.json`, 'utf8')); } catch { /* 최초 덤프 */ }
   const eid = encodeURIComponent(id);
   const [user, radars, osPattern, dp, sp, dpRecent, spRecent] = await Promise.all([
     // dbr_pw 는 비밀(공개 repo·anon 노출 금지) → 명시 컬럼만 select(select=* 금지).
-    rest(`users?iidx_id=eq.${eid}&select=iidx_id,dj_name,star,ereter_star,sp_rank,dp_rank,date,native_star,sp_cpi,sp_star`),
+    rest(`users?iidx_id=eq.${eid}&select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,date,native_star,sp_cpi,sp_star`),
     rest(`user_radars?iidx_id=eq.${eid}&select=*`),
     // SP(play_style=0)/DP(1) 두 행 모두 — SP 분석탭 피처별 랭킹용. 소비처(웹 osPatternFromRows·
     //   merge-user-into-list)는 반드시 play_style 로 골라 쓸 것(순서에 기대면 SP↔DP 혼입).
@@ -78,22 +76,8 @@ export async function dumpUser(id, personaRes, opts = {}) {
     console.error('spPersona 산출 실패(' + id + '):', e.message);
     try { spPersona = JSON.parse(fs.readFileSync(`${baseDir}/user/${id}.json`, 'utf8')).spPersona || null; } catch { /* 기존 파일 없음 */ }
   }
-  const dpCharts = chartsFromGridRows(dp, personaRes.textageMeta);
-  const prevRStar = previous && previous.user && typeof previous.user.r_star === 'number' ? previous.user.r_star : null;
-  let rStar = prevRStar, rStarCalc = null;
-  try {
-    if (!personaRes.userRateStarLib) throw new Error('userRateStar.js 미배포');
-    rStarCalc = personaRes.userRateStarLib.inferUserRStar(dpCharts, personaRes.ratingData, {
-      normFn: personaRes.norm, scale: personaRes.rateStarScale, prevRStar,
-    });
-    if (typeof rStarCalc.rStar === 'number') rStar = rStarCalc.rStar;
-  } catch (e) {
-    console.error('rStar 산출 실패(' + id + ') — 이전값 보존:', e.message);
-  }
-  const userOut = user[0] ? { ...user[0], r_star: rStar } : null;
   return {
-    _v: new Date().toISOString(), user: userOut, radars, osPattern, persona, spPersona,
-    ...(rStarCalc ? { rStarCalc } : {}),
+    _v: new Date().toISOString(), user: user[0] ? { ...user[0] } : null, radars, osPattern, persona, spPersona,
     dp: dp.map(slimRow), sp: sp.map(slimRow),
     // 최근 92일 갱신 이력 [{song_id,diff,date_kst}] — ④/SP연습 피처 recency. null 이면 키 생략(웹이 RPC fallback).
     ...(dpRecent ? { dpRecent } : {}),
