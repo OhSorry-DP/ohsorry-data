@@ -19,6 +19,14 @@ export const DIFF_INT_TO_STR = { 0: 'BEGINNER', 1: 'NORMAL', 2: 'HYPER', 3: 'ANO
 const DIFF_TO_TEXTAGE = { BEGINNER: 'DB', NORMAL: 'DN', HYPER: 'DH', ANOTHER: 'DA', LEGGENDARIA: 'DX' };
 const MIN_CHARTS = 30;   // 표본 부족 시 persona 생략 (cold-start)
 
+// clearStar 정책은 ohSorryWeb/user/components/helpers.js:16 recBaseStarOf 및
+// ohSorryRating/scripts/analyze/dp/poc-user-score-vs-clear-axis.js 와 동일 유지.
+function recBaseStar(user) {
+  const star = typeof user?.star === 'number' ? user.star : null;
+  const nativeStar = typeof user?.native_star === 'number' ? user.native_star : null;
+  return star != null && star >= 0.5 && star < 2 ? star : (nativeStar != null ? nativeStar : star);
+}
+
 // ── SP 상수 (ohSorryRating scripts/analyze/sp/dump-sp-user-personas.js 와 동일 유지) ──
 const SP_FEATS = ['NOTES', 'CHORD', 'PEAK', 'CHARGE', 'SCRATCH', 'SOF-LAN', 'PHRASE', 'JACK', 'TRILL', 'RAND'];
 const SP_DIFF_TO_KEY = { NORMAL: 'SP_NOR', HYPER: 'SP_HYP', ANOTHER: 'SP_ANO', LEGGENDARIA: 'SP_LEG' };
@@ -459,7 +467,7 @@ export function featsFor(charts, R, isSp) {
 
 // 차트 배열 → persona 필드. 표본 부족/실패 시 null.
 //   반환: { head, oneLiner, prose, report, tags, nCharts, _v }
-export function personaFor(allCharts, R) {
+export function personaFor(allCharts, R, userRow = null) {
   if (!Array.isArray(allCharts) || allCharts.length < MIN_CHARTS) return null;
   const vec = R.weaknessLib.calcUserWeakness({
     allCharts, patternsMap: R.patternsMap, normFn: R.norm,
@@ -531,6 +539,7 @@ export function personaFor(allCharts, R) {
     // 배치(16축)/무리/지구력 축 usernorm — DP 전용. 없으면 persona 가 종전 raw 경로로 폴백.
     popAxes: (R.popmean && R.popmean.axes) || null,
     popDerived: (R.popmean && R.popmean.derived) || null,
+    star: recBaseStar(userRow), rStar: userRow?.r_star ?? null,
     nCharts: allCharts.length, overallResid, feats, mirror,
     featsL: vec.__vecL || null, featsR: vec.__vecR || null,
     bpmProfile: vec.__bpmProfile || null, kensei: vec.__kensei || null,

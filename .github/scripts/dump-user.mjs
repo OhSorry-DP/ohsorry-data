@@ -65,7 +65,7 @@ export async function dumpUser(id, personaRes, opts = {}) {
   // ── persona (DP)/spPersona (SP) 성향 리포트 — raw grid rows 로 슬림 전에 산출. 실패해도 덤프 자체는 계속(기존값 유지). ──
   let persona = null, spPersona = null;
   try {
-    persona = personaFor(chartsFromGridRows(dp, personaRes.textageMeta), personaRes);
+    persona = personaFor(chartsFromGridRows(dp, personaRes.textageMeta), personaRes, user[0]);
   } catch (e) {
     console.error('persona 산출 실패(' + id + '):', e.message);
     try { persona = JSON.parse(fs.readFileSync(`${baseDir}/user/${id}.json`, 'utf8')).persona || null; } catch { /* 기존 파일 없음 */ }

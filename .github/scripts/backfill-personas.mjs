@@ -33,7 +33,7 @@ for (const f of files) {
   if (!needDp && !needSp) { skip++; continue; }   // 웹훅으로 이미 생성됨
   try {
     if (needDp) {
-      const persona = personaFor(chartsFromGridRows(rowsOf(data.dp), R.textageMeta), R);
+      const persona = personaFor(chartsFromGridRows(rowsOf(data.dp), R.textageMeta), R, data.user);
       data.persona = persona;
       persona ? ok++ : nul++;
     }

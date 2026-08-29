@@ -69,6 +69,17 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-08-29 — persona 성향축(점수형↔램프형)에 `star`·`r_star` 공급
+
+`ohSorryRating/modules/persona.js` 가 같은 날 개정돼 gist·R2 배포됐다(트랙 A-2). 엔진이 「클리어 실력 대비 점수 높음/낮음」을 판정하려면 profile 에 **클리어 별값과 점수 별값이 둘 다** 실려야 하는데, 종전 이 profile 에는 `star` 조차 없었다. 사유·실측은 ohSorryRating CHANGELOG 및 `d:/work/docs/weakness-clear-vs-score.md` 참조.
+
+- [.github/scripts/persona-lib.mjs](.github/scripts/persona-lib.mjs) — `personaFor(allCharts, R, userRow)` 로 3번째 인자(**선택**) 추가, profile 에 `star: recBaseStar(userRow)`·`rStar: userRow.r_star` 주입. `recBaseStar` 정책은 `ohSorryWeb/user/components/helpers.js` 의 `recBaseStarOf` 와 1:1(★0.5~2 는 `star` 우선, 그 외 `native_star`). `spPersonaFor` 는 손대지 않았다 — SP 는 `r_star` 가 없다.
+- [.github/scripts/dump-user.mjs](.github/scripts/dump-user.mjs) — 웹훅 즉시생성 경로에 `user[0]` 전달(이미 `star,r_star,native_star` 를 조회하고 있었다).
+- [.github/scripts/backfill-personas.mjs](.github/scripts/backfill-personas.mjs) · [.github/scripts/r2-repersona.mjs](.github/scripts/r2-repersona.mjs) — `data.user` 전달.
+
+⚠️ **인자를 안 넘기면 섹션이 생략된다**(선택 인자). 그런데 DP 는 종전 문장도 함께 사라지므로, persona.js 배포만 하고 이 repo 를 늦게 푸시하면 그 사이 플레이한 유저는 스타일 줄이 빈 persona 를 받는다. **두 배포는 붙여서 할 것.**
+- 기존 유저 전수 반영(`repersona-r2`)은 **돌리지 않았다** — 각자 다음 플레이 때 `dump-user` 가 갱신한다.
+
 ### 2026-08-24 — SP persona 배치축 개편 반영 (레인 의존 축 제거 + 축연타)
 
 `ohSorryRating/modules/persona.js` 가 같은 날 개정됐다(gist 배포). SP 는 대부분 RANDOM + 고정 손배치라 정배 기준 레인 축(나선·중앙트릴·손이동)이 의미가 없어 배치 그룹에서 빠지고, RANDOM 불변인 **축연타(`AXIS_SPEED`)** 가 들어왔다. 사유·실측은 ohSorryRating CHANGELOG 참조.

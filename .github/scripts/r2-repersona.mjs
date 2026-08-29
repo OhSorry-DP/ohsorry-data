@@ -154,7 +154,7 @@ await pool(ids, CONC, async (id) => {
   try { data = JSON.parse(text); } catch (e) { fail++; console.error('파싱 실패', id, e.message); return; }
   const before = JSON.stringify([data.persona, data.spPersona]);
   try {
-    data.persona = personaFor(chartsFromGridRows(rowsOf(data.dp), R.textageMeta), R);
+    data.persona = personaFor(chartsFromGridRows(rowsOf(data.dp), R.textageMeta), R, data.user);
     if (data.persona) dpOk++;
     data.spPersona = spPersonaFor(spChartsFromGridRows(rowsOf(data.sp), R.textageMeta), R);
     if (data.spPersona) spOk++;
