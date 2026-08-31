@@ -487,8 +487,9 @@ export function personaFor(allCharts, R, userRow = null) {
   const LAYOUT_DEFS = [
     { key: 'HSTAIR_ONEHAND', label: '한손계단', of: (sc) => sc.HSTAIR_ONEHAND },
     { key: 'HSTAIR_SYNC', label: '쌍계단', of: (sc) => sc.HSTAIR_SYNC },
-    { key: 'HSTAIR_SAMESHAPE', label: '대칭계단', of: (sc) => sc.HSTAIR_SAMESHAPE },
-    { key: 'HSTAIR_DIFFSHAPE', label: '비대칭계단', of: (sc) => sc.HSTAIR_DIFFSHAPE },
+    // §11-6 — legacy 길이 일치 축은 DB 36dim 호환용으로 retire하고, 실제 방향 대칭 축으로 교체.
+    { key: 'HSTAIR_SYM', label: '대칭동기계단', of: (sc) => sc.HSTAIR_SYM },
+    { key: 'HSTAIR_ASYM', label: '비대칭동기계단', of: (sc) => sc.HSTAIR_ASYM },
     { key: 'SPIRAL_UP', label: '오른나선', of: (sc) => Math.max(sc.SPIRAL_UP_L || 0, sc.SPIRAL_UP_R || 0) },
     { key: 'SPIRAL_DN', label: '왼나선', of: (sc) => Math.max(sc.SPIRAL_DN_L || 0, sc.SPIRAL_DN_R || 0) },
     // 2026-08-07 확장 — ohSorryRating dump-all-user-personas.js LAYOUT_DEFS 와 동일 유지.
