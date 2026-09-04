@@ -20,12 +20,11 @@
 // 사용: node .github/scripts/merge-user-into-list.mjs user/{id}.json [--allow-empty] [--no-upload]
 //   --allow-empty : 최초 부트스트랩 전용(빈 목록에서 시작 허용)
 //   --no-upload   : R2 GET/PUT 없이 로컬 users-list.json 만 병합(테스트용)
-// env: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID (wrangler 인증)
+// env: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
 
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { getText, putText } from './r2-client.mjs';
 
-const BUCKET = 'ohsorry-data';
 const KEY = 'users-list.json';
 const LOCAL = 'users-list.json';
 const MAX_ATTEMPTS = 5;
@@ -57,21 +56,14 @@ const entry = {
   sp_pattern_score: pick(0),
 };
 
-const wrangler = (args) => execFileSync('npx', ['--yes', 'wrangler@4', ...args], {
-  stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8',
-});
-const r2Get = (dest) => wrangler(['r2', 'object', 'get', `${BUCKET}/${KEY}`, `--file=${dest}`, '--remote']);
-const r2Put = (src) => wrangler(['r2', 'object', 'put', `${BUCKET}/${KEY}`, `--file=${src}`,
-  '--content-type=application/json; charset=utf-8', '--remote']);
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ⚠️ 베이스가 없거나 깨졌으면 **중단한다**.
 //   종전엔 빈 배열로 시작했다. git 이 데이터를 들고 있을 때는 다음 cron 전체 재생성이 복구했지만,
 //   git 데이터 커밋을 중단한 뒤로는 **R2 가 유일본**이라 빈 배열을 PUT 하면 전 유저 목록이 날아간다.
-function readBase() {
+function readBase(body) {
   let list = null;
-  try { list = JSON.parse(fs.readFileSync(LOCAL, 'utf8')); } catch (e) { list = null; }
+  try { list = JSON.parse(body); } catch (e) { list = null; }
   if (!Array.isArray(list) || (!list.length && !ALLOW_EMPTY)) {
     throw new Error('users-list.json 베이스가 없거나 비었다'
       + ' — 빈 목록을 PUT 하면 전 유저가 사라진다. R2 취득 실패를 먼저 확인할 것'
@@ -90,7 +82,9 @@ function mergeInto(list) {
 
 async function main() {
   if (NO_UPLOAD) {
-    const { list, isNew } = mergeInto(readBase());
+    let body = null;
+    try { body = fs.readFileSync(LOCAL, 'utf8'); } catch (e) { body = null; }
+    const { list, isNew } = mergeInto(readBase(body));
     fs.writeFileSync(LOCAL, JSON.stringify(list));
     console.log('users-list 병합(로컬만):', u.iidx_id, isNew ? '(신규)' : '(갱신)', '| 총', list.length, '명');
     return;
@@ -107,23 +101,36 @@ async function main() {
     try {
       // 1) 최신본 취득 — R2 원본 직접 읽기는 read-after-write 강한 일관성이라
       //    방금 다른 실행이 올린 것도 보인다. (HTTP data.iidx.in 은 Worker 엣지 캐시 60초에 걸린다)
-      fs.rmSync(LOCAL, { force: true });
-      r2Get(LOCAL);
-      const base = readBase();
+      let body;
+      try {
+        body = await getText(KEY);
+      } catch (e) {
+        throw new Error(`R2 조회 실패: ${e.message}`);
+      }
+      if (body === null) {
+        throw new Error(`R2 객체 없음: ${KEY} — 빈 목록을 PUT 하지 않고 중단`);
+      }
+      const base = readBase(body);
       const before = base.length;
 
       // 2) 병합 → 3) 즉시 PUT (창을 최소화)
       const { list, isNew } = mergeInto(base);
-      fs.writeFileSync(LOCAL, JSON.stringify(list));
-      r2Put(LOCAL);
+      body = JSON.stringify(list);
+      const res = await putText(KEY, body, 'application/json; charset=utf-8');
+      if (!res.ok) throw new Error(`R2 저장 실패: ${res.msg}`);
 
       // 4) 검증 — 다시 읽어 내 항목이 살아있는지 확인한다.
       //    다른 실행이 그 사이에 덮었으면 date 가 내 것이 아니다.
-      const VERIFY = 'users-list.verify.json';
-      fs.rmSync(VERIFY, { force: true });
-      r2Get(VERIFY);
-      const after = JSON.parse(fs.readFileSync(VERIFY, 'utf8'));
-      fs.rmSync(VERIFY, { force: true });
+      let verifyBody;
+      try {
+        verifyBody = await getText(KEY);
+      } catch (e) {
+        throw new Error(`R2 검증 조회 실패: ${e.message}`);
+      }
+      if (verifyBody === null) {
+        throw new Error(`R2 검증 객체 없음: ${KEY}`);
+      }
+      const after = JSON.parse(verifyBody);
       const mine = Array.isArray(after) ? after.find((x) => x && x.iidx_id === u.iidx_id) : null;
 
       if (mine && mine.date === entry.date) {

@@ -41,8 +41,21 @@ jobs:
         run: |
           mkdir -p user
           F="user/$IIDX_ID.json"
+          R2_URL="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/ohsorry-data/objects"
+          get_r2() {
+            local key="$1" out="$2" status
+            if ! status=$(curl -sS -o "$out" -w '%{http_code}' \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$R2_URL/$key"); then
+              rm -f "$out"; echo "::warning::R2 다운로드 전송 실패: $key"; return 1
+            fi
+            case "$status" in
+              2??) return 0 ;;
+              404) rm -f "$out"; return 1 ;;
+              *) rm -f "$out"; echo "::warning::R2 다운로드 실패(HTTP $status): $key"; return 1 ;;
+            esac
+          }
           if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
-            npx --yes wrangler@4 r2 object get "ohsorry-data/$F" --file="$F" --remote >/dev/null 2>&1 || rm -f "$F"
+            get_r2 "$F" "$F" || :
           fi
 
       # hist(무손실 점수 이력) 현재본을 R2 에서 미리 받아둔다.
@@ -58,10 +71,23 @@ jobs:
         run: |
           mkdir -p hist
           F="hist/$IIDX_ID.json"
+          R2_URL="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/ohsorry-data/objects"
+          get_r2() {
+            local key="$1" out="$2" status
+            if ! status=$(curl -sS -o "$out" -w '%{http_code}' \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$R2_URL/$key"); then
+              rm -f "$out"; echo "::warning::R2 다운로드 전송 실패: $key"; return 1
+            fi
+            case "$status" in
+              2??) return 0 ;;
+              404) rm -f "$out"; return 1 ;;
+              *) rm -f "$out"; echo "::warning::R2 다운로드 실패(HTTP $status): $key"; return 1 ;;
+            esac
+          }
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — hist 전체 재생성"; exit 0
           fi
-          if npx --yes wrangler@4 r2 object get "ohsorry-data/$F" --file="$F" --remote >/dev/null 2>&1 \
+          if get_r2 "$F" "$F" \
              && node -e 'const a=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(!Array.isArray(a)||!a.length)process.exit(1);console.log("hist 베이스 = R2 현재본 ("+a.length+"행)")' "$F" 2>/dev/null; then
             :
           else
@@ -86,10 +112,10 @@ jobs:
         #   **users-list 의 40.3%(253명 중 102명)가 옛 값으로 덮였다.**
         #   → 스크립트가 GET→merge→PUT 을 붙여서 창을 최소화하고, PUT 뒤 다시 읽어 검증한 뒤
         #     덮였으면 지수 백오프+지터로 최대 5회 재시도한다.
-        #   (wrangler 는 `--if-match` 를 지원하지 않아 낙관적 잠금을 쓸 수 없다. 검증-재시도가 차선.)
+        #   (현재 R2 REST 경로에는 조건부 PUT 을 쓰지 않아 낙관적 잠금을 쓸 수 없다. 검증-재시도가 차선.)
         #
         # 베이스는 **R2 현재본**이다 — git 데이터 커밋을 중단해 R2 가 유일본이 됐다.
-        #   HTTP(data.iidx.in) 대신 wrangler 직접 읽기인 이유: Worker 엣지 캐시(60초)를 우회해야
+        #   HTTP(data.iidx.in) 대신 R2 REST 직접 읽기인 이유: Worker 엣지 캐시(60초)를 우회해야
         #   하는데 쿼리 cache-bust 가 안 통한다(캐시 키에서 쿼리를 버림 — cf/src/index.js).
         #   R2 원본 직접 읽기는 read-after-write 강한 일관성이라 방금 다른 실행이 올린 것도 보인다.
         #
@@ -126,9 +152,13 @@ jobs:
           #   (종전 `... || { echo warning; return 1; }` 은 기본 셸 `bash -e` 의 errexit 에 걸려
           #    첫 실패에서 스텝이 죽고 users-list.json PUT 이 아예 실행되지 않았다.)
           rc=0
+          R2_URL="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/ohsorry-data/objects"
           put() {
-            if npx --yes wrangler@4 r2 object put "ohsorry-data/$1" --file="$1" \
-                 --content-type="application/json; charset=utf-8" --remote; then
+            local status
+            if status=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+                 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                 -H "Content-Type: application/json; charset=utf-8" --data-binary "@$1" "$R2_URL/$1") \
+               && [[ "$status" == 2?? ]]; then
               echo "R2 OK: $1"
             else
               echo "::error::R2 업로드 실패: $1"; rc=1

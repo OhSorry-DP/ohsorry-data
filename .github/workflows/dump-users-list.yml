@@ -74,9 +74,13 @@ jobs:
           #   (종전 `... || { echo warning; return 1; }` 은 기본 셸 `bash -e` 의 errexit 에 걸려
           #    첫 실패에서 스텝이 죽고 뒤 파일 PUT 이 아예 실행되지 않았다.)
           rc=0
+          R2_URL="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/ohsorry-data/objects"
           put() {
-            if npx --yes wrangler@4 r2 object put "ohsorry-data/$1" --file="$1" \
-                 --content-type="application/json; charset=utf-8" --remote; then
+            local status
+            if status=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+                 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                 -H "Content-Type: application/json; charset=utf-8" --data-binary "@$1" "$R2_URL/$1") \
+               && [[ "$status" == 2?? ]]; then
               echo "R2 OK: $1"
             else
               echo "::error::R2 업로드 실패: $1"; rc=1

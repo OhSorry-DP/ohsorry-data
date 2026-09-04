@@ -69,6 +69,26 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-04 — wrangler 제거, R2 REST 로 교체 (업로드→웹 반영 4.5배 지연 해소)
+
+업로드 후 웹 반영이 갑자기 느려졌다. **우리 코드 변경이 아니었다.**
+
+- `dump-user` 실행시간 **9/3 중앙값 59s → 9/4 265s**(최대 129s → 503s). 큐 대기는 0초라 잡 자체가 느려진 것.
+- 단계별로 쪼개니 **`R2 user 현재본 받기` 하나가 188s → 334s** 로 전체를 지배했다. 본문은 `npx --yes wrangler@4` 다.
+- 🔴 **`wrangler 4.129.0` 이 `2026-09-03T17:50:56Z` 에 배포됐다.** 그 시각으로 자르면 배포 전 36건 중앙값 **59s** / 배포 후 62건 중앙값 **261s** 로 경계가 정확히 일치한다. 패키지가 커진 게 아니다(15.17MB → 15.18MB, deps·optionalDeps·scripts 동일) — **`@4` 라는 가변 태그가 새 버전으로 해석되며 콜드 설치가 되는 것**이다.
+- 🔴 **`npx` 는 잡 안에서 캐시된다.** 그래서 첫 호출만 비싸고 이후 스텝은 5~7s 였다. 즉 **한 군데라도 남기면 비용이 그쪽으로 옮겨갈 뿐**이라 전부 걷어내야 했다.
+
+버전 고정이 아니라 **wrangler 자체를 제거**했다. 다음 릴리스에 또 터지면 안 된다.
+
+- [dump-user.yml](.github/workflows/dump-user.yml) — GET 2곳·PUT 1곳을 `curl` R2 REST 로. [dump-users-list.yml](.github/workflows/dump-users-list.yml) — PUT 1곳.
+- [merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs) — **자체 wrangler 래퍼**(`r2-client.mjs` 를 안 쓰고 `npx` 를 직접 부르고 있었다)를 제거하고 `getText`/`putText` 로 교체. 임시 파일 경유도 같이 사라졌다.
+  - 🔴 **실패 의미가 달라져 분기를 다시 맞췄다** — 종전 `r2Get` 은 모든 실패에 throw 였지만 `getText` 는 **404 만 `null`**, 나머지는 throw. `putText` 는 **throw 하지 않고 `{ok:false}` 를 반환**한다. `res.ok` 확인을 빠뜨리면 실패가 조용히 성공이 된다.
+  - "베이스가 없거나 깨졌으면 중단한다" 정책과 GET→PUT→검증→재시도(5회) 구조는 **무변경**.
+- 🔴 **다운로드 실패가 무음이던 것도 같이 고쳤다** — 종전 `>/dev/null 2>&1 || rm -f` 라 토큰이 죽어도 아무도 모른 채 매번 전체 재생성만 했다. **404(정상적 부재)와 401/403/5xx 를 구분**해 후자는 `::warning::` 을 남긴다.
+- `users-list.json` 은 여전히 merge 스크립트만 PUT 한다(Upload 스텝은 `user/`·`hist/` 만) — 로컬 파일 쓰기가 사라져도 안전함을 확인했다.
+
+⚠️ **남은 wrangler 사용처** — `snapshot-r2.mjs` · `r2-repersona.mjs` · `r2-client.mjs`(REST 우선, wrangler 는 폴백) 에 남아 있다. 이번 범위 밖(다른 워크플로)이지만 **같은 함정을 그대로 안고 있다.**
+
 ### 2026-08-29 — persona 성향축(점수형↔램프형)에 `star`·`r_star` 공급
 
 `ohSorryRating/modules/persona.js` 가 같은 날 개정돼 gist·R2 배포됐다(트랙 A-2). 엔진이 「클리어 실력 대비 점수 높음/낮음」을 판정하려면 profile 에 **클리어 별값과 점수 별값이 둘 다** 실려야 하는데, 종전 이 profile 에는 `star` 조차 없었다. 사유·실측은 ohSorryRating CHANGELOG 및 `d:/work/docs/weakness-clear-vs-score.md` 참조.
