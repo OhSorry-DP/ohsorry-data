@@ -33,7 +33,7 @@
 - 증분(수동): ohSorryAdmin `node scripts/dump-data-repo.js <iidx_id> ...`
 - **자동(실시간)**: 오소리 업로드 → supabase `users` upsert → Database Webhook → vercel `api/dump-trigger`
   → `repository_dispatch(dump-user)` → 이 repo 의 `dump-user` Action 이 그 유저만 재덤프
-  → **R2 PUT(매번 — 서빙)** + **git commit/push(유저당 1일 1회 — 이력)**. 2026-08-06 부터 이 둘의 주기가 다르다.
+  → **R2 PUT(매번 — 서빙)**. git 데이터 커밋은 2026-08-09 에 중단했고, 2026-09-04 에 남아 있던 파일도 추적에서 끊었다 — **이 repo 는 코드 전용이다.**
   - Action: [.github/workflows/dump-user.yml](.github/workflows/dump-user.yml) / 덤프: [.github/scripts/dump-user.mjs](.github/scripts/dump-user.mjs)
   - users upsert(업로드 시작) 가 scores 보다 ~1s 먼저지만, Action 기동 지연(수십초)이 디바운스가 되어 race 없음.
 
@@ -68,6 +68,29 @@ https://data.iidx.in/version.json
 > 오리진이 구본을 재캐시하고 최대 12h 고착된다 — 아래 변경 이력의 두 사고가 모두 이것이다.
 
 ## 변경 이력
+
+### 2026-09-04 — 데이터 파일 git 추적 종료 (`user/` 380개 · 84MB)
+
+`dump-user` 의 `checkout` 단계가 11s 였다. **워킹트리 130MB 를 매 실행 받아오고 있었다.**
+
+2026-08-09(§4)에 데이터 **커밋**은 중단했지만 **기존 파일은 지우지 않아** 계속 체크아웃되고 있었다. 그런데 실제로는:
+
+- `user/$ID.json` — 받아온 직후 **R2 현재본이 덮어쓴다**(체크아웃본은 낡은 사본)
+- 나머지 379개 — **한 번도 안 읽는다**
+- `songs.json` · `users-list.json` — `dump-users-list.mjs` 가 **supabase 에서 새로 만들어** PUT 한다. 읽는 코드 0건
+
+즉 84MB 를 받아 1개를 덮어쓰고 379개를 버리고 있었다. `git rm -r user songs.json users-list.json version.json` — **추적 396 → 22 파일, 워킹트리 130MB → 602KB.**
+
+**소비처 전수 확인 후 지웠다** — CF Worker(`cf/src/index.js`)는 github raw 폴백이 없고, 다른 5개 레포에도 이 repo 를 raw 로 참조하는 곳이 0건이다. 주의할 곳 둘은 이렇게 정리했다:
+
+- [r2-repersona.mjs](.github/scripts/r2-repersona.mjs) — 대상 목록은 **R2 `users-list.json` 이 1순위**고 git `user/` 는 폴백이었다. 코드 자신이 *"§4 이후 굳은 목록이라 신규 유저가 빠질 수 있다"* 고 경고한다. 폴백이 사라지면 `::error::` 내고 중단하는데, **굳은 목록으로 조용히 도는 것보다 낫다.**
+- [backfill-personas.mjs](.github/scripts/backfill-personas.mjs) — 헤더에 *"로컬 1회성 · git 작업본 정리용"* 이라 적혀 있다. 지운 파일을 다루는 스크립트라 정의상 같이 은퇴한다.
+
+**남긴 것** — `persona-pop.json` · `persona-popmean.json` · `persona-popmean-sp.json`(합 16KB, `persona-lib` 가 읽는다) · `cf/` · `README.md`.
+
+🔴 **히스토리는 안 지웠다.** 과거 커밋에 파일이 그대로 있어 `git checkout <commit> -- user/` 로 언제든 꺼낼 수 있고 `.git` 224MB 도 그대로다. 되돌리기는 한 줄이다.
+
+⚠️ `.gitignore` 에 4개를 넣었다 — 워크플로가 로컬에 만드는 중간 산출물이라, 안 넣으면 누가 `git add -A` 한 번에 84MB 가 되돌아온다.
 
 ### 2026-09-04 — wrangler 제거, R2 REST 로 교체 (업로드→웹 반영 4.5배 지연 해소)
 
