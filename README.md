@@ -69,6 +69,30 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-04 — persona / spPersona 도 null 로 덮어쓰지 않게 (fail-open 차단)
+
+같은 날 `users.star` 가 null 로 덮어써진 사고와 **같은 구조**가 여기에도 있었다. 그런데 더 나쁘다 — R2 `user/{id}.json` 은 **파일 통째 PUT** 이라 DB 의 `COALESCE` 같은 안전망이 아예 없고, R2 는 객체 버저닝도 없다(롤백은 일별 스냅샷뿐).
+
+**새고 있던 곳 4개**
+
+1. 🔴 `spPersonaFor` 는 **`return null` 을 한다**(`persona-lib.mjs:406` 등 — 표본 부족 시). **throw 가 아니라서 `catch` 가 안 걸리고**, 기존 복구 로직이 **아예 발동하지 않은 채** `spPersona: null` 이 기록됐다. `personaFor` 도 같은 계약이다.
+2. 🔴 `rpcGrid(id, 0).catch(() => [])` — **SP RPC 실패가 "SP 데이터 없음"(빈 배열)으로 둔갑**했다. `spPersona` 만이 아니라 **`sp` 점수 행까지 빈 배열로 덮어쓴다.**
+3. 복구 시도가 `try { readFileSync } catch { }` — **빈 catch**. 게다가 그 파일은 워크플로가 R2 에서 받아둔 것이라 **R2 GET 이 실패하면 그냥 없다.**
+4. 같은 파일을 persona 용 · spPersona 용으로 **두 번 각각** 읽었다.
+
+**수정** — [dump-user.mjs](.github/scripts/dump-user.mjs)
+
+- 이전 덤프를 `r2-client.mjs` 의 `getText` 로 **한 번만** 읽고 세 상태를 구별한다: **있음 / 정당한 부재(404 = 신규 유저) / 모름(조회 실패)**. 마지막을 "없음" 으로 바꾸는 게 곧 삭제다.
+- 산출값이 **`null` 인 경우도 throw 와 똑같이 실패로 취급**한다. 3번 구멍이 정확히 이 차이에서 생겼다.
+- 산출 실패 + 이전 상태 **모름** → **덤프 중단**(`::error::` + 0 아닌 종료). 업로드 스텝이 `steps.dump.outcome == 'success'` 조건이라 아무것도 안 올라가고, 다음 업로드가 재시도한다. supabase 가 원본이라 잃는 건 그 회차뿐이다.
+- SP RPC 는 **실패**와 **정상적인 빈 결과**를 구별한다. 실패면 이전 덤프의 `sp`·`spPersona` 를 재사용해 **DP 갱신은 계속 반영**되게 하고, 이전 덤프를 모르면 중단한다.
+- 🔴 **검수 중 잡은 버그** — `let sp, spPersona;` 로 `undefined` 시작이라, `spPersonaFor` 가 **throw 하면 `spPersona === null` 가드가 안 걸리고** `JSON.stringify` 가 키를 빼서 **필드가 통째로 사라졌다.** 막으려던 바로 그 wipe 였다. `null` 초기화로 수정.
+- `prev.sp` 가 배열이 아니면(옛 포맷·깨짐) 그것도 "모름" 으로 보고 중단한다.
+
+⚠️ **`opts.baseDir` 제거** — persona 보존값을 로컬 `user/{id}.json` 에서 읽던 인자인데, 같은 날 그 폴더를 git 추적에서 끊어 로컬본이 없어졌다. 이제 R2 에서 직접 읽는다. 그래서 **R2 자격증명이 필요**하다 — 없으면 `r2-client` 가 wrangler 폴백을 타서 유저마다 프로세스를 스폰한다(전체 재덤프면 치명적). `ohSorryAdmin/scripts/dump-data-repo.js` 는 3번째 인자를 아직 넘기지만 무시된다(무해).
+
+⚠️ **손대지 않은 것** — `rpcUpdateHistory(...).catch(() => null)` 에도 같은 fail-open 이 있다(HTTP 실패가 `null` 이 되고, 조건부 스프레드 때문에 기존 `dpRecent`/`spRecent` 가 새 객체에서 사라진다). 웹이 RPC 폴백을 갖고 있어 영향이 작다고 보고 이번엔 남겼다. `radars` · `osPattern` 은 실패하면 덤프 전체가 중단되므로 같은 구멍이 없다.
+
 ### 2026-09-04 — 데이터 파일 git 추적 종료 (`user/` 380개 · 84MB)
 
 `dump-user` 의 `checkout` 단계가 11s 였다. **워킹트리 130MB 를 매 실행 받아오고 있었다.**

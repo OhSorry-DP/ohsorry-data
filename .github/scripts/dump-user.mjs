@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { loadPersonaResources, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor } from './persona-lib.mjs';
+import { getText } from './r2-client.mjs';
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -45,12 +46,40 @@ const slimRow = (r) => { const o = {}; for (const k of SCORE_KEEP) if (r[k] !== 
 // ⚠️ 단일 정본 — ohSorryAdmin/scripts/dump-data-repo.js(전체·증분 덤프)가 이 함수를 import 해서 쓴다.
 //   과거 dump-data-repo.js 가 같은 스키마를 따로 구현하다 persona/spPersona/dpRecent/spRecent 를 누락해,
 //   수동 덤프한 유저의 리포트가 통째로 사라진 사고가 있었다(2026-08-04, 37명). 필드 추가는 여기만 고칠 것.
-// opts.baseDir — persona 산출 실패 시 기존 파일에서 값을 살려오는데, 그 user/{id}.json 의 부모 경로.
-//   (Action 은 repo 루트에서 실행되므로 기본값 '.', ohSorryAdmin 은 DATA_REPO 절대경로를 넘긴다)
-export async function dumpUser(id, personaRes, opts = {}) {
-  const baseDir = opts.baseDir || '.';
+//
+// 🔴 종전 `opts.baseDir` 은 없앴다 — persona 보존값을 **로컬 user/{id}.json** 에서 읽었는데,
+//    2026-09-04 에 그 폴더를 git 추적에서 끊어 로컬본이 아예 없어졌다. 이제 R2 에서 직접 읽는다.
+//    ⚠️ 그래서 **R2 자격증명(CLOUDFLARE_R2_TOKEN 또는 CLOUDFLARE_API_TOKEN)이 필요하다.**
+//    없으면 r2-client 가 wrangler 폴백을 타서 유저마다 프로세스를 스폰한다(전체 재덤프면 치명적).
+//    ohSorryAdmin/scripts/dump-data-repo.js 는 3번째 인자를 아직 넘기지만 **무시된다**(무해).
+
+// 이전 덤프를 R2 에서 한 번만 읽는다. 세 상태를 구별하는 게 핵심이다 —
+//   있음 / 정당한 부재(404, 신규 유저) / **모름**(조회 실패). 마지막을 '없음' 으로 바꾸면
+//   그게 곧 데이터 삭제다(users.star 사고와 같은 구조, 2026-09-04).
+async function readPreviousDump(id) {
+  try {
+    const text = await getText(`user/${id}.json`);
+    if (text === null) {
+      console.log('이전 덤프 없음(신규 유저, ' + id + ')');
+      return { prevOk: true, prev: null };
+    }
+    try {
+      const prev = JSON.parse(text);
+      console.log('이전 덤프 읽음(' + id + ')');
+      return { prevOk: true, prev };
+    } catch (e) {
+      console.warn('::warning::이전 덤프 JSON 파싱 실패(' + id + '): ' + e.message);
+      return { prevOk: false, prev: null };
+    }
+  } catch (e) {
+    console.warn('::warning::이전 덤프 R2 조회 실패(' + id + '): ' + e.message);
+    return { prevOk: false, prev: null };
+  }
+}
+
+export async function dumpUser(id, personaRes) {
   const eid = encodeURIComponent(id);
-  const [user, radars, osPattern, dp, sp, dpRecent, spRecent] = await Promise.all([
+  const [user, radars, osPattern, dp, spResult, dpRecent, spRecent, prevResult] = await Promise.all([
     // dbr_pw 는 비밀(공개 repo·anon 노출 금지) → 명시 컬럼만 select(select=* 금지).
     rest(`users?iidx_id=eq.${eid}&select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,date,native_star,sp_cpi,sp_star`),
     rest(`user_radars?iidx_id=eq.${eid}&select=*`),
@@ -58,27 +87,67 @@ export async function dumpUser(id, personaRes, opts = {}) {
     //   merge-user-into-list)는 반드시 play_style 로 골라 쓸 것(순서에 기대면 SP↔DP 혼입).
     rest(`user_ohsorry_radars?iidx_id=eq.${eid}&select=*`),
     rpcGrid(id, 1),
-    rpcGrid(id, 0).catch(() => []),
+    rpcGrid(id, 0).then((rows) => ({ ok: true, rows })).catch((error) => ({ ok: false, error })),
     rpcUpdateHistory(id, 1).catch(() => null),   // DP 갱신 이력 — RPC 미적용/실패 시 null(필드 생략)
     rpcUpdateHistory(id, 0).catch(() => null),   // SP 갱신 이력 — SP 연습추천 피처 recency 용
+    readPreviousDump(id),
   ]);
-  // ── persona (DP)/spPersona (SP) 성향 리포트 — raw grid rows 로 슬림 전에 산출. 실패해도 덤프 자체는 계속(기존값 유지). ──
-  let persona = null, spPersona = null;
+  const { prevOk, prev } = prevResult;
+  // ── persona (DP)/spPersona (SP) 성향 리포트 — raw grid rows 로 슬림 전에 산출. 실패 시 이전값 유지, 이전 상태도 모르면 중단. ──
+  let persona = null;
+  let personaError = null;
   try {
     persona = personaFor(chartsFromGridRows(dp, personaRes.textageMeta), personaRes, user[0]);
   } catch (e) {
-    console.error('persona 산출 실패(' + id + '):', e.message);
-    try { persona = JSON.parse(fs.readFileSync(`${baseDir}/user/${id}.json`, 'utf8')).persona || null; } catch { /* 기존 파일 없음 */ }
+    personaError = e;
   }
-  try {
-    spPersona = spPersonaFor(spChartsFromGridRows(sp, personaRes.textageMeta), personaRes);
-  } catch (e) {
-    console.error('spPersona 산출 실패(' + id + '):', e.message);
-    try { spPersona = JSON.parse(fs.readFileSync(`${baseDir}/user/${id}.json`, 'utf8')).spPersona || null; } catch { /* 기존 파일 없음 */ }
+  if (persona === null) {
+    const reason = personaError ? personaError.message : '산출값 null';
+    if (!prevOk) {
+      console.error('::error::persona 산출 실패 및 이전 덤프 상태 모름(' + id + '): ' + reason);
+      throw new Error('persona 보존 불가(' + id + ')');
+    }
+    console.warn('::warning::persona 산출 실패, 이전 값 유지(' + id + '): ' + reason);
+    persona = (prev && prev.persona) || null;
+  }
+
+  // 🔴 반드시 null 로 시작한다 — undefined 로 두면 spPersonaFor 가 throw 했을 때
+  //    아래 `=== null` 가드가 안 걸리고, JSON.stringify 가 키를 빼서 필드가 통째로 사라진다.
+  let sp = null, spPersona = null;
+  if (!spResult.ok) {
+    const reason = spResult.error && spResult.error.message ? spResult.error.message : String(spResult.error);
+    if (!prevOk || !prev) {
+      console.error('::error::SP RPC 실패 및 이전 덤프 복구 불가(' + id + '): ' + reason);
+      throw new Error('SP 데이터 보존 불가(' + id + ')');
+    }
+    console.warn('::warning::SP RPC 실패, 이전 sp/spPersona 유지(' + id + '): ' + reason);
+    if (!Array.isArray(prev.sp)) {
+      console.error('::error::SP RPC 실패 + 이전 덤프에 sp 배열이 없다(' + id + ') — 빈 값으로 덮어쓰지 않고 중단');
+      throw new Error('SP 데이터 보존 불가(' + id + ')');
+    }
+    sp = prev.sp;
+    spPersona = prev.spPersona || null;
+  } else {
+    sp = spResult.rows.map(slimRow);
+    let spPersonaError = null;
+    try {
+      spPersona = spPersonaFor(spChartsFromGridRows(spResult.rows, personaRes.textageMeta), personaRes);
+    } catch (e) {
+      spPersonaError = e;
+    }
+    if (spPersona === null) {
+      const reason = spPersonaError ? spPersonaError.message : '산출값 null';
+      if (!prevOk) {
+        console.error('::error::spPersona 산출 실패 및 이전 덤프 상태 모름(' + id + '): ' + reason);
+        throw new Error('spPersona 보존 불가(' + id + ')');
+      }
+      console.warn('::warning::spPersona 산출 실패, 이전 값 유지(' + id + '): ' + reason);
+      spPersona = (prev && prev.spPersona) || null;
+    }
   }
   return {
     _v: new Date().toISOString(), user: user[0] ? { ...user[0] } : null, radars, osPattern, persona, spPersona,
-    dp: dp.map(slimRow), sp: sp.map(slimRow),
+    dp: dp.map(slimRow), sp,
     // 최근 92일 갱신 이력 [{song_id,diff,date_kst}] — ④/SP연습 피처 recency. null 이면 키 생략(웹이 RPC fallback).
     ...(dpRecent ? { dpRecent } : {}),
     ...(spRecent ? { spRecent } : {}),
