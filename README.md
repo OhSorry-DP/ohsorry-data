@@ -69,6 +69,53 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-04 — persona 보존 장치가 **한 번도 작동하지 않고 있었다** (R2 자격증명 누락)
+
+바로 위 항목에서 만든 보존 장치가 배포된 뒤로도 **전혀 발동하지 않았다.** 워크플로 로그에 기존 유저가
+매번 이렇게 찍히고 있었다:
+
+```
+이전 덤프 없음(신규 유저, C310967548465)
+```
+
+R2 에는 멀쩡히 있는데(`user/C310967548465.json` → HTTP 200, 136KB) 스크립트만 없다고 본 것이다.
+
+**원인 두 겹**
+
+1. 🔴 **[dump-user.yml](.github/workflows/dump-user.yml) 의 `Dump user from supabase` 스텝에 `CLOUDFLARE_*` 가 없었다.**
+   앞뒤 스텝(R2 현재본 받기 · users-list 병합 · Upload)에는 전부 있는데 이 스텝만 빠졌다. 이전 덤프를
+   **로컬 `user/` 폴더가 아니라 R2 에서 직접 읽도록 바꾼 게 바로 위 항목인데**, 그때 워크플로 env 를
+   같이 안 옮겼다. 위 항목 말미에 *"그래서 R2 자격증명이 필요하다"* 라고 적어놓고도 그랬다.
+2. 🔴 **`r2-client.getText` 의 wrangler 폴백이 `catch { return null; }` 이었다.**
+   토큰이 없으니 `useRest === false` → wrangler 폴백 → Actions 에 인증정보가 없어 실패 → 그 실패가
+   **`null` 로 뭉개져 404(신규 유저)와 구분되지 않았다.** 호출부는 세 상태를 제대로 가르게 고쳐놨지만,
+   **그 아래 계층이 두 상태를 이미 합쳐서 올려보내고 있었다.**
+
+**같은 날 네 번째 fail-open 이다.** 앞의 셋과 판박이 — 조회 실패를 값의 부재로 바꾸면 그게 곧 삭제다.
+이번엔 호출부만 고치고 **그 호출부가 의존하는 계층은 안 봤다**는 점이 새롭다.
+
+**수정**
+
+- 워크플로 dump 스텝에 `CLOUDFLARE_API_TOKEN` · `CLOUDFLARE_ACCOUNT_ID` 추가. 왜 필수인지 주석으로 박았다.
+- [r2-client.mjs](.github/scripts/r2-client.mjs) `getText` 의 wrangler 폴백도 REST 와 같은 규약을 지킨다 —
+  키 없음 문구(R2 에러 10007)만 `null`, 나머지 실패는 **throw**. 문구 매칭이 빗나가도 안전한
+  쪽(throw)으로 떨어진다. 호출부 3곳 모두 이미 throw 를 제대로 받는다:
+  `dump-user`(→ 보존 경로), `merge-user-into-list`(→ 재시도 후 중단), `backfill-user-rstar`(→ `unavailable`
+  이 아니라 `failed` 로 집계 + 종료코드 1).
+
+**검증** — 다섯 상태를 실제로 확인했다.
+
+| 경로 | 상황 | 결과 |
+|---|---|---|
+| REST | 존재하는 키 | 133,035B ✅ |
+| REST | 없는 키 | `null` ✅ |
+| REST | 인증 실패 | throw ✅ |
+| wrangler | 존재하는 키 | 133,035B ✅ |
+| wrangler | 없는 키 | `null` ✅ |
+
+⚠️ 이 사고는 **아무 데이터도 지우지 않았다** — 보존이 필요한 회차(persona 산출 실패)가 마침 없었다.
+방어가 통째로 없는 상태로 하루를 보낸 것이지, 이미 새어나간 건 아니다.
+
 ### 2026-09-04 — persona / spPersona 도 null 로 덮어쓰지 않게 (fail-open 차단)
 
 같은 날 `users.star` 가 null 로 덮어써진 사고와 **같은 구조**가 여기에도 있었다. 그런데 더 나쁘다 — R2 `user/{id}.json` 은 **파일 통째 PUT** 이라 DB 의 `COALESCE` 같은 안전망이 아예 없고, R2 는 객체 버저닝도 없다(롤백은 일별 스냅샷뿐).

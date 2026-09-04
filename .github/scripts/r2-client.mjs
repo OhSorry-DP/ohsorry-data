@@ -77,6 +77,11 @@ async function restFetch(key, init, tries = 4) {
 }
 
 // 없으면 null. (호출부가 "미덤프"와 "실패"를 구분할 수 있게 404 만 null 이고 나머지는 throw)
+//   🔴 wrangler 폴백도 같은 규약을 지킨다. 종전엔 `catch { return null; }` 라서
+//   **인증 실패·wrangler 미설치·네트워크 단절을 전부 '객체 없음' 으로 둔갑시켰다.**
+//   dump-user 워크플로에 R2 토큰을 빼먹은 채로, 기존 유저가 전부 '신규 유저' 로 찍혀
+//   persona 보존 장치가 통째로 무력화된 사고가 있다(2026-09-04). 조회 실패는 값이 없는 게 아니라
+//   **모르는 것**이다 — 모르면 throw 해서 호출부가 보존 경로로 가게 한다.
 export async function getText(key) {
   if (useRest) {
     const r = await restFetch(key, { method: 'GET' });
@@ -86,7 +91,13 @@ export async function getText(key) {
   }
   const f = path.join(os.tmpdir(), 'r2get-' + key.replace(/[/\\]/g, '_'));
   try { wrangler(['r2', 'object', 'get', `${BUCKET}/${key}`, `--file=${f}`, '--remote']); }
-  catch { return null; }
+  catch (e) {
+    // 정당한 부재만 null. wrangler 가 키 없음을 알리는 문구(R2 에러 10007)와 그 밖의 실패를
+    // 가른다. 문구 매칭이 빗나가도 안전한 쪽(throw)으로 떨어진다.
+    const msg = String(e.stderr || e.stdout || e.message || '');
+    if (/does not exist|not found|NoSuchKey|10007/i.test(msg)) return null;
+    throw new Error(`R2 GET ${key} — wrangler 실패: ${msg.slice(0, 300)}`);
+  }
   try { return fs.readFileSync(f, 'utf8'); } finally { try { fs.unlinkSync(f); } catch { /* 무시 */ } }
 }
 
