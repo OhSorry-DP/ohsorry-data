@@ -36,8 +36,43 @@ const CT = {
 const contentTypeOf = (key) => CT[key.slice(key.lastIndexOf('.') + 1).toLowerCase()] || 'application/octet-stream';
 
 // 브라우저 캐시는 짧게 — 덤프는 webhook 으로 수시 갱신되므로 신선도가 우선.
-//   엣지(Cache API)도 같은 값으로 두어 R2 Class B 읽기를 줄인다.
-const CACHE_CONTROL = 'public, max-age=60';
+//
+// 🔴 **엣지 TTL 을 키에 따라 가른다**(2026-09-17). 종전에는 `public, max-age=60` **하나를 모든 키에**
+//    똑같이 줬고 `s-maxage` 가 없어 **엣지 TTL 도 60초**였다 — `caches.default` 를 쓰고 있었는데도
+//    사실상 매 요청이 R2 원본까지 갔다.
+//
+// 🔴 **왜 30일이 아니라 1시간인가 — purge 가 불가능하기 때문이다.** (CF 문서 실측, 2026-09-17)
+//    ⓐ Cache API(`caches.default`)는 **콜로별**이다 —
+//       「the contents of the cache do not replicate outside of the originating data center」
+//       「`cache.delete` only purges content of the cache in the data center that the Worker was invoked」
+//    ⓑ **존 단위 URL purge 는 `caches.default` 에 안 먹는다**(purge-by-URL 미지원).
+//    ⓒ 전역 purge 가 되는 `ctx.cache.purge()` 는 **Workers Caching** 이라는 *다른 저장소* 용이고
+//       Cache API 와 서로 영향을 주지 않는다.
+//    ⇒ **무효화 수단이 없으므로 TTL 이 곧 최대 낡음이다.** 30일을 걸면 30일 낡은 것이 나갈 수 있다.
+//    📌 더 길게 가려면 Worker 를 Cache API → **Workers Caching** 으로 옮기고 Cache-Tag + `cache.purge()`
+//       를 써야 한다. 별건이고 「Workers Caching 활성화」가 선행 조건이다.
+//
+//   | 키 | 누가 쓰나 | 엣지 TTL | 근거 |
+//   |---|---|---|---|
+//   | `lib/` · `data/`  | 사람이 `publishAsset.js` 로 · `mirror-gist-r2.mjs`(30분, diff 시에만) | **1시간** | 사람이 올릴 때만 바뀐다. 최대 1시간 낡음을 감수. 이 무리가 **용량의 대부분**이다(`data/ohSorryRating.json` raw 2.15MB · `data/feature-scores-slim.json` 압축 1.17MB · `data/textage-meta.json`) |
+//   | `songs.json`      | `dump-users-list.mjs`(30분, diff 게이트 없이 매번 PUT) | 60초 | 🔴 **신선도가 목적인 자산이다** — 신곡이 늦으면 슬림 row 의 곡메타 조인이 비어 **곡명이 안 뜬다**(그 스크립트 주석). 30분 주기에 캐시를 더하면 최악 낡음이 배가 된다 |
+//   | `users-list.json` | 유저 활동마다 증분(`merge-user-into-list.mjs`) | 60초 | 진짜 고회전 |
+//   | `user/` · `hist/` | 유저별 덤프(`dump-user.yml`) | 60초 | 유저별. 업로드 직후 반영돼야 한다 |
+//
+// ⚠️ `version.json` 은 **R2 에 쓰는 코드가 없다**(죽은 키). 분류에서 뺀다.
+// ⚠️ 브라우저 `max-age` 는 **전부 60초 그대로** 둔다 — 엣지만 길게 잡는다.
+const BROWSER_MAX_AGE = 60;
+const EDGE_LONG = 3600;   // 1시간. 🔴 올리기 전에 위 「purge 가 불가능하다」를 먼저 읽어라.
+
+// 🔴 `songs.json` 을 여기 넣지 마라 — 위 표의 근거 참조.
+const LONG_CACHE_PREFIX = ['lib/', 'data/'];
+
+function cacheControlFor(key) {
+  const long = LONG_CACHE_PREFIX.some((p) => key.startsWith(p));
+  return long
+    ? `public, max-age=${BROWSER_MAX_AGE}, s-maxage=${EDGE_LONG}`
+    : `public, max-age=${BROWSER_MAX_AGE}`;
+}
 
 function corsHeaders() {
   return {
@@ -93,14 +128,14 @@ export default {
     if (inm && inm === obj.httpEtag) {
       return new Response(null, {
         status: 304,
-        headers: { etag: obj.httpEtag, 'cache-control': CACHE_CONTROL, ...corsHeaders() },
+        headers: { etag: obj.httpEtag, 'cache-control': cacheControlFor(key), ...corsHeaders() },
       });
     }
 
     const res = new Response(obj.body, {
       headers: {
         'content-type': contentTypeOf(key),
-        'cache-control': CACHE_CONTROL,
+        'cache-control': cacheControlFor(key),
         etag: obj.httpEtag,
         ...corsHeaders(),
       },
