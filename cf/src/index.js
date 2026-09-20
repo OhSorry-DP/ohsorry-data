@@ -13,7 +13,7 @@
 //
 // 원본은 이 repo 의 git. Action 이 commit/push 후 같은 파일을 R2 에 올린다.
 
-const ALLOWED_ROOT = new Set(['users-list.json', 'songs.json', 'version.json']);
+const ALLOWED_ROOT = new Set(['users-list.json', 'users-list-slim.json', 'songs.json', 'version.json']);
 const USER_RE = /^user\/[A-Za-z0-9]+\.json$/;
 // hist/{id}.json — 무손실 점수 이력(scores 전 행·전 필드 배열형). 웹 랭킹모달의 점수 추이 그래프 소스이자,
 //   user/ 슬림 덤프로는 불가능한 supabase 복원의 원본이다.
@@ -57,6 +57,7 @@ const contentTypeOf = (key) => CT[key.slice(key.lastIndexOf('.') + 1).toLowerCas
 //   | `lib/` · `data/`  | 사람이 `publishAsset.js` 로 · `mirror-gist-r2.mjs`(30분, diff 시에만) | **1시간** | 사람이 올릴 때만 바뀐다. 최대 1시간 낡음을 감수. 이 무리가 **용량의 대부분**이다(`data/ohSorryRating.json` raw 2.15MB · `data/feature-scores-slim.json` 압축 1.17MB · `data/textage-meta.json`) |
 //   | `songs.json`      | `dump-users-list.mjs`(30분, diff 게이트 없이 매번 PUT) | 60초 | 🔴 **신선도가 목적인 자산이다** — 신곡이 늦으면 슬림 row 의 곡메타 조인이 비어 **곡명이 안 뜬다**(그 스크립트 주석). 30분 주기에 캐시를 더하면 최악 낡음이 배가 된다 |
 //   | `users-list.json` | 유저 활동마다 증분(`merge-user-into-list.mjs`) | 60초 | 진짜 고회전 |
+//   | `users-list-slim.json` | `users-list.json` 과 **같은 생산자·같은 시점**(증분·전체 재생성 양쪽) | 60초 | 본체와 같은 회전이다. 🔴 본체와 TTL 을 다르게 두지 마라 — v3 검색이 랭킹보다 낡은 명단을 보게 된다 |
 //   | `user/` · `hist/` | 유저별 덤프(`dump-user.yml`) | 60초 | 유저별. 업로드 직후 반영돼야 한다 |
 //
 // ⚠️ `version.json` 은 **R2 에 쓰는 코드가 없다**(죽은 키). 분류에서 뺀다.
@@ -120,7 +121,7 @@ export default {
     // purge는 콜로별 Cache API에서 URL 단위로 지원되지 않으므로, R2 원본을 직접 읽어 우회한다.
     // R2 Class B 읽기와 egress 폭증을 막기 위해 고회전·소용량인 user/hist와 users-list만 허용한다.
     const fresh = url.searchParams.get('fresh') === '1'
-      && (USER_RE.test(key) || HIST_RE.test(key) || key === 'users-list.json');
+      && (USER_RE.test(key) || HIST_RE.test(key) || key === 'users-list.json' || key === 'users-list-slim.json');
     if (!fresh) {
       const hit = await cache.match(cacheKey);
       if (hit) return hit;
