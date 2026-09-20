@@ -24,9 +24,12 @@
 
 import fs from 'node:fs';
 import { getText, putText } from './r2-client.mjs';
+import { toSlim } from './users-list-slim.mjs';
 
 const KEY = 'users-list.json';
+const SLIM_KEY = 'users-list-slim.json';
 const LOCAL = 'users-list.json';
+const SLIM_LOCAL = 'users-list-slim.json';
 const MAX_ATTEMPTS = 5;
 
 const argPath = process.argv[2];
@@ -86,6 +89,9 @@ async function main() {
     try { body = fs.readFileSync(LOCAL, 'utf8'); } catch (e) { body = null; }
     const { list, isNew } = mergeInto(readBase(body));
     fs.writeFileSync(LOCAL, JSON.stringify(list));
+    const slimBody = JSON.stringify(toSlim(list));
+    fs.writeFileSync(SLIM_LOCAL, slimBody);
+    console.log('users-list-slim 병합(로컬만):', `총 ${list.length} 명 | ${Buffer.byteLength(slimBody, 'utf8')} bytes`);
     console.log('users-list 병합(로컬만):', u.iidx_id, isNew ? '(신규)' : '(갱신)', '| 총', list.length, '명');
     return;
   }
@@ -136,6 +142,22 @@ async function main() {
       if (mine && mine.date === entry.date) {
         console.log('users-list 병합:', u.iidx_id, isNew ? '(신규 추가)' : '(기존 갱신)',
           `| ${before} → ${after.length} 명 | 시도 ${attempt}회`);
+        // 🔴 슬림의 원본은 `after` 다 — 내가 만든 `list` 가 아니다. after 는 PUT 뒤 다시 읽은 R2 확정본이라
+        //   그 사이 다른 실행이 넣은 유저까지 들어 있다. list 를 쓰면 그 유저를 슬림에서 지운다
+        //   (이 파일이 253명 중 102명을 옛 값으로 덮은 사고를 낸 바로 그 지점이다).
+        // ⚠️ 재시도 루프에 얹지 않는다 — full 은 검증까지 끝났으므로 슬림 실패로 다시 병합하면 안 된다.
+        try {
+          const slimBody = JSON.stringify(toSlim(after));
+          const slimRes = await putText(SLIM_KEY, slimBody, 'application/json; charset=utf-8');
+          if (!slimRes.ok) throw new Error(slimRes.msg);
+          console.log('users-list-slim 갱신:', `총 ${after.length} 명 | ${Buffer.byteLength(slimBody, 'utf8')} bytes`);
+        } catch (e) {
+          // 조용히 넘기지 않는다 — 이 자산이 일주일간 404 였는데 아무 데도 안 빨개져서 아무도 몰랐다.
+          console.error(`::error::users-list-slim 업로드 실패 — ${e.message}.`
+            + ' users-list 본체 병합은 성공했다(슬림만 밀렸다).'
+            + ' 웹은 77 KB 폴백으로 동작하며, 다음 유저 업로드나 1일 1회 전체 재생성이 복구한다.');
+          process.exit(1);
+        }
         return;
       }
       lastErr = new Error(`PUT 후 검증 실패 — 다른 실행이 덮었다(내 date=${entry.date}, 현재=${mine ? mine.date : '항목없음'})`);

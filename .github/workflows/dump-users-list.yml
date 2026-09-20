@@ -46,7 +46,7 @@ jobs:
             echo "범위: songs.json 만 (30분 주기)"
           else
             echo "BUILD_ARGS="                        >> "$GITHUB_ENV"
-            echo "FILES=users-list.json songs.json"   >> "$GITHUB_ENV"
+            echo "FILES=users-list.json users-list-slim.json songs.json" >> "$GITHUB_ENV"
             echo "범위: 전체 재생성 (users-list + songs)"
           fi
 

@@ -12,6 +12,7 @@
 //   node dump-users-list.mjs --songs   → songs.json 만
 //   node dump-users-list.mjs --users   → users-list.json 만
 import fs from 'node:fs';
+import { toSlim } from './users-list-slim.mjs';
 
 const ARGV = process.argv.slice(2);
 // 둘 다 지정하거나 아무것도 안 주면 → 둘 다 생성(기존 동작 유지).
@@ -60,6 +61,10 @@ if (DO_USERS) {
   const list = await fetchAllUsers();
   fs.writeFileSync('users-list.json', JSON.stringify(list));
   console.log('users-list.json 갱신:', list.length, '명');
+  // v3 검색용 슬림 — 방금 만든 full 을 4키로 projection 한다(supabase 재조회 없음).
+  const slimJson = JSON.stringify(toSlim(list));
+  fs.writeFileSync('users-list-slim.json', slimJson);
+  console.log('users-list-slim.json 갱신:', list.length, '명,', Buffer.byteLength(slimJson), 'bytes');
 } else {
   console.log('users-list.json 재생성 skip (--songs)');
 }
