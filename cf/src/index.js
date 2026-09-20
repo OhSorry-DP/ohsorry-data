@@ -117,8 +117,14 @@ export default {
     // 엣지 캐시 — 쿼리스트링은 키에서 무시(캐시 파편화 방지). 웹이 붙이는 cache-bust 도 같은 객체를 본다.
     const cacheKey = new Request(url.origin + '/' + key, req);
     const cache = caches.default;
-    const hit = await cache.match(cacheKey);
-    if (hit) return hit;
+    // purge는 콜로별 Cache API에서 URL 단위로 지원되지 않으므로, R2 원본을 직접 읽어 우회한다.
+    // R2 Class B 읽기와 egress 폭증을 막기 위해 고회전·소용량인 user/hist와 users-list만 허용한다.
+    const fresh = url.searchParams.get('fresh') === '1'
+      && (USER_RE.test(key) || HIST_RE.test(key) || key === 'users-list.json');
+    if (!fresh) {
+      const hit = await cache.match(cacheKey);
+      if (hit) return hit;
+    }
 
     const obj = await env.DATA.get(key);
     if (!obj) return notFound('덤프 없음: ' + key);
