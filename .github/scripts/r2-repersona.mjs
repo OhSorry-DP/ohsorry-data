@@ -109,7 +109,7 @@ if (useRest) {
   } catch (e) { console.warn('::warning::R2 REST probe 실패 — wrangler 폴백:', e.message); useRest = false; }
 }
 
-// 슬림 row 복원용 곱 마스터. 🔴 2026-09-04 에 songs.json 은 git 추적이 끊겼다(R2 가 유일본) —
+// 슬림 row 복원용 곡 마스터. 🔴 2026-09-04 에 songs.json 은 git 추적이 끊겼다(R2 가 유일본) —
 //   종전처럼 fs 로 읽으면 체크아웃에 없어 ENOENT 로 즉사한다. R2 에서 받는다(backfill-user-rstar.mjs 와 같은 사상).
 //   ⚠️ 반드시 REST probe 뒤에 와야 한다 — 이 GET 도 그 경로를 탄다.
 //   🔴 없으면 중단한다 — 빈 맵으로 진행하면 모든 유저의 차트가 0건이 돼 persona 를 통째로 지우며 PUT 한다.
