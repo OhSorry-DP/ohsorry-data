@@ -169,9 +169,18 @@ export function chartsFromGridRows(rows, textageMeta) {
 // 전 레벨 DP 차트의 도달선 계산. 값 부재(0건)는 정상 결과로 반환하고 계산 예외는 전파한다.
 export function reachNpsFor(charts, R) {
   const criteria = ['ec', 'hc', 'exh', 'a', 'aa', 'aaa'];
+  const bandCriteria = [
+    ['ec', (r) => r.lamp >= 3], ['hc', (r) => r.lamp >= 5],
+    ['exh', (r) => r.lamp >= 6], ['fc', (r) => r.lamp >= 7],
+  ];
+  const bands = [9, 10, 11, 12];
   const empty = () => Object.fromEntries(criteria.map((key) => [key, null]));
   const emptyMeta = () => Object.fromEntries(criteria.map((key) => [key, { fallback: false, total: 0 }]));
   const records = [];
+  const zasaMap = new Map();
+  for (const z of Array.isArray(R.zasaData) ? R.zasaData : []) {
+    if (z?.title && z?.diff) zasaMap.set(R.norm(z.title) + '|' + z.diff, z);
+  }
   for (const chart of Array.isArray(charts) ? charts : []) {
     const key = DP_DIFF_TO_KEY[chart?.diff];
     const pattern = key && chart?.textageSongId != null
@@ -179,15 +188,58 @@ export function reachNpsFor(charts, R) {
       : null;
     const nps = pattern?.nps;
     if (!nps || ![nps.a, nps.p, chart?.lampNum, chart?.exScore, chart?.noteCount].every(Number.isFinite)) continue;
-    records.push({ avgNps: nps.a, peakNps: nps.p, lamp: chart.lampNum, exScore: chart.exScore, noteCount: chart.noteCount });
+    const z = zasaMap.get(R.norm(chart.title || '') + '|' + chart.diff);
+    records.push({ avgNps: nps.a, peakNps: nps.p, lamp: chart.lampNum, exScore: chart.exScore, noteCount: chart.noteCount,
+      band: z && typeof z.level === 'number' ? Math.floor(z.level) : null });
   }
-  if (records.length === 0) return { avg: empty(), peak: empty(), meta: { avg: emptyMeta(), peak: emptyMeta() } };
+  const makeEmptyBands = (status, includePlayed) => Object.fromEntries(bands.map((band) => [String(band), {
+    status, ...(includePlayed ? { played: 0 } : {}),
+  }]));
+  if (records.length === 0) return { avg: empty(), peak: empty(), meta: { avg: emptyMeta(), peak: emptyMeta() }, bands: makeEmptyBands('NPS_REACH_SAMPLE_INSUFFICIENT', true) };
   const result = R.reachNpsLib(records);
   const trimMeta = (ruler) => Object.fromEntries(criteria.map((key) => [key, {
     fallback: result.meta[ruler][key].fallback,
     total: result.meta[ruler][key].total,
   }]));
-  return { avg: result.avg, peak: result.peak, meta: { avg: trimMeta('avg'), peak: trimMeta('peak') } };
+  const meta = { avg: trimMeta('avg'), peak: trimMeta('peak') };
+  let bandResult;
+  try {
+    bandResult = Object.fromEntries(bands.map((band) => {
+      const all = records.filter((r) => r.band === band);
+      const played = all.filter((r) => r.lamp > 0);
+      if (played.length < 100) return [String(band), { status: 'NPS_REACH_SAMPLE_INSUFFICIENT', played: played.length }];
+      const cells = bandCriteria.map(([criterion, fn]) => {
+        const rate = played.filter(fn).length / played.length;
+        if (rate < 0.30 || rate > 0.70) return { criterion, rate, played: played.length, reason: rate < 0.30 ? 'hard' : 'easy' };
+        let rr;
+        try { rr = R.reachNpsLib(played, { criteria: { [criterion]: fn } }); }
+        catch { return { criterion, rate, played: played.length, reason: 'value' }; }
+        const fallback = rr.meta?.avg?.[criterion]?.fallback === true || rr.meta?.peak?.[criterion]?.fallback === true;
+        if (fallback) return { criterion, rate, played: played.length, reason: 'fallback' };
+        const avg = rr.avg?.[criterion], peak = rr.peak?.[criterion];
+        if (!Number.isFinite(avg) || !Number.isFinite(peak)) return { criterion, rate, played: played.length, reason: 'value' };
+        return { criterion, rate, played: played.length, reason: 'ok', avg, peak };
+      });
+      const normal = cells.filter((c) => c.reason === 'ok');
+      if (normal.length) {
+        normal.sort((a, b) => Math.abs(a.rate - 0.50) - Math.abs(b.rate - 0.50) || b.played - a.played ||
+          bandCriteria.findIndex(([k]) => k === a.criterion) - bandCriteria.findIndex(([k]) => k === b.criterion));
+        const c = normal[0];
+        return [String(band), { status: 'ok', criterion: c.criterion, played: c.played, rate: c.rate, avg: c.avg, peak: c.peak }];
+      }
+      const reasons = cells.map((c) => c.reason);
+      let status = 'NPS_NO_NORMAL_REACH_CELL';
+      if (reasons.every((r) => r === 'hard')) status = 'NPS_REACH_CELL_TOO_HARD';
+      else if (reasons.every((r) => r === 'easy')) status = 'NPS_REACH_CELL_TOO_EASY';
+      else if (reasons.every((r) => r === 'fallback')) status = 'NPS_REACH_FALLBACK_UNTRUSTED';
+      else if (reasons.some((r) => r === 'fallback')) status = 'NPS_REACH_FALLBACK_UNTRUSTED';
+      else if (reasons.some((r) => r === 'value')) status = 'NPS_REACH_VALUE_UNAVAILABLE';
+      return [String(band), { status }];
+    }));
+  } catch {
+    bandResult = makeEmptyBands('NPS_REACH_VALUE_UNAVAILABLE', false);
+  }
+  return { avg: result.avg, peak: result.peak, meta, bands: bandResult };
 }
 
 // 스코어링 마스터 칭호용 — 어나더+(ANOTHER/LEGGENDARIA) 채보 중 MAX-권(스코어율 ≥ 17/18) 비율.

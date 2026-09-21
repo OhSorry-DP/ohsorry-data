@@ -69,6 +69,29 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-22 — 덤프 `reachNps` 에 대역별 NPS 도달선(`bands`) 추가
+
+3섹션 NPS 교체(정본 `nps-reach.md` §7.2-6)가 쓸 「이미 선택된 대역별 단일 도달선」이다.
+**코치 Worker 는 CPU 예산이 10ms** 이고 이미 `1102`(Exceeded Resources)로 죽은 전례가 있어서,
+격자를 요청 중에 계산할 수 없다 ⇒ 덤프 생산 시점에 미리 골라 싣는다.
+
+- zasa 대역 `9~12` × 램프 4기준(`ec/hc/exh/fc`) 격자에서 **대역마다 칸 하나**를 고른다.
+  🔴 **스코어 기준(a/aa/aaa)은 쓰지 않는다** — 섞이면 *이미 깬 쉬운 곡*이 도전으로 올라온다(§5.5-3b).
+- 선택 규칙: **50% 최근접 → 동률이면 `played` 큰 쪽 → `ec,hc,exh,fc` 순**.
+- 판정 순서·임계값은 `ohSorryRating/scripts/experiments/rec-landscape/08-nps-sections-probe.js:29`
+  의 `cell()` 과 동일하다(`played>=100`, `0.30<=rate<=0.70`). 식을 새로 만들지 않았다.
+- 폴백 도달선(§3.3)인 칸은 정상 칸으로 치지 않는다 — 달성 중앙값이라 stress 가 과대평가된다.
+- `status` 는 확정된 6종만 쓴다. `status !== 'ok'` 인 대역에는 `avg`/`peak` 를 **넣지 않는다**
+  (있으면 엔진이 쓴다고 오해한다).
+
+🔴 **기존 `avg`/`peak`/`meta` 는 그대로다**(additive). `bands` 계산이 실패해도 그쪽이 죽지 않게
+try/catch 로 감쌌다. `dump-user.mjs`·`r2-repersona.mjs` 는 **무변경** — `bands` 가 `reachNps` 안에
+들어가서 `r2-repersona.mjs:162` 의 비교 스냅샷에 자동으로 포함된다.
+
+실데이터 검증(유저 3명, star `1.13`/`7.96`/`13.77`): 대역별 status 가 정상 분포했고,
+★1.13 의 대역 11 도달선 `avg=11.6` 이 관측 원자료에서 역산한 `11.80` 과 일치했다.
+⚠️ R2 백필은 자격증명이 없어 실행하지 못했다 — 배포 시 `--only=<id> --dry` 부터 확인할 것.
+
 ### 2026-09-22 — `backfill-personas.mjs` 도 같은 `songs.json` ENOENT 를 안고 있었다
 
 앞 항목이 `r2-repersona.mjs` 에서 고친 것과 **같은 문제**다. `4f761cb18`(데이터 git 추적 종료)가
