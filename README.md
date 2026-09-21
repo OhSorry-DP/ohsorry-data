@@ -69,6 +69,32 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-22 — 도달 NPS 를 덤프에 실어 보낸다 + `r2-repersona` 가 3주간 죽어 있었다
+
+앞 항목에서 helper 만 만들고 멈췄던 배선을 끝냈다. 코치 Worker 는 CPU 10ms 예산 때문에
+전 레벨로 재질 수 없으니, 덤프가 `user/{id}.json` 에 `reachNps` 를 실어 주고 워커는 읽기만 한다.
+
+- **`dump-user.mjs`** — 신규 덤프에 `reachNps` 필드 추가. persona 와 **같은 차트 배열**(`dpCharts`)을
+  재사용해 두 값이 갈라지지 않게 했다.
+- **`r2-repersona.mjs`** — 기존 R2 본도 제자리에서 같이 재산출한다(전체 재덤프 불필요).
+  🔴 변화 비교 대상에 `reachNps` 를 넣었다 — 안 넣으면 persona 가 같은 유저는 도달 NPS 가
+  새로 생겨도 **PUT 이 생략**된다.
+
+🔴 **그 과정에 `r2-repersona.mjs` 가 2026-09-04 부터 실행 자체가 불가능했던 것을 발견했다.**
+그날 데이터 파일 git 추적을 끊으면서 `songs.json` 이 체크아웃에서 사라졌는데,
+이 스크립트는 여전히 `fs.readFileSync('songs.json')` 을 **모듈 최상단에서** 하고 있어
+ENOENT 로 즉사한다. 그 커밋의 「소비처 전수 확인」이 이 파일을 놓쳐다.
+⇒ `r2GetText('songs.json')` 으로 바꿈(`backfill-user-rstar.mjs` 가 이미 쓰던 사상).
+REST probe 뒤로 옵긴다 — 이 GET 도 그 경로를 타기 때문이고, **없으면 중단**한다
+(빈 맵으로 진행하면 전 유저 차트가 0건이 돼 persona 를 통째로 지우며 PUT 한다).
+
+⚠️ `backfill-personas.mjs` 도 같은 ENOENT 를 안고 있다(이번 범위 밖). R2 에 없는 유저를
+git `user/` 로 폴백하는 가지도 같은 이유로 죽어 있다 — `miss` 로 조용히 세고 넘어간다.
+
+**실유저 검증**(`C200074777849`, 공개 CDN 본 4,224 슬림 row): 복원 4,224 → 차트 **4,163**,
+`avg exh` **10.046** · `aa` **10.159** · `peak exh` **17.503** — helper 추가 시 측정값과 일치.
+계산 **15ms**(Node 덤프라 무관). `meta.fallback` 은 6기준 전부 `false`.
+
 ### 2026-09-22 — 도달 NPS 를 전 레벨로 계산하는 helper `reachNpsFor` (코치가 lv11~12 만 보고 있었다)
 
 코치 `/analysis` 의 `reach_nps` 가 **레벨 11~12 기록으로만** 계산돼 틀렸다. 코치 워커가

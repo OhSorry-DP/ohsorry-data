@@ -3,7 +3,7 @@
 //   ohSorryAdmin/scripts/dump-data-repo.js 의 단일유저판 — 스키마/RPC 동일하게 유지할 것.
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { loadPersonaResources, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor } from './persona-lib.mjs';
+import { loadPersonaResources, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
 import { getText } from './r2-client.mjs';
 
 const SB = process.env.SUPABASE_URL;
@@ -96,8 +96,10 @@ export async function dumpUser(id, personaRes) {
   // ── persona (DP)/spPersona (SP) 성향 리포트 — raw grid rows 로 슬림 전에 산출. 실패 시 이전값 유지, 이전 상태도 모르면 중단. ──
   let persona = null;
   let personaError = null;
+  let dpCharts = null;
   try {
-    persona = personaFor(chartsFromGridRows(dp, personaRes.textageMeta), personaRes, user[0]);
+    dpCharts = chartsFromGridRows(dp, personaRes.textageMeta);
+    persona = personaFor(dpCharts, personaRes, user[0]);
   } catch (e) {
     personaError = e;
   }
@@ -109,6 +111,21 @@ export async function dumpUser(id, personaRes) {
     }
     console.warn('::warning::persona 산출 실패, 이전 값 유지(' + id + '): ' + reason);
     persona = (prev && prev.persona) || null;
+  }
+
+  // ── 도달 NPS — 전 레벨 DP 차트 기준 프런티어. 코치 Worker 는 CPU 예산(10ms) 때문에 못 재서 덤프가 실어 보낸다(nps-reach.md §8.1). ──
+  //    🔴 계산 실패를 「값 없음」으로 만들지 않는다 — 예외면 이전 값을 유지하고, 이전도 모르면 null(코치가 unavailable 로 표시).
+  //    차트 0건은 정상 결과라 helper 가 전 기준 null 을 담은 객체를 돌려준다 — 이건 실패가 아니다.
+  let reachNps = null;
+  if (dpCharts === null) {
+    reachNps = (prev && prev.reachNps) || null;   // 차트 변환 자체가 실패 — 이유는 위 persona 경고에 남는다
+  } else {
+    try {
+      reachNps = reachNpsFor(dpCharts, personaRes);
+    } catch (e) {
+      console.warn('::warning::reachNps 산출 실패, 이전 값 유지(' + id + '): ' + e.message);
+      reachNps = (prev && prev.reachNps) || null;
+    }
   }
 
   // 🔴 반드시 null 로 시작한다 — undefined 로 두면 spPersonaFor 가 throw 했을 때
@@ -146,7 +163,7 @@ export async function dumpUser(id, personaRes) {
     }
   }
   return {
-    _v: new Date().toISOString(), user: user[0] ? { ...user[0] } : null, radars, osPattern, persona, spPersona,
+    _v: new Date().toISOString(), user: user[0] ? { ...user[0] } : null, radars, osPattern, persona, spPersona, reachNps,
     dp: dp.map(slimRow), sp,
     // 최근 92일 갱신 이력 [{song_id,diff,date_kst}] — ④/SP연습 피처 recency. null 이면 키 생략(웹이 RPC fallback).
     ...(dpRecent ? { dpRecent } : {}),

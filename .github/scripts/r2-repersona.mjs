@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { loadPersonaResources, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor } from './persona-lib.mjs';
+import { loadPersonaResources, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
 
 const BUCKET = 'ohsorry-data';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'r2repersona-'));
@@ -87,8 +87,6 @@ async function pool(items, n, fn) {
   await Promise.all(workers);
 }
 
-const songs = JSON.parse(fs.readFileSync('songs.json', 'utf8'));
-const songById = new Map(songs.map((s) => [s.song_id, s]));
 // 슬림 row → grid row 복원 (backfill-personas.mjs 와 동일)
 const rowsOf = (slim) => (slim || []).map((r) => {
   const s = songById.get(r.song_id);
@@ -110,6 +108,14 @@ if (useRest) {
     }
   } catch (e) { console.warn('::warning::R2 REST probe 실패 — wrangler 폴백:', e.message); useRest = false; }
 }
+
+// 슬림 row 복원용 곱 마스터. 🔴 2026-09-04 에 songs.json 은 git 추적이 끊겼다(R2 가 유일본) —
+//   종전처럼 fs 로 읽으면 체크아웃에 없어 ENOENT 로 즉사한다. R2 에서 받는다(backfill-user-rstar.mjs 와 같은 사상).
+//   ⚠️ 반드시 REST probe 뒤에 와야 한다 — 이 GET 도 그 경로를 탄다.
+//   🔴 없으면 중단한다 — 빈 맵으로 진행하면 모든 유저의 차트가 0건이 돼 persona 를 통째로 지우며 PUT 한다.
+const songsText = await r2GetText('songs.json');
+if (!songsText) { console.error('::error::R2 songs.json 없음 — 슬림 row 를 차트로 복원할 수 없다'); process.exit(1); }
+const songById = new Map(JSON.parse(songsText).map((s) => [s.song_id, s]));
 
 // 대상 유저 목록은 **R2 의 users-list.json** 에서 받는다.
 //   ⚠️ 종전엔 git 의 `user/` 폴더를 readdir 했는데, §4(2026-08-09)로 데이터 커밋을 중단해
@@ -152,14 +158,19 @@ await pool(ids, CONC, async (id) => {
   }
   let data;
   try { data = JSON.parse(text); } catch (e) { fail++; console.error('파싱 실패', id, e.message); return; }
-  const before = JSON.stringify([data.persona, data.spPersona]);
+  // 🔴 비교 대상에 reachNps 를 꼭 넣는다 — 빼면 persona 가 같은 유저는 도달 NPS 가 새로 생겨도 PUT 이 생략된다.
+  const snap = () => JSON.stringify([data.persona, data.spPersona, data.reachNps ?? null]);
+  const before = snap();
   try {
-    data.persona = personaFor(chartsFromGridRows(rowsOf(data.dp), R.textageMeta), R, data.user);
+    const dpCharts = chartsFromGridRows(rowsOf(data.dp), R.textageMeta);
+    data.persona = personaFor(dpCharts, R, data.user);
     if (data.persona) dpOk++;
+    // 도달 NPS — dump-user 와 같은 helper·같은 차트 배열로 재산출해 값을 일치시킨다(nps-reach.md §8.1).
+    data.reachNps = reachNpsFor(dpCharts, R);
     data.spPersona = spPersonaFor(spChartsFromGridRows(rowsOf(data.sp), R.textageMeta), R);
     if (data.spPersona) spOk++;
   } catch (e) { fail++; console.error('persona 실패', id, e.message); return; }
-  if (JSON.stringify([data.persona, data.spPersona]) === before) { same++; return; }   // 변화 없으면 PUT 생략
+  if (snap() === before) { same++; return; }   // 변화 없으면 PUT 생략
   if (DRY) { put++; return; }
   try { await r2PutText(key, JSON.stringify(data)); put++; }
   catch (e) { fail++; console.error('PUT 실패', id, e.message); }
