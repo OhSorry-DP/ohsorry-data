@@ -17,6 +17,7 @@ const fetchJson = async (url) => JSON.parse(await fetchText(url));
 
 export const DIFF_INT_TO_STR = { 0: 'BEGINNER', 1: 'NORMAL', 2: 'HYPER', 3: 'ANOTHER', 4: 'LEGGENDARIA' };
 const DIFF_TO_TEXTAGE = { BEGINNER: 'DB', NORMAL: 'DN', HYPER: 'DH', ANOTHER: 'DA', LEGGENDARIA: 'DX' };
+const DP_DIFF_TO_KEY = { NORMAL: 'DP_NOR', HYPER: 'DP_HYP', ANOTHER: 'DP_ANO', LEGGENDARIA: 'DP_LEG' };
 const MIN_CHARTS = 30;   // 표본 부족 시 persona 생략 (cold-start)
 
 // clearStar 정책은 ohSorryWeb/user/components/helpers.js:16 recBaseStarOf 및
@@ -38,7 +39,7 @@ const TIERS = ['저속', '중속', '고속', '초고속'];
 export async function loadPersonaResources() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-'));
   const bust = '?t=' + Date.now();
-  const mods = ['calcWeakness.js', 'persona.js', 'normTitle.js'];
+  const mods = ['calcWeakness.js', 'persona.js', 'normTitle.js', 'reachNps.js'];
   await Promise.all(mods.map(async (n) => {
     fs.writeFileSync(path.join(tmp, n), await fetchText(`${GIST_RAW}/${n}${bust}`));
   }));
@@ -46,6 +47,7 @@ export async function loadPersonaResources() {
   const weaknessLib = req(path.join(tmp, 'calcWeakness.js'));
   const personaLib = req(path.join(tmp, 'persona.js'));
   const { norm } = req(path.join(tmp, 'normTitle.js'));
+  const reachNpsLib = req(path.join(tmp, 'reachNps.js'));
   // r★ 모듈은 신규 배포 전 과도기에도 기존 덤프를 막지 않도록 optional. 없으면 호출부가 이전값을 보존한다.
   let userRateStarLib = null;
   try {
@@ -134,7 +136,7 @@ export async function loadPersonaResources() {
     ratingData: ratingJson.ratings,
     rateStarScale: ratingJson.rateStar && ratingJson.rateStar.scale,
     zasaData: Array.isArray(zasaRaw.charts) ? zasaRaw.charts : zasaRaw,
-    patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef, pop, popmean, popmeanSp,
+    patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef, pop, popmean, popmeanSp, reachNpsLib,
   };
 }
 
@@ -156,12 +158,36 @@ export function chartsFromGridRows(rows, textageMeta) {
     if (!noteCount) continue;
     const lampNum = typeof r.lamp === 'number' ? r.lamp : 0;
     out.push({
-      title: r.title, diff, exScore: typeof r.ex_score === 'number' ? r.ex_score : 0,
+      title: r.title, textageSongId: r.textage_song_id, diff, exScore: typeof r.ex_score === 'number' ? r.ex_score : 0,
       noteCount, gameLevel, lamp: lampNum, lampNum,
       missCount: typeof r.bp === 'number' ? r.bp : null,   // bp(미스카운트) — calcUserWeakness 의 bp 반영 보정용
     });
   }
   return out;
+}
+
+// 전 레벨 DP 차트의 도달선 계산. 값 부재(0건)는 정상 결과로 반환하고 계산 예외는 전파한다.
+export function reachNpsFor(charts, R) {
+  const criteria = ['ec', 'hc', 'exh', 'a', 'aa', 'aaa'];
+  const empty = () => Object.fromEntries(criteria.map((key) => [key, null]));
+  const emptyMeta = () => Object.fromEntries(criteria.map((key) => [key, { fallback: false, total: 0 }]));
+  const records = [];
+  for (const chart of Array.isArray(charts) ? charts : []) {
+    const key = DP_DIFF_TO_KEY[chart?.diff];
+    const pattern = key && chart?.textageSongId != null
+      ? R.patternsMap?.[chart.textageSongId]?.c?.[key]
+      : null;
+    const nps = pattern?.nps;
+    if (!nps || ![nps.a, nps.p, chart?.lampNum, chart?.exScore, chart?.noteCount].every(Number.isFinite)) continue;
+    records.push({ avgNps: nps.a, peakNps: nps.p, lamp: chart.lampNum, exScore: chart.exScore, noteCount: chart.noteCount });
+  }
+  if (records.length === 0) return { avg: empty(), peak: empty(), meta: { avg: emptyMeta(), peak: emptyMeta() } };
+  const result = R.reachNpsLib(records);
+  const trimMeta = (ruler) => Object.fromEntries(criteria.map((key) => [key, {
+    fallback: result.meta[ruler][key].fallback,
+    total: result.meta[ruler][key].total,
+  }]));
+  return { avg: result.avg, peak: result.peak, meta: { avg: trimMeta('avg'), peak: trimMeta('peak') } };
 }
 
 // 스코어링 마스터 칭호용 — 어나더+(ANOTHER/LEGGENDARIA) 채보 중 MAX-권(스코어율 ≥ 17/18) 비율.
