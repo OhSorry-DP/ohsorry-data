@@ -69,6 +69,19 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-22 — `backfill-personas.mjs` 도 같은 `songs.json` ENOENT 를 안고 있었다
+
+앞 항목이 `r2-repersona.mjs` 에서 고친 것과 **같은 문제**다. `4f761cb18`(데이터 git 추적 종료)가
+`songs.json` 을 체크아웃에서 없았는데 이 스크립트도 모듈 최상단에서 `fs.readFileSync('songs.json')` 을
+하고 있어 ENOENT 로 즉사한다. ⇒ `r2-client.mjs` 의 `getText('songs.json')` 으로 바꿈고,
+**없으면 `exit 1`** 한다(빈 맵으로 진행하면 차트가 전멸해 persona 를 지운 채 써버린다).
+
+⚠️ 이 스크립트는 **어느 워크플로도 부르지 않는다**(수동 로컬 도구). 프로덕션 장애가 아니라
+보존된 도구가 실행 불능이던 것을 고친 것이다. R2 서빙본 백필은 `r2-repersona.mjs` 를 쓴다.
+
+⚠️ 런타임 검증은 못 했다 — `getText` 가 R2 자격증명을 요구하고 로컬엔 `user/` 폴더도 없다.
+확인한 것은 `node --check` · `getText` named export 존재 · 이 파일이 이미 top-level await 를 쓰고 있다는 점이다.
+
 ### 2026-09-22 — 도달 NPS 를 덤프에 실어 보낸다 + `r2-repersona` 가 3주간 죽어 있었다
 
 앞 항목에서 helper 만 만들고 멈췄던 배선을 끝냈다. 코치 Worker 는 CPU 10ms 예산 때문에

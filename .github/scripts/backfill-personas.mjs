@@ -11,8 +11,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadPersonaResources, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor } from './persona-lib.mjs';
+import { getText } from './r2-client.mjs';
 
-const songs = JSON.parse(fs.readFileSync('songs.json', 'utf8'));
+// songs.json은 R2에서 읽으며, 이 도구는 R2 user dump를 수정하지 않는다.
+
+const songsText = await getText('songs.json');
+if (!songsText) { console.error('R2 songs.json이 없어 persona 백필을 진행할 수 없습니다'); process.exit(1); }
+const songs = JSON.parse(songsText);
 const songById = new Map(songs.map((s) => [s.song_id, s]));
 
 // 슬림 row → grid row 형태 복원 (title/textage_song_id 는 songs.json 조인)
