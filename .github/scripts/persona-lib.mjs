@@ -174,6 +174,9 @@ export function reachNpsFor(charts, R) {
     ['exh', (r) => r.lamp >= 6], ['fc', (r) => r.lamp >= 7],
   ];
   const bands = [9, 10, 11, 12];
+  // 칸 하나를 믿기 위한 최소 플레이 곡수. §5.5-3b④ 가 실측으로 「80 과 100 은 결과가 동일」을
+  // 확인한 구간의 하단이다. 100 이면 81곡짜리 대역이 통째로 표본부족이 되어 빈 화면이 남는다.
+  const BAND_MIN_PLAYED = 80;
   const empty = () => Object.fromEntries(criteria.map((key) => [key, null]));
   const emptyMeta = () => Object.fromEntries(criteria.map((key) => [key, { fallback: false, total: 0 }]));
   const records = [];
@@ -207,7 +210,7 @@ export function reachNpsFor(charts, R) {
     bandResult = Object.fromEntries(bands.map((band) => {
       const all = records.filter((r) => r.band === band);
       const played = all.filter((r) => r.lamp > 0);
-      if (played.length < 100) return [String(band), { status: 'NPS_REACH_SAMPLE_INSUFFICIENT', played: played.length }];
+      if (played.length < BAND_MIN_PLAYED) return [String(band), { status: 'NPS_REACH_SAMPLE_INSUFFICIENT', played: played.length }];
       const cells = bandCriteria.map(([criterion, fn]) => {
         const rate = played.filter(fn).length / played.length;
         if (rate < 0.30 || rate > 0.70) return { criterion, rate, played: played.length, reason: rate < 0.30 ? 'hard' : 'easy' };
@@ -216,7 +219,15 @@ export function reachNpsFor(charts, R) {
         catch { return { criterion, rate, played: played.length, reason: 'value' }; }
         const fallback = rr.meta?.avg?.[criterion]?.fallback === true || rr.meta?.peak?.[criterion]?.fallback === true;
         if (fallback) return { criterion, rate, played: played.length, reason: 'fallback' };
-        const avg = rr.avg?.[criterion], peak = rr.peak?.[criterion];
+        let avg = rr.avg?.[criterion], peak = rr.peak?.[criterion];
+        // 자 간 단조성(peak >= avg) 위반이면 reachNps 는 신뢰도가 낮은 쪽(boundaryTotal 이 작은 쪽)을
+        // null 로 지운다(§5.2). 격자는 avg·peak 을 둘 다 써야 칸이 서므로, 지워진 쪽을 남은 쪽 값으로
+        // 끌어올려 칸을 살린다 — peak >= avg 는 자의 구조적 성질이고 위반은 추정 오차로 본다.
+        // 도달선이 높아지는 방향이라 「이미 쉬운 곡이 도전으로 올라오는」 위험은 커지지 않는다.
+        if ((rr.meta?.crossRulerViolations || []).some((v) => v?.criterion === criterion)) {
+          if (!Number.isFinite(peak) && Number.isFinite(avg)) peak = avg;
+          else if (!Number.isFinite(avg) && Number.isFinite(peak)) avg = peak;
+        }
         if (!Number.isFinite(avg) || !Number.isFinite(peak)) return { criterion, rate, played: played.length, reason: 'value' };
         return { criterion, rate, played: played.length, reason: 'ok', avg, peak };
       });
