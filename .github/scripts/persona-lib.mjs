@@ -203,6 +203,7 @@ export function reachNpsFor(charts, R) {
   const trimMeta = (ruler) => Object.fromEntries(criteria.map((key) => [key, {
     fallback: result.meta[ruler][key].fallback,
     total: result.meta[ruler][key].total,
+    gate: result.meta[ruler][key].gate,
   }]));
   const meta = { avg: trimMeta('avg'), peak: trimMeta('peak') };
   let bandResult;
