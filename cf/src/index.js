@@ -124,8 +124,10 @@ function keyOf(pathname) {
 //
 // ⚠️ **결정된 수집가는 못 막는다** — IP 를 돌리면 그만이다. 이것은 **채산을 깎는 장치**지 봉쇄가 아니다.
 
-const SLOW_MS = 1500;        // 1단 초과 — 사람은 거의 못 느끼고 수집은 10배 느려진다
-const SLOWER_MS = 5000;      // 2단 초과 — 명백한 연타
+// 🔴 두 단계 **모두 10초** 다(사용자 결정, 2026-09-24). 단계를 나눈 것은 지연 크기가 아니라
+//    **잡는 축이 다르기 때문**이다 — BURST 는 순간 속도, STEADY 는 지속.
+const SLOW_MS = 10000;       // STEADY 초과 — 계속 긁는 쪽
+const SLOWER_MS = 10000;     // BURST 초과 — 순간 연타
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
