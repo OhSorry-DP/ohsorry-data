@@ -104,6 +104,52 @@ function keyOf(pathname) {
   return null;
 }
 
+// ── 동일 IP 연속 접속 감속 (2026-09-24) ───────────────────────────────────────
+//
+// 🔴 **막지 않는다 — 늦출 뿐이다.** 429 를 주면 정상 사용자가 화면을 못 보는데,
+//    이 워커가 뿌리는 것은 화면을 그리는 데 *반드시* 필요한 데이터다.
+//    반면 대량 수집은 **시간당 처리량**이 전부라, 한 건에 몇 초를 더하면 채산이 무너진다.
+//
+// 🔴 **왜 여기냐** — 이 워커는 `caches.default` 를 *자기 안에서* 쓴다.
+//    즉 **캐시 히트든 미스든 모든 요청이 이 코드를 지나간다** ⇒ 연속 접속이 실제로 세어진다.
+//    ⚠️ 오소리웹(CF Pages)에 걸어도 소용없다 — 데이터가 거기 있지 않다.
+//
+// 🔴 **저장소를 새로 두지 않는다.** CF 네이티브 Rate Limiting 바인딩이라
+//    KV·Durable Object 가 필요 없다(= 추가 비용 0, 지연 사실상 0).
+//    ⚠️ **콜로(데이터센터)별로 센다** — 전 세계 합계가 아니다. 한 사람이 한 콜로를 쓰는 한 유효하다.
+//
+// ⚠️ **한도는 추정값이다.** 실제 정상 사용 분포를 재고 넣은 것이 아니다.
+//    그래서 **막지 않고 늦추는** 설계를 골랐다 — 숫자가 틀려도 최악이 「좀 느리다」에 그친다.
+//    🔴 숫자를 조일 거면 먼저 재라. 월요일에 500명이 들어온 전례가 있다(평소 30명).
+//
+// ⚠️ **결정된 수집가는 못 막는다** — IP 를 돌리면 그만이다. 이것은 **채산을 깎는 장치**지 봉쇄가 아니다.
+
+const SLOW_MS = 1500;        // 1단 초과 — 사람은 거의 못 느끼고 수집은 10배 느려진다
+const SLOWER_MS = 5000;      // 2단 초과 — 명백한 연타
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 🔴 `CF-Connecting-IP` 가 없으면 **감속하지 않는다.** 없을 때 한 바구니(`unknown`)에 몰면
+//    서로 남남인 요청들이 같은 한도를 나눠 쓰게 되어 **무고한 감속**이 난다.
+//    「모른다」와 「같다」를 섞지 않는다.
+function ipOf(req) {
+  return req.headers.get('CF-Connecting-IP') || null;
+}
+
+// 초과했으면 대기 시간(ms), 아니면 0. 🔴 **바인딩이 없으면 0 을 준다** —
+//    감속 장치가 없다고 서빙이 죽으면 안 된다(이건 방어지 기능이 아니다).
+async function throttleDelay(req, env, key) {
+  const ip = ipOf(req);
+  if (!ip) return 0;
+  try {
+    if (env.RL_BURST && !(await env.RL_BURST.limit({ key: ip })).success) return SLOWER_MS;
+    if (env.RL_STEADY && !(await env.RL_STEADY.limit({ key: ip })).success) return SLOW_MS;
+  } catch (e) {
+    return 0;   // 바인딩 이상 — 감속을 포기하고 서빙은 계속한다
+  }
+  return 0;
+}
+
 export default {
   async fetch(req, env, ctx) {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders() });
@@ -114,6 +160,11 @@ export default {
     const url = new URL(req.url);
     const key = keyOf(url.pathname);
     if (!key) return notFound('경로 없음');
+
+    // 🔴 **캐시 조회 *전* 에 건다.** 뒤에 두면 캐시 히트가 세어지지 않아
+    //    연타의 대부분(같은 파일 반복 요청)을 놓친다.
+    const delayMs = await throttleDelay(req, env, key);
+    if (delayMs) await sleep(delayMs);
 
     // 엣지 캐시 — 쿼리스트링은 키에서 무시(캐시 파편화 방지). 웹이 붙이는 cache-bust 도 같은 객체를 본다.
     const cacheKey = new Request(url.origin + '/' + key, req);

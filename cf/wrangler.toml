@@ -16,3 +16,23 @@ routes = [
 [[r2_buckets]]
 binding = "DATA"
 bucket_name = "ohsorry-data"
+
+# ── 동일 IP 연속 접속 감속 (2026-09-24) ──────────────────────────────────────
+#   🔴 **막는 장치가 아니라 늦추는 장치다.** 초과해도 429 가 아니라 응답이 늦어질 뿐이다
+#      (사유는 src/index.js 의 `throttleDelay` 주석).
+#   ⚠️ **콜로별로 센다.** 전 세계 합계가 아니다.
+#   ⚠️ `simple.period` 는 **10 또는 60 만** 허용된다 — 다른 값을 넣으면 배포가 거부된다.
+#
+#   RL_STEADY — 꾸준한 수집. 60초에 60건이면 오소리웹 정상 사용(화면당 JSON 여러 개)은
+#               여유롭게 통과하고, 유저 목록을 순회하는 쪽은 바로 걸린다.
+#   RL_BURST  — 명백한 연타. 10초에 40건.
+#   🔴 **두 숫자는 실측이 아니라 추정이다. 조이기 전에 재라.**
+[[ratelimit]]
+binding = "RL_STEADY"
+namespace_id = "1001"
+simple = { limit = 60, period = 60 }
+
+[[ratelimit]]
+binding = "RL_BURST"
+namespace_id = "1002"
+simple = { limit = 40, period = 10 }
