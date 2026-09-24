@@ -124,10 +124,17 @@ function keyOf(pathname) {
 //
 // ⚠️ **결정된 수집가는 못 막는다** — IP 를 돌리면 그만이다. 이것은 **채산을 깎는 장치**지 봉쇄가 아니다.
 
-// 🔴 두 단계 **모두 10초** 다(사용자 결정, 2026-09-24). 단계를 나눈 것은 지연 크기가 아니라
-//    **잡는 축이 다르기 때문**이다 — BURST 는 순간 속도, STEADY 는 지속.
-const SLOW_MS = 10000;       // STEADY 초과 — 계속 긁는 쪽
-const SLOWER_MS = 10000;     // BURST 초과 — 순간 연타
+// 🔴🔴 **지연은 창(window)보다 *짧아야* 한다 — 안 그러면 지연이 스스로 창을 비운다.**
+//    2026-09-24 라이브 실측: 두 단계 다 10초로 두었더니 **130건에 지연이 5번**밖에 안 걸렸고
+//    실효 감속이 **3.4배**에 그쳤다. 10초 자는 동안 BURST 창(10초)이 통째로 흘러
+//    카운터가 리셋됐기 때문이다. ⚠️ **시뮬레이션은 이것을 못 잡았다** — 지연만큼 시계를 안 돌렸다.
+//    🔴 「배포됐다」와 「동작한다」는 다르다. 반드시 라이브로 재라.
+//
+//    ⇒ **BURST(10초 창)에는 짧은 지연**을 준다. 창을 다 비우지 않아 다음 요청도 계속 걸린다.
+//    ⇒ **STEADY(60초 창)에는 긴 지연**을 준다. 10초를 자도 창의 1/6 만 빠져 계속 물린다.
+const SLOW_MS = 10000;       // STEADY(60초 창) 초과 — 지속 수집. 창의 1/6 만 빠진다
+const SLOWER_MS = 3000;      // BURST(10초 창) 초과 — 순간 연타. 창의 3/10 만 빠진다
+const ENUM_MS = 10000;       // 열거 경로 초과 — 유저 덤프 순회. 사람은 여기 거의 안 닿는다
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -140,10 +147,31 @@ function ipOf(req) {
 
 // 초과했으면 대기 시간(ms), 아니면 0. 🔴 **바인딩이 없으면 0 을 준다** —
 //    감속 장치가 없다고 서빙이 죽으면 안 된다(이건 방어지 기능이 아니다).
+// 🔴🔴 **열거 경로와 공용 자산을 가른다 — 이것이 이 장치의 핵심이다.**
+//    2026-09-24 라이브 실측으로 알게 된 것: **지연을 얼마로 주든 처리량 상한은 `한도 ÷ 창` 으로 고정된다.**
+//    STEADY 90/60초 = 1.5 req/s 이고 무제한이 6 req/s 였으니 **딱 4배**다(실측 3.8배와 일치).
+//    ⇒ **지연 길이는 사실상 무의미하고, 한도를 내리면 정상 사용자가 걸린다.** 막다른 길이다.
+//
+//    빠져나갈 길은 **비대칭**뿐이다:
+//      · 공용 자산(songs/data/lib) — 사람도 한 화면에 **19건**을 받는다. 조이면 안 된다.
+//      · 유저 덤프(user/·hist/·users-list) — 사람은 한 화면에 **1~2건**, 수집기는 **유저 수만큼**.
+//    ⇒ **열거 경로에만 강하게 건다.** 사람은 분당 10명을 열어보지 않는다.
+//
+// 🔴 `users-list*` 도 열거에 넣는다 — 그것이 **수집기의 진입점**이다(한 번 받으면 전 유저 ID 를 안다).
+function isEnumerationKey(key) {
+  return USER_RE.test(key) || HIST_RE.test(key)
+      || key === 'users-list.json' || key === 'users-list-slim.json';
+}
+
 async function throttleDelay(req, env, key) {
   const ip = ipOf(req);
   if (!ip) return 0;
   try {
+    // ① 열거 경로 — 여기가 실제 브레이크다. 사람은 거의 안 닿는다.
+    if (isEnumerationKey(key) && env.RL_ENUM && !(await env.RL_ENUM.limit({ key: ip })).success) {
+      return ENUM_MS;
+    }
+    // ② 전 경로 공통 — 순간 연타와 지속 수집의 바닥선. 위에서 못 잡는 몫만 받는다.
     if (env.RL_BURST && !(await env.RL_BURST.limit({ key: ip })).success) return SLOWER_MS;
     if (env.RL_STEADY && !(await env.RL_STEADY.limit({ key: ip })).success) return SLOW_MS;
   } catch (e) {

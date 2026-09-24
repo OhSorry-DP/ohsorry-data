@@ -27,7 +27,7 @@ bucket_name = "ohsorry-data"
 #      실측(2026-09-24): `ohSorryWeb/v3/services/loaders.js` 가 CDN 에서 받는 파일이 **19종**이고
 #      상당수가 `Promise.all` 로 **동시에** 나간다. ⇒ **처음 들어온 사람이 화면 하나를 여는 것만으로
 #      10초 안에 15~19건**이 나간다. 25 는 그 위에 여유를 둔 값이다.
-#      세는 법: `grep -oE '[A-Z_]+_URL' v3/services/loaders.js | sort -u | wc -l`
+#      세는 법: loaders.js 에서 _URL 로 끝나는 상수를 유일값으로 세면 된다(2026-09-24 기준 19).
 #
 #   🔴 **브라우저와 수집기는 *초당 속도* 로는 구별되지 않는다** — 둘 다 몰아서 받는다.
 #      갈리는 것은 **지속 여부**다(사람은 읽느라 조용해지고, 수집기는 같은 속도를 유지한다).
@@ -37,12 +37,28 @@ bucket_name = "ohsorry-data"
 #   RL_STEADY — 60초에 90건 초과. 🔴 **50 이었다가 실측으로 올렸다** — 사람이 20초 간격으로
 #               화면 셋을 보면 `19×3 = 57` 이라 50 에서 **정상 사용자가 걸렸다**(시뮬레이션이 잡았다).
 #               90 은 화면 넷(76)까지 봐 주고 그 위를 때린다.
-[[ratelimit]]
-binding = "RL_STEADY"
+#   🔴 **`[[unsafe.bindings]]` 다 — `[[ratelimit]]` 최상위는 wrangler 가 안 받는다.**
+#      2026-09-24 에 실제로 그렇게 올렸다가 **경고 한 줄만 나오고 바인딩이 안 붙은 채 배포됐다**
+#      (`Unexpected fields found in top-level field: "ratelimit"` · 바인딩 목록에 DATA 만).
+#      ⇒ **배포 뒤 출력의 바인딩 목록에 RL_* 둘이 보이는지 반드시 눈으로 확인하라.**
+[[unsafe.bindings]]
+name = "RL_STEADY"
+type = "ratelimit"
 namespace_id = "1001"
 simple = { limit = 90, period = 60 }
 
-[[ratelimit]]
-binding = "RL_BURST"
+[[unsafe.bindings]]
+name = "RL_BURST"
+type = "ratelimit"
 namespace_id = "1002"
 simple = { limit = 25, period = 10 }
+
+#   RL_ENUM — 🔴 **열거 경로 전용**(user/ · hist/ · users-list*). **이것이 실제 브레이크다.**
+#      사람은 프로필 하나에 1~2건이라 60초에 12건이면 **분당 6명을 열어봐야** 닿는다.
+#      수집기는 유저 수만큼 받아야 하므로 즉시 걸리고, 이후 **12건/분**으로 묶인다
+#      (유저 200명이면 200/12 ≈ 17분. 공용 자산 한도로는 4.5분이었다).
+[[unsafe.bindings]]
+name = "RL_ENUM"
+type = "ratelimit"
+namespace_id = "1003"
+simple = { limit = 12, period = 60 }
