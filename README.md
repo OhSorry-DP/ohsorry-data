@@ -89,7 +89,7 @@ https://data.iidx.in/version.json
 **첫 진입 20초+**(사용자 실측 · curl 로 느린 응답 TTFB 가 3초 근처로 몰림). IP 단위라 한 공유기 뒤 기기가 한 바구니다.
 
 - 공용 자산(`songs.json` · `data/` · `lib/`)은 감속하지 않는다 — 공개 레포에도 그대로 있는 파일이다.
-- 브레이크는 유저 열거 경로(`user/` · `hist/` · `users-list*`)의 `RL_ENUM`(12/60초 → +10초)만 남긴다.
+- 브레이크는 유저 열거 경로(`user/` · `hist/` · `users-list*`)의 `RL_ENUM`(12/60초 → +10초)만 남긴다. 같은 날 한도를 **20/60초**로 올렸다(사용자 결정).
 - `wrangler.toml` 에서 `RL_STEADY`·`RL_BURST` 바인딩 제거.
 
 ### 2026-09-22 — 격자 칸이 죽던 경로 둘을 막았다 (표본하한 `80` · 자 간 위반 clamp)
