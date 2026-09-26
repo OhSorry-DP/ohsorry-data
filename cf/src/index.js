@@ -130,10 +130,11 @@ function keyOf(pathname) {
 //    카운터가 리셋됐기 때문이다. ⚠️ **시뮬레이션은 이것을 못 잡았다** — 지연만큼 시계를 안 돌렸다.
 //    🔴 「배포됐다」와 「동작한다」는 다르다. 반드시 라이브로 재라.
 //
-//    ⇒ **BURST(10초 창)에는 짧은 지연**을 준다. 창을 다 비우지 않아 다음 요청도 계속 걸린다.
-//    ⇒ **STEADY(60초 창)에는 긴 지연**을 준다. 10초를 자도 창의 1/6 만 빠져 계속 물린다.
-const SLOW_MS = 10000;       // STEADY(60초 창) 초과 — 지속 수집. 창의 1/6 만 빠진다
-const SLOWER_MS = 3000;      // BURST(10초 창) 초과 — 순간 연타. 창의 3/10 만 빠진다
+// 🔴 2026-09-26 — 공용 자산(songs/data/lib) 감속을 **뺐다.** 전 경로 공통 한도(RL_BURST 25/10초 → +3초,
+//    RL_STEADY 90/60초 → +10초)가 정상 사용자를 때렸다: v3 Recs·DBR 첫 진입이 공용 자산 15~19건을 받고
+//    순차 await 단계마다 지연이 쌓여 **첫 진입 20초+**(사용자 실측, 느린 응답 TTFB 가 3초 근처로 몰림).
+//    IP 단위라 한 공유기 뒤 기기가 전부 한 바구니다. 공용 자산은 공개 레포(ohsorry-data)에도 그대로 있어
+//    늦출 이유가 약하다. ⇒ 브레이크는 열거 경로(RL_ENUM)에만 둔다. 공용 자산 한도를 되살리지 마라.
 const ENUM_MS = 10000;       // 열거 경로 초과 — 유저 덤프 순회. 사람은 여기 거의 안 닿는다
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -166,14 +167,12 @@ function isEnumerationKey(key) {
 async function throttleDelay(req, env, key) {
   const ip = ipOf(req);
   if (!ip) return 0;
+  if (!isEnumerationKey(key)) return 0;
   try {
-    // ① 열거 경로 — 여기가 실제 브레이크다. 사람은 거의 안 닿는다.
-    if (isEnumerationKey(key) && env.RL_ENUM && !(await env.RL_ENUM.limit({ key: ip })).success) {
+    // 열거 경로만 감속한다(위에서 공용 자산은 이미 0 으로 돌려보냈다). 사람은 거의 안 닿는다.
+    if (env.RL_ENUM && !(await env.RL_ENUM.limit({ key: ip })).success) {
       return ENUM_MS;
     }
-    // ② 전 경로 공통 — 순간 연타와 지속 수집의 바닥선. 위에서 못 잡는 몫만 받는다.
-    if (env.RL_BURST && !(await env.RL_BURST.limit({ key: ip })).success) return SLOWER_MS;
-    if (env.RL_STEADY && !(await env.RL_STEADY.limit({ key: ip })).success) return SLOW_MS;
   } catch (e) {
     return 0;   // 바인딩 이상 — 감속을 포기하고 서빙은 계속한다
   }

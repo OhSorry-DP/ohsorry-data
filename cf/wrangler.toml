@@ -33,25 +33,12 @@ bucket_name = "ohsorry-data"
 #      갈리는 것은 **지속 여부**다(사람은 읽느라 조용해지고, 수집기는 같은 속도를 유지한다).
 #      그래서 짧은 폭발은 봐 주고 **지속되면** 때린다.
 #
-#   RL_BURST  — 10초에 25건 초과. 사람은 한 화면 19건이라 안 걸리고 수집기는 즉시 걸린다.
-#   RL_STEADY — 60초에 90건 초과. 🔴 **50 이었다가 실측으로 올렸다** — 사람이 20초 간격으로
-#               화면 셋을 보면 `19×3 = 57` 이라 50 에서 **정상 사용자가 걸렸다**(시뮬레이션이 잡았다).
-#               90 은 화면 넷(76)까지 봐 주고 그 위를 때린다.
+#   열거 경로만 감속한다. 공용 자산(songs/data/lib)은 감속하지 않는다.
 #   🔴 **`[[unsafe.bindings]]` 다 — `[[ratelimit]]` 최상위는 wrangler 가 안 받는다.**
 #      2026-09-24 에 실제로 그렇게 올렸다가 **경고 한 줄만 나오고 바인딩이 안 붙은 채 배포됐다**
 #      (`Unexpected fields found in top-level field: "ratelimit"` · 바인딩 목록에 DATA 만).
 #      ⇒ **배포 뒤 출력의 바인딩 목록에 RL_* 둘이 보이는지 반드시 눈으로 확인하라.**
-[[unsafe.bindings]]
-name = "RL_STEADY"
-type = "ratelimit"
-namespace_id = "1001"
-simple = { limit = 90, period = 60 }
-
-[[unsafe.bindings]]
-name = "RL_BURST"
-type = "ratelimit"
-namespace_id = "1002"
-simple = { limit = 25, period = 10 }
+# 2026-09-26 — RL_STEADY·RL_BURST(공용 자산 포함 전 경로 한도) 제거. 사유는 src/index.js 의 throttleDelay 위 주석.
 
 #   RL_ENUM — 🔴 **열거 경로 전용**(user/ · hist/ · users-list*). **이것이 실제 브레이크다.**
 #      사람은 프로필 하나에 1~2건이라 60초에 12건이면 **분당 6명을 열어봐야** 닿는다.
