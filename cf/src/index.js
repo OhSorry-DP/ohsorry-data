@@ -227,8 +227,12 @@ export default {
       ctx.waitUntil(cache.put(etagReq, etagMemo(etag)));
     }
 
+    // 🔴 약한 ETag(`W/"…"`)를 떼고 비교한다 — CF 가 압축하며 응답 ETag 를 `W/` 로 바꿔 내보내므로
+    //    브라우저는 `W/"…"` 를 되돌려 보내는데, R2 `httpEtag` 는 `"…"` 다. 그대로 비교하면 **304 가 영영 안 난다**
+    //    (2026-09-26 라이브 실측). 목록형(`a, b`)도 받는다.
     const inm = req.headers.get('if-none-match');
-    if (inm && inm === etag) {
+    const bareEtag = (e) => e.trim().replace(/^W\//, '');
+    if (inm && (inm.trim() === '*' || inm.split(',').some((e) => bareEtag(e) === bareEtag(etag)))) {
       return new Response(null, {
         status: 304,
         headers: { etag, 'cache-control': CACHE_CONTROL, ...corsHeaders() },
