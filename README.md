@@ -56,7 +56,7 @@ https://data.iidx.in/songs.json
 https://data.iidx.in/version.json
 ```
 - Worker 소스: [cf/](cf/) (`wrangler deploy`). R2 버킷 `ohsorry-data` 를 그대로 흘려보낸다.
-  허용 키만 통과(임의 객체 열람·path traversal 차단), ETag 키로 엣지는 무기한 캐싱하고 업로드 후 최대 30초에 반영하며 브라우저는 60초 캐시한다.
+  허용 키만 통과(임의 객체 열람·path traversal 차단), ETag 키로 엣지는 무기한 캐싱하고 업로드 후 30초가 지난 뒤 다음 요청부터 반영하며 브라우저는 60초 캐시한다.
 - **원본은 이 repo 의 git 이력이고 R2 는 서빙 사본이다.** R2 는 객체 버저닝이 없어
   덤프 로직 사고 시 복구는 git 에서 한다(persona 37명 유실 전례).
 - Action 이 commit/push 후 `wrangler r2 object put` 으로 올린다 → **PUT 즉시 반영**(purge 불필요).
@@ -68,6 +68,12 @@ https://data.iidx.in/version.json
 > 오리진이 구본을 재캐시하고 최대 12h 고착된다 — 아래 변경 이력의 두 사고가 모두 이것이다.
 
 ## 변경 이력
+
+### 2026-09-26 — ETag 메모를 stale-while-revalidate 로 (미국 콜로 HIT 인데 3.5초)
+
+- 왜: APAC 버킷의 R2 `head`가 미국 서부 콜로에서 약 3초 걸려 본문 HIT에도 TTFB가 3.5초가 됐다.
+- 어떻게: 30초가 지나도 기존 ETag로 즉시 응답하고, R2 `head` 갱신은 백그라운드에서 수행한다.
+- 반영 지연 변화: 업로드 후 30초가 지난 뒤 다음 요청부터 새 본문이 반영된다(삭제는 백그라운드 확인 뒤 다음 요청부터 404).
 
 ### 2026-09-26 — 약한 ETag 로 304 가 안 나던 문제
 

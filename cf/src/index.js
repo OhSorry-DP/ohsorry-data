@@ -74,16 +74,27 @@ const contentTypeOf = (key) => CT[key.slice(key.lastIndexOf('.') + 1).toLowerCas
 // 내용이 같으면 캐시가 유지된다.
 const BROWSER_MAX_AGE = 60;
 const ETAG_MEMO_TTL = 30;
+const ETAG_MEMO_KEEP = 86400;
 const EDGE_FOREVER = 31536000;
 const CACHE_CONTROL = `public, max-age=${BROWSER_MAX_AGE}, s-maxage=${EDGE_FOREVER}`;
 
 function etagMemo(etag) {
-  return new Response(etag, {
+  return new Response(JSON.stringify({ etag, t: Date.now() }), {
     headers: {
-      'cache-control': `public, s-maxage=${ETAG_MEMO_TTL}`,
+      'cache-control': `public, s-maxage=${ETAG_MEMO_KEEP}`,
       'content-type': 'text/plain',
     },
   });
+}
+
+// ETag 메모: 30초가 지나면 들고 있는 ETag 로 즉시 응답하고 R2 head 는 백그라운드(`ctx.waitUntil`)로 돌린다. 이유: APAC 버킷 × 미국 콜로에서 head 한 번이 ~3초(2026-09-26 라이브 실측 — 본문 HIT 인데 TTFB 3.5초). 대가: 업로드 후 반영은 30초가 지난 뒤 그다음 요청부터(한 요청 늦음). R2 에서 지워진 파일은 백그라운드 head 가 null 이면 메모를 지워 다음 요청부터 404.
+// 옛 평문 메모도 읽을 수 있으므로 JSON 메모로 변환하면서 하위호환한다.
+async function refreshEtagMemo(env, cache, etagReq, key) {
+  try {
+    const h = await env.DATA.head(key);
+    if (!h) { await cache.delete(etagReq); return; }
+    await cache.put(etagReq, etagMemo(h.httpEtag));
+  } catch (_) {}
 }
 
 function corsHeaders() {
@@ -218,7 +229,21 @@ export default {
     let etag = null;
     if (!fresh) {
       const memo = await cache.match(etagReq);
-      if (memo) etag = await memo.text();
+      if (memo) {
+        const memoText = await memo.text();
+        let entry;
+        if (memoText.startsWith('{')) {
+          try { entry = JSON.parse(memoText); } catch (_) {}
+        } else {
+          entry = { etag: memoText, t: 0 };
+        }
+        if (entry && entry.etag) {
+          etag = entry.etag;
+          if (Date.now() - (Number(entry.t) || 0) > ETAG_MEMO_TTL * 1000) {   // t 가 없거나 깨졌으면 stale 로 본다
+            ctx.waitUntil(refreshEtagMemo(env, cache, etagReq, key));
+          }
+        }
+      }
     }
     if (!etag) {
       const head = await env.DATA.head(key);
