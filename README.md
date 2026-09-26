@@ -56,7 +56,7 @@ https://data.iidx.in/songs.json
 https://data.iidx.in/version.json
 ```
 - Worker 소스: [cf/](cf/) (`wrangler deploy`). R2 버킷 `ohsorry-data` 를 그대로 흘려보낸다.
-  허용 키만 통과(임의 객체 열람·path traversal 차단), CORS + etag 304 + `Cache-Control: max-age=60`.
+  허용 키만 통과(임의 객체 열람·path traversal 차단), ETag 키로 엣지는 무기한 캐싱하고 업로드 후 최대 30초에 반영하며 브라우저는 60초 캐시한다.
 - **원본은 이 repo 의 git 이력이고 R2 는 서빙 사본이다.** R2 는 객체 버저닝이 없어
   덤프 로직 사고 시 복구는 git 에서 한다(persona 37명 유실 전례).
 - Action 이 commit/push 후 `wrangler r2 object put` 으로 올린다 → **PUT 즉시 반영**(purge 불필요).
@@ -68,6 +68,13 @@ https://data.iidx.in/version.json
 > 오리진이 구본을 재캐시하고 최대 12h 고착된다 — 아래 변경 이력의 두 사고가 모두 이것이다.
 
 ## 변경 이력
+
+### 2026-09-26 — 엣지 캐시를 ETag 키로 (무기한 캐싱 + 업로드 후 최대 30초 반영)
+
+- 고정 캐시 키의 TTL 만료를 기다리던 한계를 없애고, `/<key>?etag=<ETag>`를 본문 캐시 키로 사용해 엣지에서 1년 캐싱한다.
+- R2 업로드로 ETag가 바뀌면 새 캐시 키가 되어 purge 없이 새 본문을 사용한다. ETag 조회는 요청마다 R2 `head`를 치지 않도록 30초 캐시한다.
+- 따라서 업로드 후 반영은 최대 30초이며, 브라우저 캐시는 60초다.
+- Cloudflare 존의 Browser Cache TTL이 HIT 응답의 `max-age`를 14400으로 덮어쓸 수 있으므로 `Respect Existing Headers`로 설정해야 한다.
 
 ### 2026-09-26 — data.iidx.in 감속을 유저 열거 경로에만 (공용 자산 제외)
 

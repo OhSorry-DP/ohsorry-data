@@ -62,17 +62,28 @@ const contentTypeOf = (key) => CT[key.slice(key.lastIndexOf('.') + 1).toLowerCas
 //
 // ⚠️ `version.json` 은 **R2 에 쓰는 코드가 없다**(죽은 키). 분류에서 뺀다.
 // ⚠️ 브라우저 `max-age` 는 **전부 60초 그대로** 둔다 — 엣지만 길게 잡는다.
+// 종전에는 고정 캐시 키에 lib/data 1시간, 나머지 60초 TTL을 줬다. Cache API는 purge가
+// 콜로별이라 불가능해 TTL이 최대 낡음이었다. 이제 본문 키는 `/<key>?etag=<ETag>`이고
+// 엣지는 1년 캐싱한다. 새 업로드는 새 ETag/새 키가 되므로 purge가 필요 없고 옛 항목은
+// 더 이상 쓰이지 않아 저절로 밀려난다.
+// ETag 메모는 30초다. 매 요청 R2 head(Class B)를 피하는 절충이며 업로드 후 반영은 최대
+// 30초(종전 60초~1시간보다 짧음)다. 메모를 없애면 즉시 반영되지만 매번 Class B 1건이다.
+// 🔴 CF 존의 Browser Cache TTL이 HIT 응답의 브라우저 max-age를 14400으로 덮어쓴다
+// (2026-09 실측). 코드로 막을 수 없으니 대시보드에서 Respect Existing Headers로 바꿔라.
+// R2는 같은 내용이면 ETag도 같다(내용 해시). 30분마다 무조건 PUT하는 songs.json도
+// 내용이 같으면 캐시가 유지된다.
 const BROWSER_MAX_AGE = 60;
-const EDGE_LONG = 3600;   // 1시간. 🔴 올리기 전에 위 「purge 가 불가능하다」를 먼저 읽어라.
+const ETAG_MEMO_TTL = 30;
+const EDGE_FOREVER = 31536000;
+const CACHE_CONTROL = `public, max-age=${BROWSER_MAX_AGE}, s-maxage=${EDGE_FOREVER}`;
 
-// 🔴 `songs.json` 을 여기 넣지 마라 — 위 표의 근거 참조.
-const LONG_CACHE_PREFIX = ['lib/', 'data/'];
-
-function cacheControlFor(key) {
-  const long = LONG_CACHE_PREFIX.some((p) => key.startsWith(p));
-  return long
-    ? `public, max-age=${BROWSER_MAX_AGE}, s-maxage=${EDGE_LONG}`
-    : `public, max-age=${BROWSER_MAX_AGE}`;
+function etagMemo(etag) {
+  return new Response(etag, {
+    headers: {
+      'cache-control': `public, s-maxage=${ETAG_MEMO_TTL}`,
+      'content-type': 'text/plain',
+    },
+  });
 }
 
 function corsHeaders() {
@@ -196,38 +207,56 @@ export default {
     if (delayMs) await sleep(delayMs);
 
     // 엣지 캐시 — 쿼리스트링은 키에서 무시(캐시 파편화 방지). 웹이 붙이는 cache-bust 도 같은 객체를 본다.
-    const cacheKey = new Request(url.origin + '/' + key, req);
     const cache = caches.default;
     // purge는 콜로별 Cache API에서 URL 단위로 지원되지 않으므로, R2 원본을 직접 읽어 우회한다.
     // R2 Class B 읽기와 egress 폭증을 막기 위해 고회전·소용량인 user/hist와 users-list만 허용한다.
     const fresh = url.searchParams.get('fresh') === '1'
       && (USER_RE.test(key) || HIST_RE.test(key) || key === 'users-list.json' || key === 'users-list-slim.json');
+    const origin = url.origin;
+    // 외부에서 /__etag/... 로 요청해도 keyOf 가 허용하지 않으므로 ETag 메모를 오염시킬 수 없다.
+    const etagReq = new Request(origin + '/__etag/' + key);
+    let etag = null;
     if (!fresh) {
-      const hit = await cache.match(cacheKey);
-      if (hit) return hit;
+      const memo = await cache.match(etagReq);
+      if (memo) etag = await memo.text();
     }
+    if (!etag) {
+      const head = await env.DATA.head(key);
+      if (!head) return notFound('덤프 없음: ' + key);
+      etag = head.httpEtag;
+      ctx.waitUntil(cache.put(etagReq, etagMemo(etag)));
+    }
+
+    const inm = req.headers.get('if-none-match');
+    if (inm && inm === etag) {
+      return new Response(null, {
+        status: 304,
+        headers: { etag, 'cache-control': CACHE_CONTROL, ...corsHeaders() },
+      });
+    }
+
+    const bodyReq = new Request(origin + '/' + key + '?etag=' + encodeURIComponent(etag), req);
+    const hit = await cache.match(bodyReq);
+    if (hit) return hit;
 
     const obj = await env.DATA.get(key);
     if (!obj) return notFound('덤프 없음: ' + key);
 
     // R2 etag 로 조건부 요청 지원 — 브라우저 재검증 시 304 로 본문 전송을 없앤다.
-    const inm = req.headers.get('if-none-match');
-    if (inm && inm === obj.httpEtag) {
-      return new Response(null, {
-        status: 304,
-        headers: { etag: obj.httpEtag, 'cache-control': cacheControlFor(key), ...corsHeaders() },
-      });
-    }
+    const realKey = obj.httpEtag === etag
+      ? bodyReq
+      : new Request(origin + '/' + key + '?etag=' + encodeURIComponent(obj.httpEtag), req);
+    if (obj.httpEtag !== etag) ctx.waitUntil(cache.put(etagReq, etagMemo(obj.httpEtag)));
 
     const res = new Response(obj.body, {
       headers: {
         'content-type': contentTypeOf(key),
-        'cache-control': cacheControlFor(key),
+        'cache-control': CACHE_CONTROL,
         etag: obj.httpEtag,
         ...corsHeaders(),
       },
     });
-    ctx.waitUntil(cache.put(cacheKey, res.clone()));
+    ctx.waitUntil(cache.put(realKey, res.clone()));
     return res;
   },
 };
