@@ -77,6 +77,8 @@ const ETAG_MEMO_TTL = 30;
 const ETAG_MEMO_KEEP = 86400;
 const EDGE_FOREVER = 31536000;
 const CACHE_CONTROL = `public, max-age=${BROWSER_MAX_AGE}, s-maxage=${EDGE_FOREVER}`;
+// 미스 응답을 통째로 버퍼링할 상한 — 버퍼를 캐시용·응답용 두 벌 들고 있으므로 Worker 메모리 128MB 대비 여유를 둔다. 넘으면 종전 스트리밍.
+const BUFFER_MAX_BYTES = 32 * 1024 * 1024;
 
 function etagMemo(etag) {
   return new Response(JSON.stringify({ etag, t: Date.now() }), {
@@ -102,7 +104,7 @@ function corsHeaders() {
     'access-control-allow-origin': '*',
     'access-control-allow-methods': 'GET,HEAD,OPTIONS',
     'access-control-allow-headers': 'content-type,if-none-match',
-    'access-control-expose-headers': 'etag',
+    'access-control-expose-headers': 'etag, x-ohs-cache',
     'access-control-max-age': '86400',
   };
 }
@@ -266,7 +268,11 @@ export default {
 
     const bodyReq = new Request(origin + '/' + key + '?etag=' + encodeURIComponent(etag), req);
     const hit = await cache.match(bodyReq);
-    if (hit) return hit;
+    if (hit) {
+      const out = new Response(hit.body, hit);
+      out.headers.set('x-ohs-cache', 'HIT');
+      return out;
+    }
 
     const obj = await env.DATA.get(key);
     if (!obj) return notFound('덤프 없음: ' + key);
@@ -277,15 +283,34 @@ export default {
       : new Request(origin + '/' + key + '?etag=' + encodeURIComponent(obj.httpEtag), req);
     if (obj.httpEtag !== etag) ctx.waitUntil(cache.put(etagReq, etagMemo(obj.httpEtag)));
 
+    const responseHeaders = {
+      'content-type': contentTypeOf(key),
+      'cache-control': CACHE_CONTROL,
+      etag: obj.httpEtag,
+      ...corsHeaders(),
+    };
+
+    // 🔴 미스 때 R2 스트림을 clone 해 waitUntil 로 cache.put 하면, 스트림이 수십 초라 waitUntil 30초 한도에 걸려 저장이 취소된다(2026-09-27 LAX 실측 90s→69s→41s→1.75s).
+    //    그래서 본문을 다 받은 뒤 캐시 저장을 await 로 끝내고 응답한다. 소비자는 JSON 을 끝까지 받은 뒤 쓰므로 총 시간은 같다.
+    if (req.method === 'GET' && obj.size <= BUFFER_MAX_BYTES) {
+      const buf = await obj.arrayBuffer();
+      const cacheRes = new Response(buf.slice(0), { headers: responseHeaders });
+      try {
+        await cache.put(realKey, cacheRes);
+      } catch (e) {
+        console.warn('cache.put failed:', e);
+      }
+      const res = new Response(buf, { headers: { ...responseHeaders, 'x-ohs-cache': 'MISS' } });
+      return res;
+    }
+
     const res = new Response(obj.body, {
       headers: {
-        'content-type': contentTypeOf(key),
-        'cache-control': CACHE_CONTROL,
-        etag: obj.httpEtag,
-        ...corsHeaders(),
+        ...responseHeaders,
+        'x-ohs-cache': 'MISS',
       },
     });
-    ctx.waitUntil(cache.put(realKey, res.clone()));
+    if (req.method === 'GET') ctx.waitUntil(cache.put(realKey, res.clone()));
     return res;
   },
 };

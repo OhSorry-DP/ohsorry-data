@@ -69,6 +69,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-27 — 캐시 미스 본문을 버퍼링해 엣지 캐시를 한 번에 채움 · `x-ohs-cache` 진단 헤더
+
+- 미스 때 R2 스트림을 clone 해 `waitUntil(cache.put)` 하던 것을, 본문을 다 받은 뒤 `await cache.put` 하고 응답하도록 바꿨다(GET · 32MB 이하). 한국 요청이 가는 LAX 콜로에서 APAC R2 스트림이 수십 초라 `waitUntil` 30초 한도에 걸려 저장이 취소되고, 같은 파일이 여러 번 미스 났다(실측 `feature-scores-slim.json` 90s→69s→41s→1.75s).
+- HEAD 는 캐시에 넣지 않는다(Cache API 는 GET 만 받는다). 32MB 초과는 종전 스트리밍.
+- 응답에 `x-ohs-cache: HIT|MISS`(CORS expose 포함). 304 에는 없다.
+
 ### 2026-09-26 — ETag 메모를 stale-while-revalidate 로 (미국 콜로 HIT 인데 3.5초)
 
 - 왜: APAC 버킷의 R2 `head`가 미국 서부 콜로에서 약 3초 걸려 본문 HIT에도 TTFB가 3.5초가 됐다.
