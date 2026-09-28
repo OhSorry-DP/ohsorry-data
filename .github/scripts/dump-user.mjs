@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { loadPersonaResources, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
 import { getText } from './r2-client.mjs';
+import { computeDirtyCharts } from './ranking-dirty-charts.mjs';
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -77,7 +78,7 @@ async function readPreviousDump(id) {
   }
 }
 
-export async function dumpUser(id, personaRes) {
+export async function dumpUser(id, personaRes, opts = {}) {
   const eid = encodeURIComponent(id);
   const [user, radars, osPattern, dp, spResult, dpRecent, spRecent, prevResult] = await Promise.all([
     // dbr_pw 는 비밀(공개 repo·anon 노출 금지) → 명시 컬럼만 select(select=* 금지).
@@ -162,13 +163,18 @@ export async function dumpUser(id, personaRes) {
       spPersona = (prev && prev.spPersona) || null;
     }
   }
-  return {
+  const result = {
     _v: new Date().toISOString(), user: user[0] ? { ...user[0] } : null, radars, osPattern, persona, spPersona, reachNps,
     dp: dp.map(slimRow), sp,
     // 최근 92일 갱신 이력 [{song_id,diff,date_kst}] — ④/SP연습 피처 recency. null 이면 키 생략(웹이 RPC fallback).
     ...(dpRecent ? { dpRecent } : {}),
     ...(spRecent ? { spRecent } : {}),
   };
+  if (result.user && opts.onDirty) {
+    try { await opts.onDirty(computeDirtyCharts({ prevOk, prev, user: result.user, dp: result.dp })); }
+    catch (e) { console.warn('::warning::dirty marker callback failed(' + id + '):', e.message); }
+  }
+  return result;
 }
 
 // ─── 무손실 이력 hist/{id}.json (CF 통합 §1) ──────────────────────────────────
@@ -252,8 +258,13 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   const personaRes = await loadPersonaResources();
   for (const id of ids) {
     if (!/^[A-Za-z0-9]+$/.test(id)) { console.error('잘못된 iidx_id 형식:', id); process.exit(1); }
-    const data = await dumpUser(id, personaRes);
+    let dirtyCharts = [];
+    const data = await dumpUser(id, personaRes, { onDirty: (charts) => { dirtyCharts = charts; } });
     if (!data.user) { console.error('유저 없음(삭제됨?):', id); continue; }
+    if (dirtyCharts.length) {
+      fs.mkdirSync('ranking-state/dirty', { recursive: true });
+      fs.writeFileSync(`ranking-state/dirty/${id}-${Date.now()}.json`, JSON.stringify({ v: 1, id, at: new Date().toISOString(), charts: dirtyCharts }));
+    }
     fs.writeFileSync(`user/${id}.json`, JSON.stringify(data));
     const h = await updateHistFile(id, `hist/${id}.json`);
     console.log('덤프:', id, '| dp', data.dp.length, 'sp', data.sp.length, '| persona', data.persona ? 'OK' : '없음', '| spPersona', data.spPersona ? 'OK' : '없음',

@@ -22,6 +22,7 @@ const USER_RE = /^user\/[A-Za-z0-9]+\.json$/;
 const HIST_RE = /^hist\/[A-Za-z0-9]+\.json$/;
 const ARRANGE_RE = /^arrange\/[A-Za-z0-9]+\.json$/;
 const DBR_RE = /^dbr\/[A-Za-z0-9]+\.json$/;
+const RANKING_RE = /^ranking\/\d+-\d+\.json$/; // 곡 상세에서 1건씩 조회하는 공개 집계 자산
 // lib/ · data/ — 종전 gist `c3da608…` 이 뿌리던 코어 JS·데이터 JSON (CF 통합 §3).
 //   gist raw 는 `max-age=300` 고정이라 캐시를 우리가 못 쥐었다. R2 로 옮기면 Worker 가 쥔다.
 //   파일명에 `.`·`+` 가 들어가는 것이 실재한다(`OSR13.5+.js`, `patterns-dp-0810.json`) → 문자 클래스에 포함.
@@ -128,6 +129,7 @@ function keyOf(pathname) {
   if (HIST_RE.test(key)) return key;
   if (ARRANGE_RE.test(key)) return key;
   if (DBR_RE.test(key)) return key;
+  if (RANKING_RE.test(key)) return key;
   if (LIB_RE.test(key)) return key;
   if (DATA_RE.test(key)) return key;
   return null;

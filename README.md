@@ -69,6 +69,14 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-29 — `ranking/{song_id}-{diff}.json` 곡 랭킹 R2 사본 + dirty 마커 증분 덤프
+
+- 왜: 웹이 곡 상세를 열 때마다 RPC `get_chart_ranking_v2` 를 부르던 것 — 런타임 Supabase 읽기 제거.
+- `dump-user` 가 이전 R2 덤프와 새 DP grid 를 비교해 바뀐 차트를 비공개 `ranking-state/dirty/{id}-{ms}.json` 마커로 남김(user PUT 보다 먼저).
+- `dump-chart-rankings` 워크플로 30분 증분 + KST 03:20 `--all` 대조, 내용이 바뀐 파일만 PUT, 0행이면 삭제, 실패 시 마커 보존.
+- Worker `ranking/` 허용(열거 감속·`?fresh=1` 제외), `ranking-state/` 는 비공개.
+- 🔴 첫 배포 전 `--all` 1회 백필 필요.
+
 ### 2026-09-29 — `first-place-winners.json` 공개 자산 추가 (곡별 DP 1위의 R2 사본)
 
 - 왜: 웹 v1 이 페이지 로드마다 Supabase RPC `get_first_place_winners` 를 전량 페이징하던 것을 R2 로 옮겨 런타임 Supabase 읽기를 제거한다.

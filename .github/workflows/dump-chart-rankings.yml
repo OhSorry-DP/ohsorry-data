@@ -1,0 +1,32 @@
+name: dump-chart-rankings
+# 목적: 곡 상세 랭킹의 R2 사본을 만든다. 웹은 Supabase를 읽지 않는다.
+# dump-user가 user PUT보다 먼저 dirty 마커를 올린다.
+# 실패한 차트가 있으면 마커를 지우지 않고 job을 실패시킨다.
+# 동시 실행을 금지해 같은 마커를 서로 지우지 않도록 한다.
+# 목적: 곡별 랭킹 공개 파일 생성. 증분은 dirty 마커, 대조는 --all을 사용한다.
+# 마커를 먼저 읽고 처리하며, 실패하면 마커를 보존한다.
+on:
+  schedule:
+    - cron: '*/30 * * * *' # 증분 — dirty 마커의 차트만
+    - cron: '20 18 * * *' # 전체 대조 — UTC 18:20 = KST 03:20, dump-users-list 전체 재생성(03:05) 뒤
+  workflow_dispatch:
+    inputs:
+      all:
+        type: boolean
+        default: false
+        required: false
+concurrency: { group: dump-chart-rankings, cancel-in-progress: false }
+permissions: { contents: read }
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: node .github/scripts/dump-chart-rankings.mjs ${{ (github.event.schedule == '20 18 * * *' || inputs.all) && '--all' || '' }}

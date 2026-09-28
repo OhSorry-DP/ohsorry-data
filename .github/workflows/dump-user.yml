@@ -171,6 +171,9 @@ jobs:
               echo "::error::R2 업로드 실패: $1"; rc=1
             fi
           }
+          # dirty 마커를 먼저 PUT해야 취소된 실행에서도 다음 비교 기준이 새 값으로 덮이지 않는다.
+          # 마커 PUT 실패는 rc=1로 기록하되 user PUT은 계속 — 일일 대조가 복구한다.
+          for f in ranking-state/dirty/*.json; do [ -f "$f" ] && put "$f"; done
           put "user/$IIDX_ID.json"
           # users-list.json 은 여기서 PUT 하지 않는다 — 앞 스텝의 merge 스크립트가 GET→PUT→검증까지
           #   담당한다(레이스 창 최소화, 2026-08-14). 여기서 또 올리면 검증을 통과한 최신본을

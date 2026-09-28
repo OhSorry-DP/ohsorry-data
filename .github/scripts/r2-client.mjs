@@ -101,6 +101,24 @@ export async function getText(key) {
   try { return fs.readFileSync(f, 'utf8'); } finally { try { fs.unlinkSync(f); } catch { /* 무시 */ } }
 }
 
+// Cloudflare R2 REST 목록 응답(result/result_info.cursor)은 문서 기준 가정이며 로컬에서 검증하지 못했다.
+export async function list(prefix) {
+  if (!useRest) throw new Error('R2 list는 REST 모드에서만 지원');
+  const keys = [];
+  let cursor = '';
+  do {
+    const qs = new URLSearchParams({ prefix, per_page: '1000' });
+    if (cursor) qs.set('cursor', cursor);
+    const r = await restFetch(`?${qs}`, { method: 'GET' });
+    if (!r.ok) throw new Error(`R2 LIST ${prefix} HTTP ${r.status}`);
+    const body = await r.json();
+    if (!Array.isArray(body.result)) throw new Error('R2 LIST result가 배열이 아님');
+    for (const item of body.result) if (item && typeof item.key === 'string') keys.push(item.key);
+    cursor = body.result_info?.cursor || '';
+  } while (cursor);
+  return keys;
+}
+
 // 반환 { ok, msg? } — 호출부가 부분 실패를 집계할 수 있게 throw 하지 않는다.
 export async function putText(key, body, contentType = null) {
   const ct = contentType || contentTypeOf(key);
