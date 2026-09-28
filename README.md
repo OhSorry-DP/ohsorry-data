@@ -69,6 +69,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-29 — `arrange/{ID}.json` · `dbr/{ID}.json` 공개 경로 추가 (배치·DBR 점수의 R2 사본)
+
+- 왜: 웹·코치가 배치 입력과 DBR 점수를 Supabase 에서 직접 읽던 것을 R2 로 옮긴다(egress 절감). 사본은 ohSorryWeb Pages Functions 가 저장할 때 R2 바인딩으로 갱신한다.
+- 두 키는 `user/`·`hist/` 와 같이 엣지 60초 무리 · `?fresh=1` 원본 직독 허용(저장 직후 본인 재조회용).
+- 열거 감속(`RL_ENUM`)에는 **넣지 않았다** — 프로필 1회에 `user/` 와 함께 요청되고 Rival 은 라이벌 수만큼 곱해져 사람도 20건/분에 닿는다. 옮기기 전엔 Supabase anon 으로 한도 없이 공개였으므로 후퇴가 아니다.
+
 ### 2026-09-27 — 캐시 미스 본문을 버퍼링해 엣지 캐시를 한 번에 채움 · `x-ohs-cache` 진단 헤더
 
 - 미스 때 R2 스트림을 clone 해 `waitUntil(cache.put)` 하던 것을, 본문을 다 받은 뒤 `await cache.put` 하고 응답하도록 바꿨다(GET · 32MB 이하). 한국 요청이 가는 LAX 콜로에서 APAC R2 스트림이 수십 초라 `waitUntil` 30초 한도에 걸려 저장이 취소되고, 같은 파일이 여러 번 미스 났다(실측 `feature-scores-slim.json` 90s→69s→41s→1.75s).

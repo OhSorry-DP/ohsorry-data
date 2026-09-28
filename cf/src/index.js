@@ -19,6 +19,8 @@ const USER_RE = /^user\/[A-Za-z0-9]+\.json$/;
 //   user/ 슬림 덤프로는 불가능한 supabase 복원의 원본이다.
 //   user/ 와 분리한 이유: 카드 첫 로딩에 딸려오면 응답이 느려지는데, 정작 필요한 건 모달을 열 때뿐이다.
 const HIST_RE = /^hist\/[A-Za-z0-9]+\.json$/;
+const ARRANGE_RE = /^arrange\/[A-Za-z0-9]+\.json$/;
+const DBR_RE = /^dbr\/[A-Za-z0-9]+\.json$/;
 // lib/ · data/ — 종전 gist `c3da608…` 이 뿌리던 코어 JS·데이터 JSON (CF 통합 §3).
 //   gist raw 는 `max-age=300` 고정이라 캐시를 우리가 못 쥐었다. R2 로 옮기면 Worker 가 쥔다.
 //   파일명에 `.`·`+` 가 들어가는 것이 실재한다(`OSR13.5+.js`, `patterns-dp-0810.json`) → 문자 클래스에 포함.
@@ -58,7 +60,7 @@ const contentTypeOf = (key) => CT[key.slice(key.lastIndexOf('.') + 1).toLowerCas
 //   | `songs.json`      | `dump-users-list.mjs`(30분, diff 게이트 없이 매번 PUT) | 60초 | 🔴 **신선도가 목적인 자산이다** — 신곡이 늦으면 슬림 row 의 곡메타 조인이 비어 **곡명이 안 뜬다**(그 스크립트 주석). 30분 주기에 캐시를 더하면 최악 낡음이 배가 된다 |
 //   | `users-list.json` | 유저 활동마다 증분(`merge-user-into-list.mjs`) | 60초 | 진짜 고회전 |
 //   | `users-list-slim.json` | `users-list.json` 과 **같은 생산자·같은 시점**(증분·전체 재생성 양쪽) | 60초 | 본체와 같은 회전이다. 🔴 본체와 TTL 을 다르게 두지 마라 — v3 검색이 랭킹보다 낡은 명단을 보게 된다 |
-//   | `user/` · `hist/` | 유저별 덤프(`dump-user.yml`) | 60초 | 유저별. 업로드 직후 반영돼야 한다 |
+//   | `user/` · `hist/` · `arrange/` · `dbr/` | 유저별 덤프·live 사본 | 60초 | 업로드/저장 직후 반영돼야 한다 |
 //
 // ⚠️ `version.json` 은 **R2 에 쓰는 코드가 없다**(죽은 키). 분류에서 뺀다.
 // ⚠️ 브라우저 `max-age` 는 **전부 60초 그대로** 둔다 — 엣지만 길게 잡는다.
@@ -123,6 +125,8 @@ function keyOf(pathname) {
   if (ALLOWED_ROOT.has(key)) return key;
   if (USER_RE.test(key)) return key;
   if (HIST_RE.test(key)) return key;
+  if (ARRANGE_RE.test(key)) return key;
+  if (DBR_RE.test(key)) return key;
   if (LIB_RE.test(key)) return key;
   if (DATA_RE.test(key)) return key;
   return null;
@@ -184,6 +188,8 @@ function ipOf(req) {
 //
 // 🔴 `users-list*` 도 열거에 넣는다 — 그것이 **수집기의 진입점**이다(한 번 받으면 전 유저 ID 를 안다).
 function isEnumerationKey(key) {
+  // 🔴 `arrange/`·`dbr/` 는 넣지 않는다(2026-09-29) — 프로필 1회에 `user/` 와 함께 요청되고 Rival 은 라이벌 수만큼 곱해져
+  //    사람도 20건/분(RL_ENUM)에 닿는다. 옮기기 전엔 Supabase anon 으로 한도 없이 공개였으므로 빼도 후퇴가 아니다.
   return USER_RE.test(key) || HIST_RE.test(key)
       || key === 'users-list.json' || key === 'users-list-slim.json';
 }
@@ -222,9 +228,9 @@ export default {
     // 엣지 캐시 — 쿼리스트링은 키에서 무시(캐시 파편화 방지). 웹이 붙이는 cache-bust 도 같은 객체를 본다.
     const cache = caches.default;
     // purge는 콜로별 Cache API에서 URL 단위로 지원되지 않으므로, R2 원본을 직접 읽어 우회한다.
-    // R2 Class B 읽기와 egress 폭증을 막기 위해 고회전·소용량인 user/hist와 users-list만 허용한다.
+    // R2 Class B 읽기와 egress 폭증을 막기 위해 고회전·소용량인 user/hist·arrange/dbr(저장 직후 본인 재조회)와 users-list만 허용한다.
     const fresh = url.searchParams.get('fresh') === '1'
-      && (USER_RE.test(key) || HIST_RE.test(key) || key === 'users-list.json' || key === 'users-list-slim.json');
+      && (USER_RE.test(key) || HIST_RE.test(key) || ARRANGE_RE.test(key) || DBR_RE.test(key) || key === 'users-list.json' || key === 'users-list-slim.json');
     const origin = url.origin;
     // 외부에서 /__etag/... 로 요청해도 keyOf 가 허용하지 않으므로 ETag 메모를 오염시킬 수 없다.
     const etagReq = new Request(origin + '/__etag/' + key);
