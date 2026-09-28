@@ -13,7 +13,8 @@
 //
 // 원본은 이 repo 의 git. Action 이 commit/push 후 같은 파일을 R2 에 올린다.
 
-const ALLOWED_ROOT = new Set(['users-list.json', 'users-list-slim.json', 'songs.json', 'version.json']);
+// first-place-winners.json은 페이지 진입마다 받는 공용 단일 자산이므로 열거 감속 대상에 넣지 않는다.
+const ALLOWED_ROOT = new Set(['users-list.json', 'users-list-slim.json', 'songs.json', 'version.json', 'first-place-winners.json']);
 const USER_RE = /^user\/[A-Za-z0-9]+\.json$/;
 // hist/{id}.json — 무손실 점수 이력(scores 전 행·전 필드 배열형). 웹 랭킹모달의 점수 추이 그래프 소스이자,
 //   user/ 슬림 덤프로는 불가능한 supabase 복원의 원본이다.

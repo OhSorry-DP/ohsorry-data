@@ -69,6 +69,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-29 — `first-place-winners.json` 공개 자산 추가 (곡별 DP 1위의 R2 사본)
+
+- 왜: 웹 v1 이 페이지 로드마다 Supabase RPC `get_first_place_winners` 를 전량 페이징하던 것을 R2 로 옮겨 런타임 Supabase 읽기를 제거한다.
+- 생산: `dump-users-list` 워크플로 두 주기 모두에서 `.github/scripts/dump-first-place.mjs` 로 생성한다. 형식은 `{_v,n,w:{iidx_id:[[song_id,diff],...]}}` 이며, 순서 고정 페이징과 Content-Range 총수 대조를 수행하고 실패 시 업로드하지 않아 이전 사본을 유지한다.
+- Worker: `ALLOWED_ROOT` 를 추가하고 열거 감속에서 제외했다(페이지 진입마다 받는 공용 단일 자산).
+
 ### 2026-09-29 — `arrange/{ID}.json` · `dbr/{ID}.json` 공개 경로 추가 (배치·DBR 점수의 R2 사본)
 
 - 왜: 웹·코치가 배치 입력과 DBR 점수를 Supabase 에서 직접 읽던 것을 R2 로 옮긴다(egress 절감). 사본은 ohSorryWeb Pages Functions 가 저장할 때 R2 바인딩으로 갱신한다.

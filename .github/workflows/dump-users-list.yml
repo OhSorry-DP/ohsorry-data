@@ -12,6 +12,10 @@ name: dump-users-list
 #      시점에 읽으므로). 새벽 시간대라 영향이 작고, 다음 dump-user 증분이 복구한다.
 #   ⚠️ '*/5' 였을 때 GitHub Actions 스로틀로 실제 1~5시간 간격 실행됨(실측: 04:21→09:10 = 4h49m).
 #      고빈도 schedule 일수록 드롭 비율이 높아 오히려 간격이 벌어진다 → 간격을 낮춰 실행률을 높인다.
+#
+# first-place-winners.json 은 곡별 DP 1위 결과를 R2 단일 자산으로 제공한다.
+# 덤프 실패 시 기존 R2 사본을 유지하고, 성공한 경우에만 업로드한다.
+# 두 주기 모두 first-place winners를 함께 생성한다.
 on:
   schedule:
     - cron: '*/30 * * * *'   # songs.json 만
@@ -57,6 +61,24 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         # $BUILD_ARGS 는 의도적으로 unquoted — 빈 값이면 인자 없이(전체), '--songs' 면 songs 전용.
         run: node .github/scripts/dump-users-list.mjs $BUILD_ARGS
+
+      # 곡별 1위 R2 단일 자산. 실패하면 이전 R2 사본을 유지한다.
+      - name: Build first-place winners
+        id: first_place
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node .github/scripts/dump-first-place.mjs
+
+      - name: Add first-place winners to upload list
+        if: ${{ steps.first_place.outcome == 'success' }}
+        run: |
+          if [ -s first-place-winners.json ]; then
+            echo "FILES=$FILES first-place-winners.json" >> "$GITHUB_ENV"
+          else
+            echo "::warning::first-place-winners.json is empty; skipping upload"
+          fi
 
       - name: Upload to R2 (data.iidx.in)
         # 서빙 = R2(cf/ Worker → data.iidx.in). **§4 이후 R2 가 유일본이다** — git 데이터 커밋을
