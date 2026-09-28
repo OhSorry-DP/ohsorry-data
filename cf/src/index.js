@@ -23,6 +23,7 @@ const HIST_RE = /^hist\/[A-Za-z0-9]+\.json$/;
 const ARRANGE_RE = /^arrange\/[A-Za-z0-9]+\.json$/;
 const DBR_RE = /^dbr\/[A-Za-z0-9]+\.json$/;
 const RANKING_RE = /^ranking\/\d+-\d+\.json$/; // 곡 상세에서 1건씩 조회하는 공개 집계 자산
+const PENDING_RE = /^pending\/[A-Za-z0-9]+\.json$/; // 업로드 직후 덤프 대기 마커 — dump-trigger 가 씀
 // lib/ · data/ — 종전 gist `c3da608…` 이 뿌리던 코어 JS·데이터 JSON (CF 통합 §3).
 //   gist raw 는 `max-age=300` 고정이라 캐시를 우리가 못 쥐었다. R2 로 옮기면 Worker 가 쥔다.
 //   파일명에 `.`·`+` 가 들어가는 것이 실재한다(`OSR13.5+.js`, `patterns-dp-0810.json`) → 문자 클래스에 포함.
@@ -129,6 +130,7 @@ function keyOf(pathname) {
   if (HIST_RE.test(key)) return key;
   if (ARRANGE_RE.test(key)) return key;
   if (DBR_RE.test(key)) return key;
+  if (PENDING_RE.test(key)) return key;
   if (RANKING_RE.test(key)) return key;
   if (LIB_RE.test(key)) return key;
   if (DATA_RE.test(key)) return key;
@@ -231,9 +233,9 @@ export default {
     // 엣지 캐시 — 쿼리스트링은 키에서 무시(캐시 파편화 방지). 웹이 붙이는 cache-bust 도 같은 객체를 본다.
     const cache = caches.default;
     // purge는 콜로별 Cache API에서 URL 단위로 지원되지 않으므로, R2 원본을 직접 읽어 우회한다.
-    // R2 Class B 읽기와 egress 폭증을 막기 위해 고회전·소용량인 user/hist·arrange/dbr(저장 직후 본인 재조회)와 users-list만 허용한다.
+    // R2 Class B 읽기와 egress 폭증을 막기 위해 고회전·소용량인 user/hist·arrange/dbr(저장 직후 본인 재조회)·pending(폴링 판정용, 소용량)과 users-list만 허용한다.
     const fresh = url.searchParams.get('fresh') === '1'
-      && (USER_RE.test(key) || HIST_RE.test(key) || ARRANGE_RE.test(key) || DBR_RE.test(key) || key === 'users-list.json' || key === 'users-list-slim.json');
+      && (USER_RE.test(key) || HIST_RE.test(key) || ARRANGE_RE.test(key) || DBR_RE.test(key) || PENDING_RE.test(key) || key === 'users-list.json' || key === 'users-list-slim.json');
     const origin = url.origin;
     // 외부에서 /__etag/... 로 요청해도 keyOf 가 허용하지 않으므로 ETag 메모를 오염시킬 수 없다.
     const etagReq = new Request(origin + '/__etag/' + key);

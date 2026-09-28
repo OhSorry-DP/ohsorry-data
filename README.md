@@ -69,6 +69,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-29 — `pending/{ID}.json` 공개 경로 (업로드 직후 덤프 대기 마커)
+
+- 왜: 웹 본인 stale probe 가 Supabase 최신 점수일을 읽던 것을 R2 로 옮긴다 — ohSorryWeb dump-trigger 가 dispatch 성공 뒤 `{since}` 를 쓰고, 웹은 since > user `_v` 면 `user/?fresh=1` 을 폴링한다.
+- `?fresh=1` 허용: 폴링은 엣지 캐시를 건너뛰어야 한다.
+- 열거 감속 제외: 방문당 1회인 폴링 경로라 감속 대상에 넣지 않는다.
+- 마커는 지우지 않고 웹이 10분 넘은 것을 무시한다.
+
 ### 2026-09-29 — `ranking/{song_id}-{diff}.json` 곡 랭킹 R2 사본 + dirty 마커 증분 덤프
 
 - 왜: 웹이 곡 상세를 열 때마다 RPC `get_chart_ranking_v2` 를 부르던 것 — 런타임 Supabase 읽기 제거.
