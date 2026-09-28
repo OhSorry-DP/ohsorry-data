@@ -69,6 +69,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-29 — `dump-chart-rankings` 변경 판정을 R2 목록 etag 로 (매번 전량 PUT·429 해소)
+
+- 증상: `--all` 을 연달아 두 번 돌려도 `PUT 6455, skip 0` — 같은 내용을 매번 전부 PUT 해 Cloudflare API 한도(5분 1200건) 429 로 수백 차트가 실패했다.
+- 원인: `putIfChanged` 의 판정(`cdnEtag` = data.iidx.in HEAD)이 GitHub 러너에서 일치하지 못했다(로컬에선 정상). CDN 경로에 판정을 기대지 않는다.
+- 수정: 시작 시 `listEntries('ranking/')` 로 R2 정본 etag 를 한 번 받아(1000건/요청) 본문 md5 와 비교한다. 목록 조회 실패는 작업 실패(마커 보존). `--all` 의 ranking 키 재조회도 이 목록으로 대체.
+- `r2-client`: `listEntries(prefix)` 추가, `list()` 는 그 key 만 반환(요청 URL 불변).
+
 ### 2026-09-29 — R2 REST 목록 URL 수정 (`dump-chart-rankings` 첫 실행 404)
 
 - 증상: `dump-chart-rankings` 첫 운영 실행이 `R2 LIST ranking-state/dirty/ HTTP 404` 로 실패.

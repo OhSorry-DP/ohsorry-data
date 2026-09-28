@@ -5,7 +5,7 @@ const account = 'test-account';
 process.env.CLOUDFLARE_ACCOUNT_ID = account;
 process.env.CLOUDFLARE_API_TOKEN = 'test-token';
 
-const { getText, list } = await import(`./r2-client.mjs?test=${Date.now()}`);
+const { getText, list, listEntries } = await import(`./r2-client.mjs?test=${Date.now()}`);
 const base = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/ohsorry-data/objects`;
 const response = (body, status = 200) => new Response(JSON.stringify(body), { status });
 
@@ -24,6 +24,15 @@ test('list URL and cursor pagination', async () => {
   assert.equal(urls[0], `${base}?prefix=ranking-state%2Fdirty%2F&per_page=1000`);
   assert.equal(urls[0].includes('/objects/?'), false);
   assert.equal(urls[1], `${base}?prefix=ranking-state%2Fdirty%2F&per_page=1000&cursor=C1`);
+});
+
+test('listEntries returns key and etag with the same list URL', async () => {
+  const urls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => { urls.push(String(url)); return response({ result: [{ key: 'a', etag: 'abc' }] }); };
+  try { assert.deepEqual(await listEntries('ranking/'), [{ key: 'a', etag: 'abc' }]); }
+  finally { globalThis.fetch = originalFetch; }
+  assert.equal(urls[0], `${base}?prefix=ranking%2F&per_page=1000`);
 });
 
 test('list throws for 404', async () => {

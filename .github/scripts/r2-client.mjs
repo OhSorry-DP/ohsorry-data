@@ -103,9 +103,9 @@ export async function getText(key) {
 
 // 슬래시 없는 objects?prefix=여야 하며, 슬래시가 있으면 404(10007)가 난다.
 // 마지막 페이지에는 result_info가 없을 수 있다.
-export async function list(prefix) {
+export async function listEntries(prefix) {
   if (!useRest) throw new Error('R2 list는 REST 모드에서만 지원');
-  const keys = [];
+  const entries = [];
   let cursor = '';
   do {
     const qs = new URLSearchParams({ prefix, per_page: '1000' });
@@ -114,10 +114,14 @@ export async function list(prefix) {
     if (!r.ok) throw new Error(`R2 LIST ${prefix} HTTP ${r.status}`);
     const body = await r.json();
     if (!Array.isArray(body.result)) throw new Error('R2 LIST result가 배열이 아님');
-    for (const item of body.result) if (item && typeof item.key === 'string') keys.push(item.key);
+    for (const item of body.result) if (item && typeof item.key === 'string') entries.push({ key: item.key, etag: item.etag });
     cursor = body.result_info?.cursor || '';
   } while (cursor);
-  return keys;
+  return entries;
+}
+
+export async function list(prefix) {
+  return (await listEntries(prefix)).map(({ key }) => key);
 }
 
 // 반환 { ok, msg? } — 호출부가 부분 실패를 집계할 수 있게 throw 하지 않는다.

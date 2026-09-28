@@ -1,5 +1,5 @@
 import { pathToFileURL } from 'node:url';
-import { getText, list, putIfChanged, del, pool } from './r2-client.mjs';
+import { getText, list, listEntries, md5, putText, del, pool } from './r2-client.mjs';
 
 export function chartKey([song, diff]) { return `ranking/${song}-${diff}.json`; }
 export function normalizeCharts(charts) {
@@ -19,7 +19,10 @@ function chartsFromMarker(raw) {
 function chartsFromWinners(raw) { const x = JSON.parse(raw); return Object.values(x.w || {}).flat(); }
 function chartsFromRanking(keys) { return keys.map((k) => /^ranking\/(\d+)-(\d+)\.json$/.exec(k)).filter(Boolean).map((m) => [+m[1], +m[2]]); }
 
-export async function run({ all = false, rpc, getText: read = getText, list: listFn = list, putIfChanged: put = putIfChanged, del: remove = del, log = console }) {
+export async function run({ all = false, rpc, getText: read = getText, list: listFn = list, listEntries: listEntriesFn = listEntries, putText: put = putText, del: remove = del, log = console }) {
+  // 러너에서 CDN HEAD가 판정에 실패해 매번 전부 PUT 했다.
+  // R2 정본 etag를 본문 md5와 비교해 변경 여부를 판정한다.
+  const remote = new Map((await listEntriesFn('ranking/')).map(({ key, etag }) => [key, etag]));
   const markerKeys = await listFn('ranking-state/dirty/');
   const charts = [], deletable = [];
   for (const key of markerKeys) {
@@ -34,7 +37,7 @@ export async function run({ all = false, rpc, getText: read = getText, list: lis
       log.warn(`마커 파싱 실패 ${key}: ${e.message}`);
     }
   }
-  if (all) { const winners = await read('first-place-winners.json'); if (!winners) throw new Error('first-place-winners.json 없음'); charts.push(...chartsFromWinners(winners)); charts.push(...chartsFromRanking(await listFn('ranking/'))); }
+  if (all) { const winners = await read('first-place-winners.json'); if (!winners) throw new Error('first-place-winners.json 없음'); charts.push(...chartsFromWinners(winners)); charts.push(...chartsFromRanking([...remote.keys()])); }
   const targets = normalizeCharts(charts); let puts = 0, skips = 0, deletes = 0, failures = 0;
   await pool(targets, 8, async (chart) => { try {
     const rows = await rpc(chart[0], chart[1]);
@@ -44,7 +47,8 @@ export async function run({ all = false, rpc, getText: read = getText, list: lis
       if (!await remove(key)) throw new Error(`삭제 실패 ${key}`);
       deletes++;
     }
-    else { const r = await put(key, body); if (!r.ok) throw new Error(r.msg || `PUT 실패 ${key}`); r.skipped ? skips++ : puts++; }
+    else if (remote.get(key) === md5(body)) skips++;
+    else { const r = await put(key, body); if (!r.ok) throw new Error(r.msg || `PUT 실패 ${key}`); puts++; }
   } catch (e) { failures++; log.error(`차트 실패 ${chart.join('-')}: ${e.message}`); } });
   if (!failures) for (const key of deletable) if (!await remove(key)) throw new Error(`마커 삭제 실패 ${key}`);
   log.log(`차트 ${targets.length}, PUT ${puts}, skip ${skips}, 삭제 ${deletes}, 실패 ${failures}`);
