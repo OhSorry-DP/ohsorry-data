@@ -69,6 +69,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-29 — R2 REST 목록 URL 수정 (`dump-chart-rankings` 첫 실행 404)
+
+- 증상: `dump-chart-rankings` 첫 운영 실행이 `R2 LIST ranking-state/dirty/ HTTP 404` 로 실패.
+- 원인: `list()` 가 `.../objects/?prefix=` 로 요청했다. objects 뒤 슬래시가 있으면 Cloudflare 는 빈 키 GET 으로 해석해 404(10007)를 준다. 목록은 `.../objects?prefix=` 여야 한다.
+- 실측으로 응답 구조(`result[].key` · `result_info.cursor`, 마지막 페이지는 `result_info` 없음)도 확인했다.
+- `r2-client.test.mjs` 추가: 실제 요청 URL 문자열·커서 페이징·404 throw·단건 경로 불변을 단정.
+
 ### 2026-09-29 — `pending/{ID}.json` 공개 경로 (업로드 직후 덤프 대기 마커)
 
 - 왜: 웹 본인 stale probe 가 Supabase 최신 점수일을 읽던 것을 R2 로 옮긴다 — ohSorryWeb dump-trigger 가 dispatch 성공 뒤 `{since}` 를 쓰고, 웹은 since > user `_v` 면 `user/?fresh=1` 을 폴링한다.

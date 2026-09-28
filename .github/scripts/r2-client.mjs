@@ -61,9 +61,9 @@ function wrangler(args) {
   return execFileSync(cmd[0], cmd[1], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
 }
 
-async function restFetch(key, init, tries = 4) {
+async function restFetch(key, init, tries = 4, base = REST_BASE) {
   for (let i = 0; i < tries; i++) {
-    const r = await fetch(REST_BASE + key, {
+    const r = await fetch(base + key, {
       ...init,
       headers: { Authorization: `Bearer ${TOKEN}`, ...(init.headers || {}) },
     });
@@ -101,7 +101,8 @@ export async function getText(key) {
   try { return fs.readFileSync(f, 'utf8'); } finally { try { fs.unlinkSync(f); } catch { /* 무시 */ } }
 }
 
-// Cloudflare R2 REST 목록 응답(result/result_info.cursor)은 문서 기준 가정이며 로컬에서 검증하지 못했다.
+// 슬래시 없는 objects?prefix=여야 하며, 슬래시가 있으면 404(10007)가 난다.
+// 마지막 페이지에는 result_info가 없을 수 있다.
 export async function list(prefix) {
   if (!useRest) throw new Error('R2 list는 REST 모드에서만 지원');
   const keys = [];
@@ -109,7 +110,7 @@ export async function list(prefix) {
   do {
     const qs = new URLSearchParams({ prefix, per_page: '1000' });
     if (cursor) qs.set('cursor', cursor);
-    const r = await restFetch(`?${qs}`, { method: 'GET' });
+    const r = await restFetch(`?${qs}`, { method: 'GET' }, 4, REST_BASE.slice(0, -1));
     if (!r.ok) throw new Error(`R2 LIST ${prefix} HTTP ${r.status}`);
     const body = await r.json();
     if (!Array.isArray(body.result)) throw new Error('R2 LIST result가 배열이 아님');
