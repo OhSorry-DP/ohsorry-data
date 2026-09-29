@@ -69,6 +69,15 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-30 — `dump-chart-dist` 신설: 곡 상세 §17 실력대 분포 공개 파일 (미배포)
+
+- 차트당 익명 `[r★, rate]` 쌍 목록을 `dist/dp/{song_id}-{diff}.json` · `dist/sp/{song_id}-{diff}.json` 로 만든다. 본문 `{"v":1,"samples":[[r,rate],...]}` — rate 내림차순 → r 오름차순(null 은 뒤), r 소수 2자리 · rate 4자리.
+- 원천은 R2 전용: `user/` 전량 + `users-list-slim.json`(r★) + `songs.json` · `data/textage-meta.json`(노트수). Supabase 는 읽지 않는다. Rate = EX/(노트×2), 노트수는 웹 `viewRowToChart` 와 같은 규칙(INF 는 `note_count` 우선). 한 유저·한 차트당 1표본(최댓값). SP 표본의 r★ 는 null.
+- 변경 판정은 `dump-chart-rankings` 와 같은 R2 목록 etag = 본문 md5. 원격에만 남은 `dist/` 키는 삭제. 원천 누락·유저 덤프 읽기 실패·유저 0명이면 쓰기 전에 중단(fail-closed). `--dry-run` 지원.
+- 워크플로 `dump-chart-dist.yml` — 매일 KST 03:35(03:05 users-list · 03:20 ranking 뒤), 수동 `dry_run` 입력.
+- Worker `cf/src/index.js`: `dist/(dp|sp)/{id}-{diff}.json` 공개 경로 허용.
+- 🔴 push·Worker 배포·첫 백필 전(외부 노출 승인 대기). 실측(09-26 스냅샷): DP 6,803차트 · 차트당 중앙값 22명 · DP 총 약 4.4MB.
+
 ### 2026-09-29 — `dump-chart-rankings` 변경 판정을 R2 목록 etag 로 (매번 전량 PUT·429 해소)
 
 - 증상: `--all` 을 연달아 두 번 돌려도 `PUT 6455, skip 0` — 같은 내용을 매번 전부 PUT 해 Cloudflare API 한도(5분 1200건) 429 로 수백 차트가 실패했다.
