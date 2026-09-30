@@ -140,6 +140,19 @@ export async function loadPersonaResources() {
   };
 }
 
+// DP 배치를 계산용 행에만 결합한다. 값 해석은 calcWeakness의 normArrange에 맡긴다.
+export function attachArrange(rows, arrangeRows) {
+  if (!Array.isArray(arrangeRows)) throw new TypeError('chart_arrange 응답이 배열이 아님');
+  if (arrangeRows.length === 0) return rows;
+  const byChart = new Map();
+  for (const r of arrangeRows) {
+    if (r?.play_style === 1) byChart.set(`${r.song_id}|${r.diff}`, r.arrange);
+  }
+  return rows.map((r) => {
+    const key = `${r.song_id}|${r.diff}`;
+    return byChart.has(key) ? { ...r, arrange: byChart.get(key) } : r;
+  });
+}
 // make_grid_data raw row(title/diff/ex_score/lamp/textage_song_id) → calcUserWeakness 입력 차트 배열.
 export function chartsFromGridRows(rows, textageMeta) {
   const out = [];
@@ -161,6 +174,7 @@ export function chartsFromGridRows(rows, textageMeta) {
       title: r.title, textageSongId: r.textage_song_id, diff, exScore: typeof r.ex_score === 'number' ? r.ex_score : 0,
       noteCount, gameLevel, lamp: lampNum, lampNum,
       missCount: typeof r.bp === 'number' ? r.bp : null,   // bp(미스카운트) — calcUserWeakness 의 bp 반영 보정용
+      ...(Object.hasOwn(r, 'arrange') ? { arrange: r.arrange } : {}),
     });
   }
   return out;
@@ -612,7 +626,8 @@ export function personaFor(allCharts, R, userRow = null) {
       for (const e of vec.__entries || []) {
         if (!e || typeof e.residual !== 'number' || !e.chartId) continue;
         const [sid, cn] = e.chartId.split('|');
-        const sc = R.featScores[sid] && R.featScores[sid][cn];
+        let sc = R.featScores[sid] && R.featScores[sid][cn];
+        if (sc && e.arrange) sc = R.weaknessLib.arrangeFeatureScores(sc, e.arrange);   // §27 — calcWeakness와 같은 배치 변환
         const raw = sc ? def.of(sc) : 0;
         const v = typeof raw === 'number' ? raw : 0;
         if (v < 40) continue;   // 해당 축이 유의미한 곡만(quantile 40+)

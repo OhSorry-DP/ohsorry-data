@@ -69,6 +69,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-09-30 — persona 가 유저 배치 입력(§27 A-5)을 반영
+
+- dump-user 가 Supabase chart_arrange(DP) 를 읽어 persona 계산 입력 차트에 arrange 로 전달(persona-lib attachArrange). 정규화·랜덤 채보 제외는 gist calcWeakness normArrange.
+- persona layoutProfile 도 entry.arrange 가 있으면 arrangeFeatureScores 로 변환해 읽음. nCharts·MAX- 통계·reachNps 는 전체 차트 기준 유지, 배치 없는 유저는 출력 바이트 동일.
+- r2-repersona 도 실행당 1회 전량 조회 후 같은 결합(dp-arrange.mjs 공용 조회 — 페이징·전체 행수 검증, 실패 시 fail-closed). repersona-r2.yml 에 Supabase 시크릿 전달.
+- 테스트: persona-arrange.test.mjs · dp-arrange.test.mjs.
+
 ### 2026-09-30 — `dump-chart-dist` 신설: 곡 상세 §17 실력대 분포 공개 파일 (미배포)
 
 - 차트당 익명 `[r★, rate]` 쌍 목록을 `dist/dp/{song_id}-{diff}.json` · `dist/sp/{song_id}-{diff}.json` 로 만든다. 본문 `{"v":1,"samples":[[r,rate],...]}` — rate 내림차순 → r 오름차순(null 은 뒤), r 소수 2자리 · rate 4자리.

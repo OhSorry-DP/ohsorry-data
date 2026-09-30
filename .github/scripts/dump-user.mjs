@@ -3,9 +3,10 @@
 //   ohSorryAdmin/scripts/dump-data-repo.js 의 단일유저판 — 스키마/RPC 동일하게 유지할 것.
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { loadPersonaResources, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
+import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
 import { getText } from './r2-client.mjs';
 import { computeDirtyCharts } from './ranking-dirty-charts.mjs';
+import { fetchDpArrange } from './dp-arrange.mjs';
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -80,7 +81,7 @@ async function readPreviousDump(id) {
 
 export async function dumpUser(id, personaRes, opts = {}) {
   const eid = encodeURIComponent(id);
-  const [user, radars, osPattern, dp, spResult, dpRecent, spRecent, prevResult] = await Promise.all([
+  const [user, radars, osPattern, dp, spResult, dpRecent, spRecent, prevResult, dpArrange] = await Promise.all([
     // dbr_pw 는 비밀(공개 repo·anon 노출 금지) → 명시 컬럼만 select(select=* 금지).
     rest(`users?iidx_id=eq.${eid}&select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,date,native_star,sp_cpi,sp_star`),
     rest(`user_radars?iidx_id=eq.${eid}&select=*`),
@@ -92,6 +93,7 @@ export async function dumpUser(id, personaRes, opts = {}) {
     rpcUpdateHistory(id, 1).catch(() => null),   // DP 갱신 이력 — RPC 미적용/실패 시 null(필드 생략)
     rpcUpdateHistory(id, 0).catch(() => null),   // SP 갱신 이력 — SP 연습추천 피처 recency 용
     readPreviousDump(id),
+    fetchDpArrange(id),   // 실패는 DP grid와 같이 덤프 전체 중단 — 배치 없음으로 대체하지 않는다.
   ]);
   const { prevOk, prev } = prevResult;
   // ── persona (DP)/spPersona (SP) 성향 리포트 — raw grid rows 로 슬림 전에 산출. 실패 시 이전값 유지, 이전 상태도 모르면 중단. ──
@@ -99,7 +101,7 @@ export async function dumpUser(id, personaRes, opts = {}) {
   let personaError = null;
   let dpCharts = null;
   try {
-    dpCharts = chartsFromGridRows(dp, personaRes.textageMeta);
+    dpCharts = chartsFromGridRows(attachArrange(dp, dpArrange), personaRes.textageMeta);
     persona = personaFor(dpCharts, personaRes, user[0]);
   } catch (e) {
     personaError = e;

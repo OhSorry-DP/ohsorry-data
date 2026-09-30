@@ -1,4 +1,4 @@
-// r2-repersona.mjs — R2 서빙본의 persona/spPersona 만 제자리 재생성 (supabase 재조회 0).
+// r2-repersona.mjs — R2 서빙본의 persona/spPersona 재생성 (DP 배치만 Supabase 전량 조회).
 //
 // 왜 git → R2 단순 PUT 이면 안 되는가:
 //   dump-user 는 **R2 는 매 덤프마다 PUT / git 은 유저당 1일 1커밋** 이다(dump-user.yml 주석).
@@ -13,7 +13,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { loadPersonaResources, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
+import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
+import { fetchDpArrangeByUser } from './dp-arrange.mjs';
+
+// 자격 누락/조회 실패/불완전한 페이지는 R2 작업 전에 중단한다. 배치 없음으로 대체하지 않는다.
+const arrangeByUser = await fetchDpArrangeByUser();
 
 const BUCKET = 'ohsorry-data';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'r2repersona-'));
@@ -90,7 +94,7 @@ async function pool(items, n, fn) {
 // 슬림 row → grid row 복원 (backfill-personas.mjs 와 동일)
 const rowsOf = (slim) => (slim || []).map((r) => {
   const s = songById.get(r.song_id);
-  return s ? { title: s.title, textage_song_id: s.textage_song_id, diff: r.diff, ex_score: r.ex_score, lamp: r.lamp, bp: r.bp } : null;
+  return s ? { song_id: r.song_id, title: s.title, textage_song_id: s.textage_song_id, diff: r.diff, ex_score: r.ex_score, lamp: r.lamp, bp: r.bp } : null;
 }).filter(Boolean);
 
 const R = await loadPersonaResources();
@@ -162,7 +166,7 @@ await pool(ids, CONC, async (id) => {
   const snap = () => JSON.stringify([data.persona, data.spPersona, data.reachNps ?? null]);
   const before = snap();
   try {
-    const dpCharts = chartsFromGridRows(rowsOf(data.dp), R.textageMeta);
+    const dpCharts = chartsFromGridRows(attachArrange(rowsOf(data.dp), arrangeByUser.get(String(id)) || []), R.textageMeta);
     data.persona = personaFor(dpCharts, R, data.user);
     if (data.persona) dpOk++;
     // 도달 NPS — dump-user 와 같은 helper·같은 차트 배열로 재산출해 값을 일치시킨다(nps-reach.md §8.1).
