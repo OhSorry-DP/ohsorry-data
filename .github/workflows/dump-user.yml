@@ -108,6 +108,17 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
         run: node .github/scripts/dump-user.mjs "$IIDX_ID"
 
+      # 신곡 누락 시에만 공통 생성기로 갱신. 실패해도 병합·유저/이력 업로드를 계속한다.
+      - name: 누락 신곡 확인 및 songs.json 갱신
+        if: ${{ !cancelled() && steps.dump.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+        run: node .github/scripts/refresh-missing-songs.mjs "$IIDX_ID"
+
       - name: users-list 증분 병합 + R2 반영 (GET→PUT→검증→재시도)
         # 이 유저 1명을 전 유저 목록에 즉시 반영한다(신규 유저가 목록에 한참 안 보이던 문제 해소).
         #   전체 정합성(삭제 유저 정리·증분 누락 복구)은 dump-users-list 의 1일 1회 전체 재생성이 담당.

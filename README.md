@@ -69,6 +69,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-01 — dump-user 가 신곡을 보면 songs.json 즉시 재생성
+
+- 유저 덤프의 song_id(user dp/sp + hist) 중 R2 songs.json 에 없는 것이 있으면 Supabase songs 로 재생성해 R2 업로드(refresh-missing-songs.mjs). 없으면 비교만.
+- 생성 로직은 dump-users-list 와 공용(songs-lib.mjs — 출력 바이트 동일, 비배열 페이지는 부분 결과 대신 오류).
+- R2/Supabase 조회 실패·빈 결과·곡 수 감소·새로 찾은 곡 0 이면 업로드하지 않음. 단계 실패는 continue-on-error 로 본 덤프·users-list 병합을 막지 않음. 30분 예약·1일 1회 전체 재생성은 유지.
+
 ### 2026-09-30 — persona 가 유저 배치 입력(§27 A-5)을 반영
 
 - dump-user 가 Supabase chart_arrange(DP) 를 읽어 persona 계산 입력 차트에 arrange 로 전달(persona-lib attachArrange). 정규화·랜덤 채보 제외는 gist calcWeakness normArrange.

@@ -13,6 +13,7 @@
 //   node dump-users-list.mjs --users   → users-list.json 만
 import fs from 'node:fs';
 import { toSlim } from './users-list-slim.mjs';
+import { fetchAllSongs, serializeSongs } from './songs-lib.mjs';
 
 const ARGV = process.argv.slice(2);
 // 둘 다 지정하거나 아무것도 안 주면 → 둘 다 생성(기존 동작 유지).
@@ -71,16 +72,8 @@ if (DO_USERS) {
 
 // songs.json — 곡 마스터(공유). 신곡이 webhook 으로 들어와도 여기서 주기 갱신(변경 시에만 commit/upload).
 if (DO_SONGS) {
-  const songs = [];
-  for (let off = 0; ; off += 1000) {
-    const r = await fetch(SB + `/rest/v1/songs?select=song_id,title,ac,legen,textage_song_id,series_no&order=song_id.asc&limit=1000&offset=${off}`, { headers: H });
-    if (!r.ok) throw new Error(`songs HTTP ${r.status}`);
-    const rows = await r.json();
-    if (!Array.isArray(rows) || !rows.length) break;
-    songs.push(...rows);
-    if (rows.length < 1000) break;
-  }
-  fs.writeFileSync('songs.json', JSON.stringify(songs));
+  const songs = await fetchAllSongs();
+  fs.writeFileSync('songs.json', serializeSongs(songs));
   console.log('songs.json 갱신:', songs.length, '곡');
 } else {
   console.log('songs.json 재생성 skip (--users)');
