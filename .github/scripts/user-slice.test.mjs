@@ -6,7 +6,7 @@ import path from 'node:path';
 import { buildUserSlice, publishUserSlice, writeUserSliceFile, USLICE_SHARDS } from './user-slice.mjs';
 import { md5 } from './r2-client.mjs';
 
-const data = () => ({ user: { iidx_id: 'A1', dj_name: 'DJ', date: '2026-10-02', secret: '제외' },
+const data = () => ({ user: { iidx_id: 'A1', dj_name: 'DJ', date: '2026-10-02', r_star: 1.5, star: 2.25, sp_star: null, secret: '제외' },
   dp: [{ song_id: 1, played_version: 30, diff: 2 }, { song_id: 17, played_version: 33, diff: 3 }, { song_id: 16, played_version: -10 }],
   sp: [{ song_id: 1, played_version: 99 }] });
 function fixture(overrides = {}) {
@@ -20,7 +20,7 @@ test('16 shard 분배·원본 행 보존·전체 DP 최대 버전', () => {
   const source = data(), before = JSON.stringify(source);
   const bundle = buildUserSlice('A1', source);
   assert.equal(USLICE_SHARDS, 16);
-  assert.deepEqual(bundle.summary, { v: 1, id: 'A1', date: source.user.date, u: { dj_name: 'DJ' }, dpSeriesMax: 33,
+  assert.deepEqual(bundle.summary, { v: 1, id: 'A1', date: source.user.date, u: { dj_name: 'DJ', star: 2.25, r_star: 1.5, sp_star: null }, dpSeriesMax: 33,
     shards: { r: { dp: [0, 1], sp: [1] }, h: { dp: [], sp: [] } } });
   assert.deepEqual(JSON.parse(bundle.objects['uslice/A1-r-dp-01.json']).songs, { 1: [source.dp[0]], 17: [source.dp[1]] });
   assert.equal(JSON.stringify(source), before);

@@ -82,7 +82,7 @@ https://data.iidx.in/version.json
 
 ### 2026-10-02 — R3d: 유저 곡 기록 slice 증분 생산
 
-- 고정 16 shard로 DP/SP 기록과 요약을 계산한다. 원본 user/hist JSON 생성·PUT은 유지하며 백필 없이 다음 단일 유저 덤프부터 생성한다.
+- 고정 16 shard로 DP/SP 기록과 요약을 계산한다. 요약 u 는 곡 셸이 읽는 dj_name·star·r_star·sp_star 원문. 원본 user/hist JSON 생성·PUT은 유지하며 백필 없이 다음 단일 유저 덤프부터 생성한다.
 - shard 목록 1회와 MD5 비교로 변경분만 PUT → 요약 PUT(같은 내용이면 생략) → 빈 shard DELETE 순서. 삭제를 요약보다 먼저 하면 옛 요약이 지워진 shard 를 가리켜 소비처가 장애로 읽는다.
 - slice 계산·업로드 실패는 경고와 rc=1로 기록하고 본 덤프와 격리한다. 본체 PUT 뒤 별도 continue-on-error 단계에서 업로드한다.
 - REST 공용 한도 1,200건/5분을 기준으로 slice 요청을 순차 250ms 간격으로 보낸다. 429 는 Retry-After 를 따르되 60초로 자르고(공용 `r2-client` — users-list 병합의 GET→PUT 레이스 창을 벌리지 않기 위해), 지시가 없으면 종전 백오프. 분산 실행 전체의 선제적 한도 보장은 하지 않는다.
