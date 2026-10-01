@@ -1,3 +1,7 @@
+// REST API가 If-Match / If-None-Match를 무시할 수 있어 원자적 경쟁 방지는 보장하지 않는다.
+// GET의 strong ETag가 없으면 기존 보유자 목록의 ETag와 본문 MD5를 비교한다.
+// --apply는 PUT 직후 새 목록 ETag와 올린 본문 MD5를 검증하고 불일치 시 실패한다.
+// 사후 검증은 이미 발생한 덮어쓰기를 복구하거나 이후 변경을 막지는 못한다.
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { DBR_HISTORY_COLS, normalizeDbrHistory, extendDbrPayload } from './dbr-history.mjs';
@@ -50,6 +54,7 @@ export async function run({ supabaseUrl, token, fetchImpl = fetch, pageSize = 10
   if (!r2) throw new Error('R2 클라이언트 없음');
   const entries = await r2.listEntries('dbr/');
   const owners = new Set();
+  const listedEtags = new Map(entries.map(({ key, etag }) => [key, etag ?? null]));
   for (const { key } of entries) {
     const match = /^dbr\/([A-Za-z0-9_-]+)\.json$/.exec(key);
     if (!match) throw new Error(`잘못된 DBR 객체 키: ${key}`);
@@ -67,7 +72,7 @@ export async function run({ supabaseUrl, token, fetchImpl = fetch, pageSize = 10
   // 전체 대상을 검증한 뒤 저장한다. 기존 보유자의 404도 객체 소실로 보고 중단한다.
   for (const id of [...byUser.keys()].sort()) {
     const key = `dbr/${id}.json`, source = byUser.get(id);
-    const previous = await r2.read(key);
+    const previous = await r2.read(key, listedEtags.get(key) ?? null);
     if (!previous && owners.has(id)) throw new Error(`목록에 있던 DBR 객체가 사라짐: ${key}`);
     const payload = previous ? JSON.parse(previous.body) : { scores: {} };
     duplicateKeys += source.length - normalizeDbrHistory(source).rows.length;

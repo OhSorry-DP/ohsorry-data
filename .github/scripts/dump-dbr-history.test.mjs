@@ -13,9 +13,12 @@ const row = (extra = {}) => ({ iidx_id: 'A', song_id: 1, diff: 3, lamp: 4, ex_sc
   play_style: 1, bp: 30, note_count: 500, score_id: 1, ...extra });
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers });
 const hash = (body) => createHash('sha256').update(body).digest('hex');
+const md5 = (body) => createHash('md5').update(body).digest('hex');
 
-function fixture({ pages = [[]], existing = {}, listed, putStatus = 200, onGet } = {}) {
+function fixture({ pages = [[]], existing = {}, listed, putStatus = 200, onGet,
+  getEtag = '"get-etag"', listEtags = {}, afterPutEtag } = {}) {
   const requests = [], puts = [], logs = [];
+  const uploaded = new Map();
   let pageIndex = 0;
   const entries = listed ?? Object.keys(existing);
   const fetchImpl = async (url, init) => {
@@ -31,19 +34,25 @@ function fixture({ pages = [[]], existing = {}, listed, putStatus = 200, onGet }
     }
     assert.equal(init.headers.Authorization, 'Bearer fake-r2');
     if (String(url).startsWith(base + '?')) {
+      const keys = [...new Set([...entries, ...uploaded.keys()])]
+        .filter((key) => key.startsWith(u.searchParams.get('prefix')));
       const second = u.searchParams.has('cursor');
-      return json({ result: (second ? entries.slice(1) : entries.slice(0, 1)).map((key) => ({ key, etag: 'list-etag' })),
-        ...(second || entries.length < 2 ? {} : { result_info: { cursor: 'NEXT' } }) });
+      return json({ result: (second ? keys.slice(1) : keys.slice(0, 1)).map((key) => ({ key,
+        etag: uploaded.has(key) ? (afterPutEtag === undefined ? md5(uploaded.get(key)) : afterPutEtag)
+          : (Object.hasOwn(listEtags, key) ? listEtags[key] : existing[key] ? md5(JSON.stringify(existing[key])) : null) })),
+        ...(second || keys.length < 2 ? {} : { result_info: { cursor: 'NEXT' } }) });
     }
     const key = decodeURIComponent(u.pathname.split('/objects/')[1]);
     assert.ok(key, '예상하지 못한 URL');
     if (init.method === 'GET') {
       assert.equal(init.headers['Accept-Encoding'], 'identity');
       if (onGet) { const response = onGet(key); if (response) return response; }
-      return existing[key] ? json(existing[key], 200, { etag: '"get-etag"' }) : new Response('', { status: 404 });
+      return existing[key] ? json(existing[key], 200, getEtag === null ? {} : { etag: getEtag })
+        : new Response('', { status: 404 });
     }
     assert.equal(init.method, 'PUT');
     puts.push({ key, ...init });
+    if (putStatus >= 200 && putStatus < 300) uploaded.set(key, init.body);
     return new Response('', { status: putStatus });
   };
   const r2 = conditionalR2Client({ account: 'fake-account', token: 'fake-r2', fetchImpl });
@@ -129,6 +138,91 @@ test('신규 객체 생성은 If-None-Match: * 조건으로만 PUT한다', async
   assert.equal(f.puts[0].headers['If-None-Match'], '*');
   assert.equal(f.puts[0].headers['If-Match'], undefined);
   assert.deepEqual(JSON.parse(f.puts[0].body).scores, {});
+  assert.equal(f.requests.at(-1).url, `${base}?prefix=dbr%2FA.json&per_page=1000`);
+});
+
+test('GET 헤더 없음·weak·잘못된 헤더는 기존 목록 MD5를 재사용하고 dry-run PUT은 0이다', async () => {
+  for (const getEtag of [null, 'W/"weak"', 'unquoted']) {
+    const f = fixture({ existing: { 'dbr/A.json': { scores: {} }, 'dbr/B.json': { scores: {} } }, getEtag });
+    const report = await run(f.options);
+    assert.equal(report.users, 2);
+    assert.equal(report.puts, 0);
+    assert.equal(f.puts.length, 0);
+    assert.equal(f.requests.filter((r) => r.url.startsWith(base + '?')).length, 2, '최초 페이지 목록만 재사용');
+  }
+});
+
+test('목록 ETag로 읽은 객체도 따옴표 있는 If-Match를 유지하고 PUT마다 새 목록을 검증한다', async () => {
+  const existing = { 'dbr/A.json': { scores: { old: '한글' } }, 'dbr/B.json': { scores: {} } };
+  const f = fixture({ existing, getEtag: null });
+  const report = await run({ ...f.options, apply: true });
+  assert.equal(report.puts, 2);
+  for (const put of f.puts) {
+    assert.equal(put.headers['If-Match'], `"${md5(JSON.stringify(existing[put.key]))}"`);
+    const putIndex = f.requests.findIndex((request) => request.method === 'PUT' && request.body === put.body);
+    assert.equal(f.requests[putIndex + 1].url, `${base}?prefix=${encodeURIComponent(put.key)}&per_page=1000`);
+    assert.equal(f.requests[putIndex + 1].method, 'GET');
+  }
+});
+
+test('strong GET ETag가 있으면 목록 ETag보다 우선한다', async () => {
+  const f = fixture({ existing: { 'dbr/A.json': { scores: {} } }, listEtags: { 'dbr/A.json': 'wrong' } });
+  await run({ ...f.options, apply: true });
+  assert.equal(f.puts[0].headers['If-Match'], '"get-etag"');
+});
+
+test('결함 주입: 목록과 GET 사이 본문 변경은 MD5 불일치로 모든 PUT 전에 중단한다', async () => {
+  const f = fixture({ existing: { 'dbr/A.json': { scores: {} }, 'dbr/B.json': { scores: {} } }, getEtag: null,
+    onGet: (key) => key === 'dbr/B.json' ? json({ scores: { changed: true } }) : null });
+  await assert.rejects(run({ ...f.options, apply: true }), /R2 GET dbr\/B.json: 목록 ETag와 본문 MD5 불일치/);
+  assert.equal(f.puts.length, 0);
+});
+
+test('GET와 목록 모두 유효 ETag가 없으면 PUT 전에 중단한다', async () => {
+  for (const etag of [null, '', 'W/"weak"', 'multipart-2']) {
+    const f = fixture({ existing: { 'dbr/A.json': { scores: {} } }, getEtag: null,
+      listEtags: { 'dbr/A.json': etag } });
+    await assert.rejects(run({ ...f.options, apply: true }), /strong ETag 없음/);
+    assert.equal(f.puts.length, 0);
+  }
+});
+
+test('결함 주입: PUT 성공 응답 뒤 목록 ETag 불일치·누락이면 실패하고 후속 PUT·재시도는 없다', async () => {
+  for (const afterPutEtag of ['0'.repeat(32), null]) {
+    const f = fixture({ existing: { 'dbr/A.json': { scores: {} }, 'dbr/B.json': { scores: {} } }, afterPutEtag });
+    await assert.rejects(run({ ...f.options, apply: true }), /R2 PUT dbr\/A.json: 사후 목록 ETag와 본문 MD5 검증 실패/);
+    assert.equal(f.puts.length, 1);
+    assert.equal(f.requests.at(-1).url, `${base}?prefix=dbr%2FA.json&per_page=1000`);
+  }
+});
+
+test('클라이언트 단독 읽기는 정확한 키의 목록 ETag와 원본 바이트 MD5를 검증한다', async () => {
+  const bytes = Buffer.from('\ufeff{"scores":{},"label":"한글"}', 'utf8');
+  const digest = md5(bytes), requests = [];
+  const client = conditionalR2Client({ account: 'fake-account', token: 'fake', fetchImpl: async (url, init) => {
+    requests.push({ url, ...init });
+    assert.equal(init.method, 'GET');
+    if (String(url).includes('?')) {
+      return json({ result: [{ key: 'dbr/A.json.other', etag: '0'.repeat(32) },
+        { key: 'dbr/A.json', etag: `"${digest.toUpperCase()}"` }] });
+    }
+    return new Response(bytes);
+  } });
+  assert.deepEqual(await client.read('dbr/A.json'), { body: '{"scores":{},"label":"한글"}', etag: `"${digest}"` });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].url, `${base}?prefix=dbr%2FA.json&per_page=1000`);
+});
+
+test('PUT 사후 검증은 prefix의 다른 키를 인정하지 않고 목록 조회 오류도 실패로 전파한다', async () => {
+  for (const listResponse of [json({ result: [{ key: 'dbr/A.json.other', etag: md5('{}') }] }), json({}, 403)]) {
+    const methods = [];
+    const client = conditionalR2Client({ account: 'fake-account', token: 'fake', fetchImpl: async (url, init) => {
+      methods.push(init.method);
+      return init.method === 'PUT' ? new Response('') : listResponse;
+    } });
+    await assert.rejects(client.put('dbr/A.json', '{}', null), /사후 목록 ETag와 본문 MD5 검증 실패|R2 LIST dbr\/A.json HTTP 403/);
+    assert.deepEqual(methods, ['PUT', 'GET']);
+  }
 });
 
 test('결함 주입: ETag 경쟁 412는 중단하고 무조건 PUT·재시도하지 않는다', async () => {

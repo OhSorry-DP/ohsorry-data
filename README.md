@@ -69,6 +69,10 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-01 — DBR 백필: REST GET 에 ETag 가 없을 때 목록 ETag 사용
+
+- Cloudflare REST 객체 GET 응답에 strong ETag 가 없어 dry-run 이 중단되던 것 수정: 목록 항목 etag 를 쓰고 GET 본문 md5 와 대조(불일치면 중단). `--apply` 는 PUT 직후 목록 etag 로 올린 본문을 검증. REST 가 조건부 헤더를 무시할 수 있다는 한계는 스크립트 머리 주석에 명시.
+
 ### 2026-10-01 — DBR 날짜 이력 백필 생성기 (R-5d, 🔴 미실행)
 
 - `dump-dbr-history.mjs` + 수동 workflow `dump-dbr-history.yml`(dry_run 기본): DBR 행을 score_id 키셋 페이징으로 읽어 유저별 `dbr/{ID}.json` history 병합(scores 보존·기존 보유자 포함·ETag 조건부 PUT). `r2-client.mjs` 에 fetch 주입·조건부 읽기/PUT 헬퍼 추가(기존 함수 기본 동작 무변경).

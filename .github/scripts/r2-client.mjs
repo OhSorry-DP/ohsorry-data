@@ -127,25 +127,45 @@ export function conditionalR2Client({ account, token, fetchImpl = fetch } = {}) 
   const base = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${BUCKET}/objects`;
   const options = { base, token, fetchImpl };
   const objectKey = (key) => key.split('/').map(encodeURIComponent).join('/');
+  const strongEtag = (etag) => typeof etag === 'string' && /^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag);
+  // 목록 ETag는 단일 파트 MD5만 허용하며 조건부 헤더에는 따옴표를 붙인다.
+  const listMd5 = (etag) => {
+    if (typeof etag !== 'string') return null;
+    const value = etag.replace(/^"([a-fA-F0-9]{32})"$/, '$1');
+    return /^[a-fA-F0-9]{32}$/.test(value) ? value.toLowerCase() : null;
+  };
+  const currentEtag = async (key) => {
+    const entries = (await listEntries(key, options)).filter((entry) => entry.key === key);
+    if (entries.length > 1) throw new Error(`R2 LIST ${key}: 중복 객체 키`);
+    return entries[0]?.etag;
+  };
   return {
     listEntries: (prefix) => listEntries(prefix, options),
-    async read(key) {
+    async read(key, listedEtag) {
       const r = await restFetch('/' + objectKey(key), {
         method: 'GET', headers: { 'Accept-Encoding': 'identity' },
       }, 4, base, options);
       if (r.status === 404) return null;
       if (!r.ok) throw new Error(`R2 GET ${key} HTTP ${r.status}`);
       const etag = r.headers.get('etag');
-      if (!etag || /^W\//i.test(etag)) throw new Error(`R2 GET ${key}: strong ETag 없음`);
-      return { body: await r.text(), etag };
+      const bytes = Buffer.from(await r.arrayBuffer());
+      const body = new TextDecoder().decode(bytes);
+      if (strongEtag(etag)) return { body, etag };
+      const digest = listMd5(listedEtag === undefined ? await currentEtag(key) : listedEtag);
+      if (!digest) throw new Error(`R2 GET ${key}: strong ETag 없음 (목록 MD5 ETag도 없음)`);
+      if (digest !== md5(bytes)) throw new Error(`R2 GET ${key}: 목록 ETag와 본문 MD5 불일치`);
+      return { body, etag: `"${digest}"` };
     },
     async put(key, body, etag) {
-      if (etag !== null && (!etag || /^W\//i.test(etag))) throw new Error('조건부 PUT ETag 없음');
+      if (etag !== null && !strongEtag(etag)) throw new Error('조건부 PUT ETag 없음');
       const headers = { 'Content-Type': contentTypeOf(key),
         ...(etag === null ? { 'If-None-Match': '*' } : { 'If-Match': etag }) };
       // 조건부 PUT은 응답 유실 뒤 재시도하면 412가 될 수 있으므로 자동 재시도하지 않는다.
       const r = await restFetch('/' + objectKey(key), { method: 'PUT', body, headers }, 1, base, options);
       if (!r.ok) throw new Error(`R2 PUT ${key} HTTP ${r.status}`);
+      // 최초 목록을 재사용하지 않고 PUT 직후 해당 키를 다시 확인한다.
+      const digest = listMd5(await currentEtag(key));
+      if (!digest || digest !== md5(body)) throw new Error(`R2 PUT ${key}: 사후 목록 ETag와 본문 MD5 검증 실패`);
     },
   };
 }
