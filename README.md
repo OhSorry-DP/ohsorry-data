@@ -69,6 +69,10 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-01 — DBR 날짜 이력 계약·계산기 (R-5a, 로컬)
+
+- `dbr-history.mjs`: `dbr/{ID}.json` 호환 확장용 `history`(hist 10열 + score_id) 정규화·병합(같은 날 교체)·검증과 DBR Recent 날짜 목록·날짜별 행·직전값 계산(make_recent_* 패리티). 아직 덤프·업로드 연결 없음.
+
 ### 2026-10-01 — dump-user 가 신곡을 보면 songs.json 즉시 재생성
 
 - 유저 덤프의 song_id(user dp/sp + hist) 중 R2 songs.json 에 없는 것이 있으면 Supabase songs 로 재생성해 R2 업로드(refresh-missing-songs.mjs). 없으면 비교만.
