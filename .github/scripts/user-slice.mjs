@@ -1,5 +1,6 @@
 // 유저 곡 조각 정본 — 원본 행과 순서를 바꾸지 않는다.
 import fs from 'node:fs';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { listEntries, getText, putText, del, md5 } from './r2-client.mjs';
 
@@ -68,11 +69,13 @@ export function writeUserSliceFile(id, data, file, options = {}) {
     const hist = options.histFile ? JSON.parse(fs.readFileSync(options.histFile, 'utf8')) : (options.hist || []);
     const bundle = (options.build || buildUserSlice)(id, data, hist);
     for (const warning of bundle.warnings || []) (options.log || console).warn(`::warning::slice(${id}): ${warning}`);
+    // user/ 밖에 둔다 — r2-repersona·backfill-personas 가 user/*.json 을 전부 유저 덤프로 읽는다.
+    fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ ok: true, ...bundle }));
     return { ok: true, rc: 0 };
   } catch (e) {
     (options.log || console).warn(`::warning::slice 계산 실패(${id}): ${e.message}`);
-    try { fs.writeFileSync(file, JSON.stringify({ ok: false, error: e.message })); } catch (writeError) {
+    try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify({ ok: false, error: e.message })); } catch (writeError) {
       (options.log || console).warn(`::warning::slice 실패 기록 불가(${id}): ${writeError.message}`);
     }
     return { ok: false, rc: 1 };
@@ -126,7 +129,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   const id = process.argv[2];
   try {
     if (!validId(id)) throw new Error('iidx_id 형식 오류');
-    const bundle = JSON.parse(fs.readFileSync(`user/${id}.uslice.json`, 'utf8'));
+    const bundle = JSON.parse(fs.readFileSync(`uslice-out/${id}.json`, 'utf8'));
     const result = await publishUserSlice(id, bundle);
     console.log('slice 결과:', JSON.stringify(result));
     process.exitCode = result.rc;
