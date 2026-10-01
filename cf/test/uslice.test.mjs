@@ -68,3 +68,15 @@ test('열거 한도 초과는 기존 10초 대기·IP 및 바인딩 없음은 �
     assert.deepEqual(d.calls.waits, [10000]);
   } finally { globalThis.setTimeout = originalTimer; }
 });
+
+test('vec-dp 허용·fresh 우회·열거 한도·HEAD와 비계약 vec 거부', async () => {
+  const d = fixture(), key = 'uslice/a1-vec-dp.json';
+  await d.cache.put(new Request('https://local.invalid/__etag/' + key), new Response(JSON.stringify({ etag: '"old"', t: Date.now() })));
+  const response = await d.fetch(key + '?fresh=1', { headers: { 'CF-Connecting-IP': '127.0.0.1' } });
+  assert.equal(response.status, 200); assert.equal(response.headers.get('etag'), '"new"');
+  assert.equal(d.calls.limit.length, 1); assert.equal(d.calls.head.at(-1), key);
+  assert.equal((await d.fetch(key, { method: 'HEAD' })).status, 200);
+  for (const invalid of ['uslice/A1-vec-sp.json', 'uslice/A1-vec-DP.json', 'uslice/A1-vec-dp-00.json', 'uslice/A_1-vec-dp.json', 'meta/uvec-state.json']) {
+    assert.equal((await d.fetch(invalid)).status, 404, invalid);
+  }
+});

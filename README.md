@@ -69,6 +69,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-02 — R6: 유저 벡터 slice 재계산기 · Worker `-vec-dp` 허용 (로컬 구현, 미게시·미배포)
+
+- `dump-uvec.mjs`: iidx.in 에 배포된 웹 v3 모듈(`v3/services/uvec-slice.js` import 그래프)을 받아 `computeUvecSlice` 로 `uslice/{ID}-vec-dp.json`을 만든다 — 벡터 계산식 손사본 없음. `user/`·`arrange/` 원문은 R2 REST로 읽는다.
+- 재계산 대상: user/·arrange/ ETag 변경 · 신규 · 입력 키(웹 모듈·계산 중 받은 자산 ETag 묶음) 변경 시 전원. 상태는 `meta/uvec-state.json`. 회당 100명·요청 간격 250ms·429 대기. 유저 데이터 때문의 계산 실패는 건너뛰고 다음 회차 재시도, 입력·자산 조회 장애는 회차 중단. 기본 dry-run, workflow `dump-uvec` cron(20·50분) = apply.
+- Worker `USLICE_RE`에 `-vec-dp` 추가(배포 전엔 웹이 404 → 전체 경로로 폴백).
+
 ### 2026-10-02 — R6: 곡 패턴 slice 생성 (로컬 구현, 미게시)
 
 - R2 `data/patterns-dp-{1112,0810,rest}.json` 3밴드에서 곡별 `data/song-patterns-dp-<textage ID hex>.json`(`{ v:1, id, c }`)을 만든다. 같은 채보가 두 밴드에 있으면 중단한다. 곡 상세 best 배치가 패턴 밴드 전체(4.4~16MB)를 받지 않게 하는 입력이다.

@@ -21,7 +21,7 @@ const USER_RE = /^user\/[A-Za-z0-9]+\.json$/;
 //   user/ 와 분리한 이유: 카드 첫 로딩에 딸려오면 응답이 느려지는데, 정작 필요한 건 모달을 열 때뿐이다.
 const HIST_RE = /^hist\/[A-Za-z0-9]+\.json$/;
 // 곡 기록·이력 조각 및 요약 — 계약의 키 정규식을 그대로 사용한다.
-const USLICE_RE = /^uslice\/[A-Za-z0-9]+(-[rh]-(dp|sp)-\d{2})?\.json$/;
+const USLICE_RE = /^uslice\/[A-Za-z0-9]+(-[rh]-(dp|sp)-\d{2}|-vec-dp)?\.json$/;
 const ARRANGE_RE = /^arrange\/[A-Za-z0-9]+\.json$/;
 const DBR_RE = /^dbr\/[A-Za-z0-9]+\.json$/;
 const RANKING_RE = /^ranking\/\d+-\d+\.json$/; // 곡 상세에서 1건씩 조회하는 공개 집계 자산
