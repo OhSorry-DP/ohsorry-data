@@ -1,0 +1,39 @@
+name: dump-dbr-history
+# Supabase 읽기는 수동 덤프에서만 사용한다. 기본 실행은 PUT 없는 미리보기다.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '통계와 해시만 출력 (R2 PUT 없음)'
+        type: boolean
+        default: true
+        required: true
+concurrency: { group: dump-dbr-history, cancel-in-progress: false }
+permissions: { contents: read }
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: 주입형 테스트
+        run: node --test .github/scripts/*.test.mjs
+      - name: DBR 날짜 이력 덤프
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            node .github/scripts/dump-dbr-history.mjs --dry-run
+          elif [ "$DRY_RUN" = "false" ]; then
+            node .github/scripts/dump-dbr-history.mjs --apply
+          else
+            echo 'dry_run 입력이 true/false가 아니므로 중단' >&2
+            exit 1
+          fi

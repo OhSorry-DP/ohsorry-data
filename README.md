@@ -69,6 +69,10 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-01 — DBR 날짜 이력 백필 생성기 (R-5d, 🔴 미실행)
+
+- `dump-dbr-history.mjs` + 수동 workflow `dump-dbr-history.yml`(dry_run 기본): DBR 행을 score_id 키셋 페이징으로 읽어 유저별 `dbr/{ID}.json` history 병합(scores 보존·기존 보유자 포함·ETag 조건부 PUT). `r2-client.mjs` 에 fetch 주입·조건부 읽기/PUT 헬퍼 추가(기존 함수 기본 동작 무변경).
+
 ### 2026-10-01 — DBR 날짜 이력 계약·계산기 (R-5a, 로컬)
 
 - `dbr-history.mjs`: `dbr/{ID}.json` 호환 확장용 `history`(hist 10열 + score_id) 정규화·병합(같은 날 교체)·검증과 DBR Recent 날짜 목록·날짜별 행·직전값 계산(make_recent_* 패리티). 아직 덤프·업로드 연결 없음.

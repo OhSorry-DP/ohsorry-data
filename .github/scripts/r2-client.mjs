@@ -61,11 +61,11 @@ function wrangler(args) {
   return execFileSync(cmd[0], cmd[1], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
 }
 
-async function restFetch(key, init, tries = 4, base = REST_BASE) {
+async function restFetch(key, init, tries = 4, base = REST_BASE, options = {}) {
   for (let i = 0; i < tries; i++) {
-    const r = await fetch(base + key, {
+    const r = await (options.fetchImpl || fetch)(base + key, {
       ...init,
-      headers: { Authorization: `Bearer ${TOKEN}`, ...(init.headers || {}) },
+      headers: { Authorization: `Bearer ${options.token || TOKEN}`, ...(init.headers || {}) },
     });
     if (r.status === 429 || r.status >= 500) {
       if (i === tries - 1) return r;
@@ -103,14 +103,14 @@ export async function getText(key) {
 
 // 슬래시 없는 objects?prefix=여야 하며, 슬래시가 있으면 404(10007)가 난다.
 // 마지막 페이지에는 result_info가 없을 수 있다.
-export async function listEntries(prefix) {
-  if (!useRest) throw new Error('R2 list는 REST 모드에서만 지원');
+export async function listEntries(prefix, options = {}) {
+  if (!useRest && !options.token) throw new Error('R2 list는 REST 모드에서만 지원');
   const entries = [];
   let cursor = '';
   do {
     const qs = new URLSearchParams({ prefix, per_page: '1000' });
     if (cursor) qs.set('cursor', cursor);
-    const r = await restFetch(`?${qs}`, { method: 'GET' }, 4, REST_BASE.slice(0, -1));
+    const r = await restFetch(`?${qs}`, { method: 'GET' }, 4, options.base || REST_BASE.slice(0, -1), options);
     if (!r.ok) throw new Error(`R2 LIST ${prefix} HTTP ${r.status}`);
     const body = await r.json();
     if (!Array.isArray(body.result)) throw new Error('R2 LIST result가 배열이 아님');
@@ -118,6 +118,36 @@ export async function listEntries(prefix) {
     cursor = body.result_info?.cursor || '';
   } while (cursor);
   return entries;
+}
+
+// 조건부 갱신은 REST만 사용한다. GET 본문의 ETag로 잠그고 새 객체는 생성만 허용한다.
+// fetch를 주입하면 자격증명이나 네트워크 없이 실제 REST 요청을 검증할 수 있다.
+export function conditionalR2Client({ account, token, fetchImpl = fetch } = {}) {
+  if (!account || !token) throw new Error('R2 REST account / token 없음');
+  const base = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${BUCKET}/objects`;
+  const options = { base, token, fetchImpl };
+  const objectKey = (key) => key.split('/').map(encodeURIComponent).join('/');
+  return {
+    listEntries: (prefix) => listEntries(prefix, options),
+    async read(key) {
+      const r = await restFetch('/' + objectKey(key), {
+        method: 'GET', headers: { 'Accept-Encoding': 'identity' },
+      }, 4, base, options);
+      if (r.status === 404) return null;
+      if (!r.ok) throw new Error(`R2 GET ${key} HTTP ${r.status}`);
+      const etag = r.headers.get('etag');
+      if (!etag || /^W\//i.test(etag)) throw new Error(`R2 GET ${key}: strong ETag 없음`);
+      return { body: await r.text(), etag };
+    },
+    async put(key, body, etag) {
+      if (etag !== null && (!etag || /^W\//i.test(etag))) throw new Error('조건부 PUT ETag 없음');
+      const headers = { 'Content-Type': contentTypeOf(key),
+        ...(etag === null ? { 'If-None-Match': '*' } : { 'If-Match': etag }) };
+      // 조건부 PUT은 응답 유실 뒤 재시도하면 412가 될 수 있으므로 자동 재시도하지 않는다.
+      const r = await restFetch('/' + objectKey(key), { method: 'PUT', body, headers }, 1, base, options);
+      if (!r.ok) throw new Error(`R2 PUT ${key} HTTP ${r.status}`);
+    },
+  };
 }
 
 export async function list(prefix) {
