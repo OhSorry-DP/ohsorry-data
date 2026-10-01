@@ -69,6 +69,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-02 — R6: 곡 패턴 slice 생성 (로컬 구현, 미게시)
+
+- R2 `data/patterns-dp-{1112,0810,rest}.json` 3밴드에서 곡별 `data/song-patterns-dp-<textage ID hex>.json`(`{ v:1, id, c }`)을 만든다. 같은 채보가 두 밴드에 있으면 중단한다. 곡 상세 best 배치가 패턴 밴드 전체(4.4~16MB)를 받지 않게 하는 입력이다.
+- 기본 dry-run, `--apply`에서만 md5 증분 PUT·DELETE. 회당 최대 500건, 요청 간격 250ms, 기존 대비 5%(최소 20건) 초과 삭제는 중단. workflow `dump-song-patterns`는 cron(10·40분) = apply, 수동 = dry-run.
+
 ### 2026-10-02 — R2: 곡 상세 공용 메타 묶음 생성 (로컬 구현, 미게시)
 
 - R2의 songs·textage-meta·rating-slim·series-name·zasa 원본 5개에서 `data/song-meta-<songId>.json` 계약 v1을 생성한다. 같은 제목의 모든 변종 id·버전과 원본 순서, DP/SP 제목 폴백 후보를 보존한다.
