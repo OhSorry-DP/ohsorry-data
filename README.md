@@ -69,6 +69,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-02 — R2: 곡 상세 공용 메타 묶음 생성 (로컬 구현, 미게시)
+
+- R2의 songs·textage-meta·rating-slim·series-name·zasa 원본 5개에서 `data/song-meta-<songId>.json` 계약 v1을 생성한다. 같은 제목의 모든 변종 id·버전과 원본 순서, DP/SP 제목 폴백 후보를 보존한다.
+- 기본 dry-run이며 `node .github/scripts/dump-song-meta.mjs --apply`에서만 변경된 md5의 PUT·사라진 곡 DELETE를 수행한다. 원본 조회/파싱/검증 또는 목록 실패 시 쓰기 전에 중단한다. 회당 PUT+DELETE 최대 500건, 페이지·재시도 포함 실제 REST 요청 간격 최소 250ms다.
+- 새 workflow는 30분 cron과 수동 dispatch를 제공하고 동시 실행을 막는다. 수동은 기본 dry-run, cron은 apply이며 나머지는 다음 회차로 넘긴다. 기존 전체 자산·Worker는 유지한다.
+- 🔴 곡명 norm 은 R2 `lib/normTitle.js`(마스터 게시본)를 받아 쓴다 — 손사본 금지. 기존 묶음 대비 5%(최소 20건)를 넘는 삭제는 원본 이상으로 보고 중단한다.
+
 ### 2026-10-02 — Wk: Worker uslice 서빙 허용
 
 - 계약의 USLICE_RE를 그대로 허용하고 요약·기록·이력에 fresh=1 우회와 기존 열거 감속을 적용한다.
