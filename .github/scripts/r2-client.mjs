@@ -61,6 +61,8 @@ function wrangler(args) {
   return execFileSync(cmd[0], cmd[1], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
 }
 
+const RETRY_AFTER_MAX_MS = 60_000;
+
 async function restFetch(key, init, tries = 4, base = REST_BASE, options = {}) {
   for (let i = 0; i < tries; i++) {
     const r = await (options.fetchImpl || fetch)(base + key, {
@@ -69,7 +71,15 @@ async function restFetch(key, init, tries = 4, base = REST_BASE, options = {}) {
     });
     if (r.status === 429 || r.status >= 500) {
       if (i === tries - 1) return r;
-      await new Promise((s) => setTimeout(s, 500 * (i + 1) * (i + 1)));
+      // 429 에 Retry-After 가 있으면 따르되 60초로 자른다 — 이 헬퍼는 users-list 병합(GET→PUT→검증)도 쓰므로
+      //   몇 분씩 기다리면 read-modify-write 레이스 창이 그만큼 벌어진다. 지시가 없으면 종전 백오프.
+      const retryAfter = r.headers.get('retry-after');
+      const retryMs = retryAfter === null ? NaN : (/^\d+(\.\d+)?$/.test(retryAfter)
+        ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now());
+      const waitMs = r.status === 429 && Number.isFinite(retryMs) && retryMs >= 0
+        ? Math.min(retryMs, RETRY_AFTER_MAX_MS)
+        : 500 * (i + 1) * (i + 1);
+      await (options.sleep || ((ms) => new Promise((s) => setTimeout(s, ms))))(waitMs);
       continue;
     }
     return r;

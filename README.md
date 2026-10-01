@@ -69,6 +69,24 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-02 — Wk: Worker uslice 서빙 허용
+
+- 계약의 USLICE_RE를 그대로 허용하고 요약·기록·이력에 fresh=1 우회와 기존 열거 감속을 적용한다.
+- 허용·거부 키, fresh 메모 우회, 캐시 HIT 감속 및 공용 경로 제외를 로컬 Worker 테스트로 검증한다. Worker 정규식은 계약대로 두 자리 NN을 허용하며 생산자는 00~15만 생성한다.
+- `node --test .github/scripts/*.test.mjs cf/test/*.test.mjs`로 전체 테스트를 실행한다. 로컬 크기 분포는 `node .github/scripts/user-slice-sample.mjs 4f761cb18^`로 계산한다(Git의 과거 user 원본과 현재 로컬 hist 샘플, 네트워크·파일 쓰기 없음).
+
+### 2026-10-02 — R4d: 유저 곡 이력 slice 추가
+
+- hist 정본의 song_id(0번째)·play_style(7번째, SP=0/DP=1)로 모드·곡별 이력 shard를 추가한다. 8열 과거 행과 10열 현재 행, DBR 및 행 순서를 변형 없이 보존한다.
+- 모드 정보가 전부 없으면 경고와 함께 DP만 생성한다. 일부 누락·알 수 없는 모드는 slice 실패로 처리하고 본체 덤프는 유지한다.
+
+### 2026-10-02 — R3d: 유저 곡 기록 slice 증분 생산
+
+- 고정 16 shard로 DP/SP 기록과 요약을 계산한다. 원본 user/hist JSON 생성·PUT은 유지하며 백필 없이 다음 단일 유저 덤프부터 생성한다.
+- shard 목록 1회와 MD5 비교로 변경분만 PUT → 요약 PUT(같은 내용이면 생략) → 빈 shard DELETE 순서. 삭제를 요약보다 먼저 하면 옛 요약이 지워진 shard 를 가리켜 소비처가 장애로 읽는다.
+- slice 계산·업로드 실패는 경고와 rc=1로 기록하고 본 덤프와 격리한다. 본체 PUT 뒤 별도 continue-on-error 단계에서 업로드한다.
+- REST 공용 한도 1,200건/5분을 기준으로 slice 요청을 순차 250ms 간격으로 보낸다. 429 는 Retry-After 를 따르되 60초로 자르고(공용 `r2-client` — users-list 병합의 GET→PUT 레이스 창을 벌리지 않기 위해), 지시가 없으면 종전 백오프. 분산 실행 전체의 선제적 한도 보장은 하지 않는다.
+
 ### 2026-10-01 — DBR 백필: REST GET 에 ETag 가 없을 때 목록 ETag 사용
 
 - Cloudflare REST 객체 GET 응답에 strong ETag 가 없어 dry-run 이 중단되던 것 수정: 목록 항목 etag 를 쓰고 GET 본문 md5 와 대조(불일치면 중단). `--apply` 는 PUT 직후 목록 etag 로 올린 본문을 검증. REST 가 조건부 헤더를 무시할 수 있다는 한계는 스크립트 머리 주석에 명시.

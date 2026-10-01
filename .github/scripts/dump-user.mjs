@@ -7,6 +7,7 @@ import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, sp
 import { getText } from './r2-client.mjs';
 import { computeDirtyCharts } from './ranking-dirty-charts.mjs';
 import { fetchDpArrange } from './dp-arrange.mjs';
+import { writeUserSliceFile } from './user-slice.mjs';
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -269,6 +270,8 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     }
     fs.writeFileSync(`user/${id}.json`, JSON.stringify(data));
     const h = await updateHistFile(id, `hist/${id}.json`);
+    const slice = writeUserSliceFile(id, data, `user/${id}.uslice.json`, { histFile: `hist/${id}.json` });
+    console.log('slice 계산:', id, '| rc', slice.rc);
     console.log('덤프:', id, '| dp', data.dp.length, 'sp', data.sp.length, '| persona', data.persona ? 'OK' : '없음', '| spPersona', data.spPersona ? 'OK' : '없음',
       '| hist', h.rows + '행', h.rebuilt ? '(재생성)' : '(변경없음)');
   }

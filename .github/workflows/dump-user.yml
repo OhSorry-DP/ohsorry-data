@@ -193,3 +193,16 @@ jobs:
           #   올린다(내용 동일 · ingress 무료 · Class A 는 월 100만 중 하루 70여 회).
           if [ -f "hist/$IIDX_ID.json" ]; then put "hist/$IIDX_ID.json"; else echo "::warning::hist 파일 없음 — PUT skip"; fi
           exit $rc
+
+      # 본체 PUT을 먼저 끝낸다. slice 실패는 경고·실패 outcome으로 남기고 본 덤프와 격리한다.
+      - name: uslice 증분 PUT 및 빈 shard DELETE
+        if: ${{ !cancelled() && steps.dump.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::warning::R2 토큰 없음 — slice 실패"; exit 1
+          fi
+          node .github/scripts/user-slice.mjs "$IIDX_ID"
