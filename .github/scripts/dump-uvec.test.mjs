@@ -206,3 +206,11 @@ test('vec가 이미 없는 탈퇴 유저의 상태도 제거', async (t) => {
   await f.run({ apply: true });
   assert.ok(!JSON.parse(f.objects.get('meta/uvec-state.json')).users.A1);
 });
+test('계산 중 전역 fetch 로 들어온 R2 REST 요청은 자산으로 기록하지 않고 그대로 통과', async () => {
+  const seen = [], assets = {};
+  const network = async (url) => { seen.push(String(url)); return new Response('{}', { status: 200, headers: { etag: '"x"' } }); };
+  const f = createSliceFetch({ read: async () => null, network, assets });
+  const url = 'https://api.cloudflare.com/client/v4/accounts/a/r2/buckets/b/objects/user%2FA1.json';
+  await f(url, { method: 'GET' }); await f(url, { method: 'PUT', body: '{}' });
+  assert.deepEqual(seen, [url, url]); assert.deepEqual(assets, {}); assert.equal(f.failures.length, 0);
+});

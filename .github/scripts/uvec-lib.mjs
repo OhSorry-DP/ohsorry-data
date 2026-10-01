@@ -104,6 +104,9 @@ export function createSliceFetch({ read, network, assets, base = 'https://iidx.i
   const fetchSlice = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), base);
     const key = url.pathname.replace(/^\//, '');
+    // R2 REST(r2-client)는 계산 입력이 아니다 — 웹 쪽이 계산 동안 전역 fetch 를 이 함수로 바꾸므로
+    //   여기서도 그대로 통과시킨다(자산으로 기록하면 다음 회차 HEAD 가 인증 없이 실패한다).
+    if (url.host === 'api.cloudflare.com') return network(input, init);
     const method = init?.method || (input instanceof Request ? input.method : 'GET');
     if (method !== 'GET' && method !== 'HEAD') throw new Error(`계산 중 쓰기 요청 금지: ${method}`);
     if (/^(user|arrange)\/[A-Za-z0-9]+\.json$/.test(key)) {
