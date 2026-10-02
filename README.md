@@ -8,9 +8,9 @@
 - `user/{iidx_id}.json` — 유저별 데이터. `{ _v, user, radars, osPattern, persona, spPersona, reachNps, dp[], sp[] }` + RPC 성공 시 `dpRecent`·`spRecent`(최근 92일 갱신 이력).
   - dp/sp = **슬림 score row** `{ song_id, diff, lamp, ex_score, played_version, date, bp, note_count }` — 원본에 없는 필드는 생략한다. 곡메타(title/textage_song_id/series_no/ac/legen)는 중복 제거하고 아래 `songs.json` 으로 분리. 웹이 `song_id` 로 조인.
   - persona = **DP 성향 리포트** `{ head, oneLiner, prose, report, tags[], nCharts, _v, i18n }` — 웹훅 덤프 시 [persona-lib.mjs](.github/scripts/persona-lib.mjs) 가 gist 해석엔진(persona.js/calcWeakness.js)으로 즉시 생성. `i18n`은 ja/en의 head·report이며 `spPersona`도 같은 리포트 구조다. 표기용: head=헤드라인 한 줄, prose=서사 요약(X/OG 카드 ≤200자), report=상세 리포트 전문(🎯🎲⚡🛠✋📝). 생성 함수는 표본 30차트 미만이면 null을 반환하지만, 덤프는 null·생성 실패 시 R2 이전값을 보존한다. 이전 상태 조회까지 실패하면 덤프를 중단한다.
-- `hist/{iidx_id}.json` — **무손실 점수 이력**(git 에 없음 · R2 전용). `scores` 전 행·전 필드를 배열형으로:
+- `hist/{iidx_id}.json` — **값·자연키 기준 복원용 점수 이력**(git 에 없음 · R2 전용). `scores` 전 행을 명시 필드 배열형으로 담지만 `score_id` 는 정렬에만 쓰고 저장하지 않아 DB 행을 식별자까지 무손실 복원할 수는 없다:
   `[[song_id, diff, lamp, ex_score, played_version, date, date_kst, play_style, bp, note_count], ...]`. 현재 생성본은 10열이며 과거 8열 본문이 남아 있을 수 있다. DBR(`played_version=-10`) 포함.
-  - `user/` 의 dp/sp 는 "곡별 최신 1행 · 슬림"이라 `iidx_id`·`date_kst`·`play_style` 이 없어 **supabase 복원이 안 된다.** hist 가 그 복원 원본이다([덤프 구현](.github/scripts/dump-user.mjs)).
+  - `user/` 의 dp/sp 는 "곡별 최신 1행 · 슬림"이라 `iidx_id`·`date_kst`·`play_style` 이 없어 **supabase 복원이 안 된다.** hist 는 해당 값과 자연키 기준 복원 원본이다([덤프 구현](.github/scripts/dump-user.mjs)). `score_id` 까지 보존하는 별도 DBR history 형식은 [dbr-history.mjs](.github/scripts/dbr-history.mjs) 에 정의돼 있다.
   - 소비처: 웹 `fetchChartScoreHistory`(랭킹모달 점수추이). `user/` 에 합치지 않은 건 카드 첫 로딩에 매번 딸려오면 느려지기 때문.
   - DBR 행도 담지만 웹 `fetchDbrScores`는 공개 CDN의 `dbr/{ID}.json`에 있는 scores를 읽는다. DBR 저장 요청은 Supabase 저장 후 같은 요청에서 R2 사본을 갱신한다. DBR 쓰기가 `users` 웹훅을 안 깨워 다음 업로드 전까지 hist에 안 들어오기 때문에 hist 대신 별도 dbr 사본을 사용한다.
   - **`.gitignore` 대상** — 전 유저 44.5MB 라 커밋하면 이미 219MB 인 `.git` 을 다시 부풀린다. 롤백은 git 이 아니라 R2 스냅샷([snapshot-r2.mjs](.github/scripts/snapshot-r2.mjs))이 맡는다.
