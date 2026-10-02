@@ -88,6 +88,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-03 — README 를 현행 워크플로에 맞춤
+
+- 현행 워크플로 11개·cron·R2 산출물 표 추가, git 데이터 커밋 중단·REST 업로드·ETag 메모 반영, songs cron 30분, Actions secrets 에 R2 토큰, `version.json` 은 현행 공유 자산 아님, 트리거는 CF Pages `functions/api/dump-trigger.js`(Vercel 아님).
+- hist 는 `score_id` 를 담지 않는다 — 복원 범위를 값·자연키 기준으로 명시.
+
 ### 2026-10-02 — dump-uvec: 공통 자산을 R2 REST 로 읽기
 
 - Actions 첫 수동 실행에서 `data.iidx.in` 공개 CDN 요청(songs·textage-meta·rating·zasa 등)이 전부 HTTP 403 — Cloudflare 존 보호가 데이터센터 IP 를 막는다(Worker 코드엔 403 없음). 웹 모듈(iidx.in)은 통과.
