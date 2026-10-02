@@ -37,7 +37,9 @@ export async function run({ apply = false, webBase = 'https://iidx.in/', maxUser
     const arrangements = ids('arrange', await io.listEntries('arrange/'));
     const remote = new Map((await io.listEntries('uslice/')).filter(({ key }) => /^uslice\/[A-Za-z0-9]+-vec-dp\.json$/.test(key)).map(({ key, etag: tag }) => [key, etag(tag)]));
     graph = await collectGraph(webBase, network);
-    const assets = await probeAssets(state.assets, network);
+    // 공통 자산(data.iidx.in)은 공개 CDN 이 아니라 R2 REST 로 읽는다 — uvec-lib DATA_HOST 주석.
+    const readAsset = (objectKey) => io.getText(objectKey);
+    const assets = await probeAssets(state.assets, network, readAsset);
     const key = inputKey(graph.modules, assets);
     const targets = selectTargets(users, arrangements, state, key);
     stats.targets = targets.length;
@@ -53,7 +55,7 @@ export async function run({ apply = false, webBase = 'https://iidx.in/', maxUser
       })());
       return readCache.get(objectKey);
     };
-    const sliceFetch = createSliceFetch({ read: readInput, network, assets });
+    const sliceFetch = createSliceFetch({ read: readInput, readAsset, network, assets });
     // REST 호출은 계산 자산으로 기록하지 않는다.
     globalThis.fetch = (url, init) => /^https:\/\/api\.cloudflare\.com\//.test(String(url instanceof Request ? url.url : url)) ? network(url, init) : sliceFetch(url, init);
     const { computeUvecSlice } = await import(graph.entry);

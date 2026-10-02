@@ -69,6 +69,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-02 — dump-uvec: 공통 자산을 R2 REST 로 읽기
+
+- Actions 첫 수동 실행에서 `data.iidx.in` 공개 CDN 요청(songs·textage-meta·rating·zasa 등)이 전부 HTTP 403 — Cloudflare 존 보호가 데이터센터 IP 를 막는다(Worker 코드엔 403 없음). 웹 모듈(iidx.in)은 통과.
+- 생산기는 `data.iidx.in` 자산을 같은 키의 R2 객체로 REST GET 한다(Worker 는 R2 바이트를 그대로 내보낸다). 입력 키는 본문 해시. REST 조회 장애는 회차 중단.
+
 ### 2026-10-02 — R6: 유저 벡터 slice 재계산기 · Worker `-vec-dp` 허용 (로컬 구현, 미게시·미배포)
 
 - `dump-uvec.mjs`: iidx.in 에 배포된 웹 v3 모듈(`v3/services/uvec-slice.js` import 그래프)을 받아 `computeUvecSlice` 로 `uslice/{ID}-vec-dp.json`을 만든다 — 벡터 계산식 손사본 없음. `user/`·`arrange/` 원문은 R2 REST로 읽는다.

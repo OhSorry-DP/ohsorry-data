@@ -84,9 +84,20 @@ export async function collectGraph(webBase, network) {
   } catch (error) { await fs.rm(dir, { recursive: true, force: true }); throw error; }
 }
 
-export async function probeAssets(previous, network) {
+// data.iidx.in 공개 CDN 은 Actions(데이터센터 IP)에서 존 보호에 403 으로 막힌다(2026-10-02 실측).
+//   같은 키의 R2 원본을 REST 로 읽는다 — Worker 는 R2 객체를 그대로 내보내므로 바이트가 같다. 입력 키는 본문 해시.
+export const DATA_HOST = 'data.iidx.in';
+const dataKey = (url) => decodeURIComponent(url.pathname.replace(/^\//, ''));
+
+export async function probeAssets(previous, network, readAsset = null) {
   const assets = {};
   for (const url of Object.keys(previous)) {
+    const parsed = new URL(url);
+    if (readAsset && parsed.host === DATA_HOST) {
+      const body = await readAsset(dataKey(parsed));
+      assets[url] = body === null ? 'status:404' : digest(body);
+      continue;
+    }
     let r = await network(url, { method: 'HEAD', cache: 'no-cache' });
     if (r.status === 404) { assets[url] = 'status:404'; continue; }
     const tag = etag(r.headers.get('etag'));
@@ -98,7 +109,7 @@ export async function probeAssets(previous, network) {
   return assets;
 }
 
-export function createSliceFetch({ read, network, assets, base = 'https://iidx.in/' }) {
+export function createSliceFetch({ read, readAsset = null, network, assets, base = 'https://iidx.in/' }) {
   const cache = new Map();
   const failures = [];
   const fetchSlice = async (input, init) => {
@@ -115,6 +126,12 @@ export function createSliceFetch({ read, network, assets, base = 'https://iidx.i
       return new Response(body, { status: body === null ? 404 : 200, headers: { 'content-type': 'application/json' } });
     }
     if (!cache.has(url.href)) cache.set(url.href, (async () => {
+      if (readAsset && url.host === DATA_HOST) {
+        const text = await readAsset(dataKey(url));
+        assets[url.href] = text === null ? 'status:404' : digest(text);
+        const body = text === null ? new ArrayBuffer(0) : new TextEncoder().encode(text).buffer;
+        return { body, status: text === null ? 404 : 200, headers: { 'content-type': 'application/octet-stream' } };
+      }
       const r = await network(input instanceof Request ? input : url.href, init);
       if (!r.ok && r.status !== 404) {
         const error = new Error(`입력 자산 ${url.href}: HTTP ${r.status}`);

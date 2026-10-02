@@ -25,6 +25,8 @@ export async function computeUvecSlice(id, { fetchImpl }) {
   return { v, id, date: profile.date, arrangeSig: '', vec: profile.empty ? null : { strength: asset.strength } };
 }`);
   const objects = new Map(ids.map((id) => [`user/${id}.json`, JSON.stringify({ date: 1 })]));
+  // 공통 자산(data.iidx.in)은 공개 CDN 이 아니라 R2 REST 로 읽는다 — 픽스처도 R2 객체로 둔다.
+  objects.set('data/common.json', JSON.stringify({ strength: 1 }));
   const calls = { writes: [], reads: [], http: [], sleeps: [] };
   const client = {
     async getText(key) { calls.reads.push(key); return objects.get(key) ?? null; },
@@ -37,7 +39,7 @@ export async function computeUvecSlice(id, { fetchImpl }) {
     calls.http.push([String(url), init?.method || 'GET']);
     return new Response(init?.method === 'HEAD' ? null : JSON.stringify({ strength: version }), { headers: { etag: `"asset-${version}"` } });
   };
-  return { objects, calls, client, dir, version: (n) => { version = n; },
+  return { objects, calls, client, dir, version: (n) => { version = n; objects.set('data/common.json', JSON.stringify({ strength: n })); },
     run: (options = {}) => run({ webBase: dir, client, fetchImpl, sleep: async (ms) => { calls.sleeps.push(ms); }, log: silent, ...options }) };
 }
 
@@ -107,11 +109,12 @@ test('대상은 신규·user 변경·arrange 변경·입력 키 변경', () => {
   assert.deepEqual(selectTargets(users, new Map([['A', 'a']]), state, 'k'), ['A', 'B', 'C']);
   assert.deepEqual(selectTargets(users, new Map(), state, 'new'), ['A', 'B', 'C']);
 });
-test('기본 dry 쓰기 0·공통 자산 GET 1회·전역 복구·간격 250ms', async (t) => {
+test('기본 dry 쓰기 0·공통 자산 R2 GET 1회(공개 CDN 0)·전역 복구·간격 250ms', async (t) => {
   const f = await fixture(t), original = globalThis.fetch;
   const result = await f.run();
   assert.equal(result.computed, 2); assert.equal(f.calls.writes.length, 0);
-  assert.equal(f.calls.http.length, 1); assert.equal(globalThis.fetch, original);
+  assert.equal(f.calls.http.length, 0); assert.equal(f.calls.reads.filter((k) => k === 'data/common.json').length, 1);
+  assert.equal(globalThis.fetch, original);
   assert.ok(f.calls.sleeps.every((ms) => ms >= 250));
 });
 test('apply 상한과 상태 저장으로 다음 회차 나머지 처리·md5 같으면 PUT 생략', async (t) => {
@@ -193,7 +196,7 @@ test('workflow cron만 apply·dispatch dry·독립 concurrency·Node20', async (
 test('웹 로더가 네트워크 장애를 삼켜도 완료로 게시하지 않는다', async (t) => {
   const f = await fixture(t, ['A1']);
   await fs.writeFile(path.join(f.dir, 'v3/services/uvec-slice.js'), `export async function computeUvecSlice(id) {
-    try { await fetch('https://data.iidx.in/data/fail.json'); } catch {}
+    try { await fetch('https://example.invalid/fail.json'); } catch {}
     return {v:1,id,date:1,arrangeSig:'',vec:null};
   }`);
   await assert.rejects(f.run({ apply: true, fetchImpl: async () => { throw new Error('연결 끊김'); } }), /연결 끊김/);
@@ -213,4 +216,17 @@ test('계산 중 전역 fetch 로 들어온 R2 REST 요청은 자산으로 기�
   const url = 'https://api.cloudflare.com/client/v4/accounts/a/r2/buckets/b/objects/user%2FA1.json';
   await f(url, { method: 'GET' }); await f(url, { method: 'PUT', body: '{}' });
   assert.deepEqual(seen, [url, url]); assert.deepEqual(assets, {}); assert.equal(f.failures.length, 0);
+});
+test('data.iidx.in 자산은 R2 REST 로 읽고(네트워크 0) 본문 해시를 입력 키로·REST 장애는 회차 중단', async () => {
+  const assets = {}, seen = [];
+  const network = async (url) => { seen.push(String(url)); return new Response('x'); };
+  const f = createSliceFetch({ read: async () => null, readAsset: async (key) => (key === 'data/a.json' ? '{"a":1}' : null), network, assets });
+  assert.deepEqual(await (await f('https://data.iidx.in/data/a.json', { cache: 'default' })).json(), { a: 1 });
+  assert.equal((await f('https://data.iidx.in/data/none.json')).status, 404);
+  assert.deepEqual(seen, []); assert.equal(assets['https://data.iidx.in/data/a.json'], digest('{"a":1}'));
+  assert.equal(assets['https://data.iidx.in/data/none.json'], 'status:404');
+  const probed = await probeAssets(assets, network, async (key) => (key === 'data/a.json' ? '{"a":2}' : null));
+  assert.notEqual(probed['https://data.iidx.in/data/a.json'], assets['https://data.iidx.in/data/a.json']); assert.deepEqual(seen, []);
+  const g = createSliceFetch({ read: async () => null, readAsset: async () => { throw new Error('R2 GET 500'); }, network, assets: {} });
+  await assert.rejects(g('https://data.iidx.in/data/a.json'), /R2 GET 500/); assert.equal(g.failures.length, 1);
 });
