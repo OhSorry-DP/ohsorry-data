@@ -1,28 +1,28 @@
 # ohsorry-data
 
-오소리 정적 데이터 저장소 — supabase 덤프본을 **Cloudflare R2 + Worker(`data.iidx.in`)** 로 서빙해 supabase egress 를 줄인다. (2026-08-04 jsdelivr 에서 이전 — 아래 §서빙 참고. 이 repo 는 원본·이력 보관 겸 R2 업로드 소스다.)
+오소리 정적 데이터 파이프라인 — supabase 덤프본과 파생 자산을 **Cloudflare R2 + Worker(`data.iidx.in`)** 로 서빙해 supabase egress 를 줄인다. (2026-08-04 jsdelivr 에서 이전 — 아래 §서빙 참고. 이 repo 는 코드 전용이며 현재 데이터 정본은 R2, 유저·이력 복구용 백업은 R2 스냅샷이다. 과거 git 데이터 이력은 보존한다.)
 
 > ⚠️ **자동 생성 — 직접 편집 금지.** ohSorryAdmin `scripts/dump-data-repo.js` 가 supabase 에서 덤프.
 
 ## 구조
-- `user/{iidx_id}.json` — 유저별 데이터. `{ _v, user, radars, osPattern, persona, dp[], sp[] }`
-  - dp/sp = **슬림 score row** `{ song_id, diff, lamp, ex_score, played_version, date }` — 곡메타(title/textage_song_id/series_no/ac/legen)는 중복 제거하고 아래 `songs.json` 으로 분리. 웹이 `song_id` 로 조인.
-  - persona = **DP 성향 리포트** `{ head, oneLiner, prose, report, tags[], nCharts, _v }` — 웹훅 덤프 시 [persona-lib.mjs](.github/scripts/persona-lib.mjs) 가 gist 해석엔진(persona.js/calcWeakness.js)으로 즉시 생성. 표기용: head=헤드라인 한 줄, prose=서사 요약(X/OG 카드 ≤200자), report=상세 리포트 전문(🎯🎲⚡🛠✋📝). 표본 30차트 미만이면 null.
+- `user/{iidx_id}.json` — 유저별 데이터. `{ _v, user, radars, osPattern, persona, spPersona, reachNps, dp[], sp[] }` + RPC 성공 시 `dpRecent`·`spRecent`(최근 92일 갱신 이력).
+  - dp/sp = **슬림 score row** `{ song_id, diff, lamp, ex_score, played_version, date, bp, note_count }` — 원본에 없는 필드는 생략한다. 곡메타(title/textage_song_id/series_no/ac/legen)는 중복 제거하고 아래 `songs.json` 으로 분리. 웹이 `song_id` 로 조인.
+  - persona = **DP 성향 리포트** `{ head, oneLiner, prose, report, tags[], nCharts, _v, i18n }` — 웹훅 덤프 시 [persona-lib.mjs](.github/scripts/persona-lib.mjs) 가 gist 해석엔진(persona.js/calcWeakness.js)으로 즉시 생성. `i18n`은 ja/en의 head·report이며 `spPersona`도 같은 리포트 구조다. 표기용: head=헤드라인 한 줄, prose=서사 요약(X/OG 카드 ≤200자), report=상세 리포트 전문(🎯🎲⚡🛠✋📝). 생성 함수는 표본 30차트 미만이면 null을 반환하지만, 덤프는 null·생성 실패 시 R2 이전값을 보존한다. 이전 상태 조회까지 실패하면 덤프를 중단한다.
 - `hist/{iidx_id}.json` — **무손실 점수 이력**(git 에 없음 · R2 전용). `scores` 전 행·전 필드를 배열형으로:
-  `[[song_id, diff, lamp, ex_score, played_version, date, date_kst, play_style], ...]`. DBR(`played_version=-10`) 포함.
-  - `user/` 의 dp/sp 는 "곡별 최신 1행 · 슬림"이라 `iidx_id`·`date_kst`·`play_style` 이 없어 **supabase 복원이 안 된다.** hist 가 그 복원 원본이다(계획: `d:/work/docs/cf-consolidation.md` §1).
+  `[[song_id, diff, lamp, ex_score, played_version, date, date_kst, play_style, bp, note_count], ...]`. 현재 생성본은 10열이며 과거 8열 본문이 남아 있을 수 있다. DBR(`played_version=-10`) 포함.
+  - `user/` 의 dp/sp 는 "곡별 최신 1행 · 슬림"이라 `iidx_id`·`date_kst`·`play_style` 이 없어 **supabase 복원이 안 된다.** hist 가 그 복원 원본이다([덤프 구현](.github/scripts/dump-user.mjs)).
   - 소비처: 웹 `fetchChartScoreHistory`(랭킹모달 점수추이). `user/` 에 합치지 않은 건 카드 첫 로딩에 매번 딸려오면 느려지기 때문.
-  - DBR 행도 담지만 웹 `fetchDbrScores` 는 아직 supabase 직접 조회다 — DBR 쓰기가 `users` 웹훅을 안 깨워 다음 업로드 전까지 hist 에 안 들어오기 때문(계획 §1 참고).
-  - **`.gitignore` 대상** — 전 유저 44.5MB 라 커밋하면 이미 219MB 인 `.git` 을 다시 부풀린다. 롤백은 git 이 아니라 R2 스냅샷(계획 §2)이 맡는다.
+  - DBR 행도 담지만 웹 `fetchDbrScores`는 공개 CDN의 `dbr/{ID}.json`에 있는 scores를 읽는다. DBR 저장 요청은 Supabase 저장 후 같은 요청에서 R2 사본을 갱신한다. DBR 쓰기가 `users` 웹훅을 안 깨워 다음 업로드 전까지 hist에 안 들어오기 때문에 hist 대신 별도 dbr 사본을 사용한다.
+  - **`.gitignore` 대상** — 전 유저 44.5MB 라 커밋하면 이미 219MB 인 `.git` 을 다시 부풀린다. 롤백은 git 이 아니라 R2 스냅샷([snapshot-r2.mjs](.github/scripts/snapshot-r2.mjs))이 맡는다.
   - 갱신은 **변경분만** — 덤프 때 (행수, 최신 `date`) 프로브로 R2 현재본과 대조해 같으면 `scores` 전체 재조회를 건너뛴다. 매번 전체를 읽으면 덤프 1회 supabase 읽기가 +94% 늘어난다(실측 2026-08-09).
 - `snapshot/daily/YYYY-MM-DD.tar.gz` · `snapshot/monthly/YYYY-MM.tar.gz` — **백업**(git 에 없음 · R2 전용). `user/` + `hist/` + 루트 JSON 을 한 덩어리로 압축. 보존 **일별 30 + 월별 12**.
-  - **R2 는 객체 버저닝이 없다** → 계획 §4 로 git 데이터 커밋을 중단하면 이게 **유일한 롤백 수단**이다. 월별만으로는 최대 한 달치를 잃으므로 일별이 필수.
+  - **R2 는 객체 버저닝이 없다** → git 데이터 커밋은 2026-08-09 에 중단했으며, 현재 유저·이력 데이터의 롤백은 R2 스냅샷으로 한다. 월별만으로는 최대 한 달치를 잃으므로 일별이 필수.
   - ⚠️ **sanity check 후에만 생성** — 유실은 스냅샷으로 복구되지만 오염은 오염을 굳힌다. 직전 스냅샷 대비 유저 수·이력 행수·persona 보유 인원이 5% 넘게 줄면 만들지 않고 실패로 알린다(persona 37명 유실 전례).
   - ⚠️ **Worker 허용키가 아니다** — `data.iidx.in` 으로 서빙되지 않는다(백업이지 컨텐츠가 아니다). 접근은 wrangler/REST 로만.
   - `snapshot/index.json` = 회차별 통계(유저 수·이력 행수·persona 보유·용량). 다음 회차 sanity check 의 기준선.
-- `songs.json` — 곡 마스터(공유) `[{ song_id, title, ac, legen, textage_song_id, series_no }]`. 웹 `getSongsCache` 가 supabase 대신 이걸 읽음. cron(5분) 갱신.
-- `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). **실시간 갱신은 webhook 덤프(dump-user)가 R2 에 증분 병합**([merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs))으로 담당하고, supabase 전체 재생성은 **1일 1회 cron**(정합성 보정 — 삭제 유저 정리·증분 누락 복구)이다. 증분의 베이스는 git 이 아니라 **R2 현재본**이라, 커밋을 건너뛴 회차의 갱신도 누적된다.
-- `version.json` — 전체 덤프 타임스탬프 + 유저 수
+- `songs.json` — 곡 마스터(공유) `[{ song_id, title, ac, legen, textage_song_id, series_no }]`. 웹 `getSongsCache` 가 supabase 대신 이걸 읽음. cron(`*/30 * * * *`, 30분) 갱신. 일일 전체 재생성(`5 18 * * *`, KST 03:05)과 수동 실행에도 포함되며, `dump-user`가 누락 신곡을 감지하면 [refresh-missing-songs.mjs](.github/scripts/refresh-missing-songs.mjs)로 즉시 갱신한다.
+- `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). **실시간 갱신은 webhook 덤프(dump-user)가 R2 에 증분 병합**([merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs))으로 담당하고, supabase 전체 재생성은 **1일 1회 cron**(정합성 보정 — 삭제 유저 정리·증분 누락 복구)이다. 증분의 베이스는 git 이 아니라 **R2 현재본**이라, 증분 갱신이 누적된다. 같은 생산자가 `users-list-slim.json`(검색용 iidx_id·dj_name·star·r_star 4키)도 생성·업로드한다.
+- `version.json` — 로컬 전체 덤프 타임스탬프 + 유저 수. 현재 Actions는 생성·업로드하지 않으며 ohSorryAdmin 전체 덤프도 로컬 파일만 갱신한다. Worker 허용키이지만 R2 현재값의 최신성 지표로 쓰지 않는다.
 - `persona-pop.json` — persona **usernorm(인구 정규화)** 통계 `{ dp, sp }` (각 10피처 `mean`/`sd` + `_relScale`).
   `persona-lib` 이 읽어 `profile.pop` 으로 주입 → 축별 인구 편향 제거. 없으면 persona 는 종전 동작(하위호환).
   생성: ohSorryAdmin `node scripts/buildPersonaPop.js`. 유저가 크게 늘거나 피처 정의가 바뀔 때만 재실행.
@@ -31,17 +31,37 @@
 ## 생성/갱신
 - 전체: ohSorryAdmin `node scripts/dump-data-repo.js` (전체 재덤프 + `version.json` 갱신)
 - 증분(수동): ohSorryAdmin `node scripts/dump-data-repo.js <iidx_id> ...`
-- **자동(실시간)**: 오소리 업로드 → supabase `users` upsert → Database Webhook → vercel `api/dump-trigger`
+- **자동(실시간)**: 오소리 업로드 → supabase `users` upsert → Database Webhook → Cloudflare Pages `functions/api/dump-trigger.js`(iidx.in/api/dump-trigger)
   → `repository_dispatch(dump-user)` → 이 repo 의 `dump-user` Action 이 그 유저만 재덤프
   → **R2 PUT(매번 — 서빙)**. git 데이터 커밋은 2026-08-09 에 중단했고, 2026-09-04 에 남아 있던 파일도 추적에서 끊었다 — **이 repo 는 코드 전용이다.**
   - Action: [.github/workflows/dump-user.yml](.github/workflows/dump-user.yml) / 덤프: [.github/scripts/dump-user.mjs](.github/scripts/dump-user.mjs)
   - users upsert(업로드 시작) 가 scores 보다 ~1s 먼저지만, Action 기동 지연(수십초)이 디바운스가 되어 race 없음.
 
+### 현행 워크플로와 R2 산출물
+
+cron은 UTC 표현이며 실행 시각·성공·운영 배포 여부는 별도 확인 대상이다. 아래는 체크아웃 코드 기준이다.
+
+| 워크플로 | 기동 조건 | 실행 스크립트 | R2 키 / 동작 |
+| --- | --- | --- | --- |
+| dump-user | repository_dispatch(dump-user) | dump-user.mjs · refresh-missing-songs.mjs · merge-user-into-list.mjs · user-slice.mjs | user/{ID}.json · hist/{ID}.json · users-list.json · users-list-slim.json · ranking-state/dirty/*.json · uslice/{ID}.json · uslice/{ID}-{r,h}-{dp,sp}-{NN}.json(NN=00～15); 누락 신곡이면 songs.json 갱신 |
+| dump-users-list | */30 * * * * / 5 18 * * * / 수동 | dump-users-list.mjs · dump-first-place.mjs | 30분: songs.json + first-place-winners.json; 일일(KST 03:05)·수동: users-list.json · users-list-slim.json도 생성 |
+| dump-chart-rankings | */30 * * * * / 20 18 * * * / 수동 | dump-chart-rankings.mjs | ranking/{song_id}-{diff}.json; 30분 증분, 일일(KST 03:20) --all, 수동 all 기본 false |
+| dump-chart-dist | 35 18 * * * / 수동 | dump-chart-dist.mjs | dist/{dp,sp}/{song_id}-{diff}.json; KST 03:35, 수동 dry_run 기본 false |
+| dump-dbr-history | 수동만 | dump-dbr-history.mjs | dbr/{ID}.json에 날짜 이력 병합; dry_run 기본 true |
+| dump-song-meta | */30 * * * * / 수동 | dump-song-meta.mjs | data/song-meta-{songId}.json; cron apply, 수동 apply 기본 false, --max-writes=500 |
+| dump-song-patterns | 10,40 * * * * / 수동 | dump-song-patterns.mjs | data/song-patterns-dp-{textage ID의 UTF-8 hex}.json; cron apply, 수동 dry-run, --max-writes=500 |
+| dump-uvec | 20,50 * * * * / 수동 | dump-uvec.mjs | uslice/{ID}-vec-dp.json · meta/uvec-state.json; cron apply, 수동 dry-run, 기본 회당 100명 |
+| mirror-gist-r2 | */30 * * * * / 수동 | mirror-gist-r2.mjs | gist의 lib/ · data/ 미러; 수동 dry·force 기본 false |
+| repersona-r2 | 수동만 | r2-repersona.mjs | R2 user/{ID}.json의 persona·spPersona·reachNps 재생성; dry 기본 false |
+| snapshot-r2 | 0 19 * * * / 수동 | snapshot-r2.mjs | snapshot/daily/YYYY-MM-DD.tar.gz · snapshot/monthly/YYYY-MM.tar.gz · snapshot/index.json; KST 04:00, auto는 매일 + KST 1일 월별 |
+
+워크플로는 `.github/workflows/<워크플로>.yml`, 스크립트는 `.github/scripts/`에 있다. `dump-song-meta`는 R2의 songs.json · data/textage-meta.json · data/ohSorryRating-slim.json · data/series-name.json · data/zasa-data.json과 lib/normTitle.js를 읽고, `dump-song-patterns`는 data/patterns-dp-{1112,0810,rest}.json을 읽는다. `dump-uvec`는 iidx.in의 웹 모듈을 실행하되 user/ · arrange/ 및 계산 중 data.iidx.in URL로 요청되는 공통 자산은 같은 키의 R2 REST로 읽는다(d8bc6ffad; Actions의 공개 CDN GET 403 회피). persona-lib의 gist 입력 경로는 별도다.
+
 ### 자동 갱신 설정 (1회)
 1. **GitHub Action secrets** (이 repo Settings → Secrets and variables → Actions):
-   `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
-2. **GitHub PAT** — 이 repo 에 `repository_dispatch` 권한(Fine-grained: Contents read/write + Metadata, 또는 Actions). vercel env `GITHUB_DISPATCH_PAT` 에 등록.
-3. **vercel env** (ohSorryWeb 프로젝트): `GITHUB_DISPATCH_PAT`, `WEBHOOK_SECRET`(임의 랜덤 문자열).
+   `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `CLOUDFLARE_API_TOKEN`(R2 Object Read & Write). `CLOUDFLARE_ACCOUNT_ID`는 워크플로에 설정되어 있다. 토큰은 이전 덤프 보존·users-list 병합·R2 업로드에 필요하다.
+2. **GitHub PAT** — 이 repo 에 `repository_dispatch` 권한(Fine-grained: Contents read/write + Metadata, 또는 Actions). Cloudflare Pages 환경 변수 `GITHUB_DISPATCH_PAT` 에 등록.
+3. **Cloudflare Pages 환경 변수** (ohSorryWeb 프로젝트): `GITHUB_DISPATCH_PAT`, `WEBHOOK_SECRET`(임의 랜덤 문자열).
 4. **supabase Database Webhook** (Dashboard → Database → Webhooks → New):
    - Table `users`, Events `Insert` + `Update`
    - Type `HTTP Request`, Method `POST`, URL `https://ohsorry.iidx.in/api/dump-trigger`
@@ -57,10 +77,9 @@ https://data.iidx.in/version.json
 ```
 - Worker 소스: [cf/](cf/) (`wrangler deploy`). R2 버킷 `ohsorry-data` 를 그대로 흘려보낸다.
   허용 키만 통과(임의 객체 열람·path traversal 차단), ETag 키로 엣지는 무기한 캐싱하고 업로드 후 30초가 지난 뒤 다음 요청부터 반영하며 브라우저는 60초 캐시한다.
-- **원본은 이 repo 의 git 이력이고 R2 는 서빙 사본이다.** R2 는 객체 버저닝이 없어
-  덤프 로직 사고 시 복구는 git 에서 한다(persona 37명 유실 전례).
-- Action 이 commit/push 후 `wrangler r2 object put` 으로 올린다 → **PUT 즉시 반영**(purge 불필요).
-  `CLOUDFLARE_API_TOKEN` secret 필요(R2 Object Read & Write). 미설정이면 warning 후 skip.
+- **현재 유저·이력 데이터 정본은 R2이며 복구용 백업은 R2 스냅샷이다.** git 데이터 커밋은 중단했고 과거 git 이력만 보존한다. R2 는 객체 버저닝이 없어 현재 데이터의 롤백은 스냅샷을 사용한다.
+- `dump-user`·`dump-users-list` Action은 git commit/push 없이 **R2 REST PUT**으로 올린다. 대용량 스냅샷 tar.gz 업로드는 wrangler를 사용한다. R2 원본은 PUT 후 갱신되지만 공개 응답은 위 ETag 메모 갱신과 브라우저 캐시를 따른다(purge 불필요).
+  `CLOUDFLARE_API_TOKEN` secret 필요(R2 Object Read & Write). `dump-user`의 users-list 병합은 미설정 시 실패하고 본체 업로드 단계는 warning 후 skip.
 
 > ⚠️ 종전 jsdelivr(`@main`) 는 2026-08-04 폐기. 브랜치 별칭은 "main=어느 커밋" 해석 결과를
 > 12h 캐시하는데(`x-jsd-version-type: branch` / `s-maxage=43200`) purge API 는 **파일 경로만**
