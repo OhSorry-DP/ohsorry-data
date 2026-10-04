@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRelativeRegistry, adaptRelativeInput } from './coach-relative-input.mjs';
+import { buildRelativeRegistry, adaptRelativeInput, patternRecordSources, radarRecordSources } from './coach-relative-input.mjs';
 import { buildPopulation, projectRelative } from './coach-relative.mjs';
 
 const registry = buildRelativeRegistry({ featureMeta: { feats: [{ name: 'NOTES', nzCount: 1000 }, { name: 'KEIMA_L' }], maxScoreByFeat: { HSTAIR_SYM: 100 } } });
@@ -13,7 +13,8 @@ const dump = () => ({ user: { iidx_id: '00000001', star: 6.4, r_star: 20, native
 
 test('기본·canonical 축, 단위·방향 및 DP/SP 원천 값을 보존한다', () => {
   const user = input(dump());
-  assert.equal(registry.length, 56);
+  assert.equal(registry.length, 36);
+  assert.equal(registry.some(item => item.key.includes('/weakness:')), false);
   assert.deepEqual(registry.find(item => item.key === 'dp/osPattern:HSTAIR_SYM'),
     { key: 'dp/osPattern:HSTAIR_SYM', valueUnit: 'feature_score', higherIsBetter: true });
   assert.equal(user.star, 6.4);
@@ -27,7 +28,7 @@ test('원천 결손·비유한 값·문자열·보고문을 null로 보존하고
   const source = dump(); source.osPattern[1].peak = Infinity; source.osPattern[1].charge = '45';
   const before = structuredClone(source);
   const user = input(source);
-  for (const key of ['dp/osPattern:HSTAIR_SYM', 'dp/osPattern:PEAK', 'dp/osPattern:CHARGE', 'dp/weakness:NOTES']) {
+  for (const key of ['dp/osPattern:HSTAIR_SYM', 'dp/osPattern:PEAK', 'dp/osPattern:CHARGE']) {
     assert.deepEqual(user.features[key], { value: null, recordCount: null });
   }
   assert.deepEqual(source, before);
@@ -75,5 +76,38 @@ test('R01 모집단·투영과 연결해 중복 제거 하한 및 결손 사유�
   assert.equal(projected.features['dp/osPattern:NOTES'].same_star.percentile, 51.67);
   assert.equal(projected.features['dp/osPattern:NOTES'].overall.n, 30);
   assert.equal(projected.features['dp/radar:notes'].overall.reason, 'unknown_record_count');
-  assert.equal(projected.features['dp/weakness:NOTES'].overall.reason, 'missing_value');
+  assert.equal(projected.features['dp/weakness:NOTES'], undefined);
+});
+
+test('커널 카운트를 축별 계약으로 연결하고 EX 양수 채보만 방식별로 중복 제거한다', () => {
+  // 커널의 카운트 결과 계약만 주입하므로 데이터 저장소 테스트는 형제 저장소에 의존하지 않는다.
+  const counts = { NOTES: 1, CHORD: 2, PEAK: 0 };
+  const source = dump();
+  source.dp = [
+    { song_id: 1, diff: 3, ex_score: 10, played_version: 0 },
+    { song_id: '1', diff: 3, ex_score: 20, played_version: 33 },
+    { song_id: 1, diff: 2, ex_score: 30 },
+    { song_id: 2, diff: 3, ex_score: 0 },
+    { song_id: 3, diff: 3, ex_score: '100' },
+    { song_id: 4, diff: 3, ex_score: NaN },
+    { song_id: 5, diff: 3, ex_score: -1 },
+  ];
+  source.sp = [{ song_id: 2, diff: 3, ex_score: 100 }];
+  const before = structuredClone({ source, counts });
+  const axisSources = { ...patternRecordSources({ style: 'dp', counts }),
+    ...radarRecordSources({ dump: source }) };
+  const user = input(source, { axisSources });
+  assert.equal(user.features['dp/osPattern:NOTES'].recordCount, 1);
+  assert.equal(user.features['dp/osPattern:CHORD'].recordCount, 2);
+  assert.equal(user.features['dp/osPattern:PEAK'].recordCount, 0);
+  assert.equal(user.features['sp/osPattern:NOTES'].recordCount, null);
+  for (const axis of ['notes', 'peak', 'charge', 'chord', 'scratch', 'soflan']) {
+    assert.equal(user.features[`dp/radar:${axis}`].recordCount, 2);
+    assert.equal(user.features[`sp/radar:${axis}`].recordCount, 1);
+  }
+  assert.deepEqual({ source, counts }, before);
+  assert.deepEqual(radarRecordSources({ dump: {} }), {});
+  assert.equal(radarRecordSources({ dump: { dp: [] } })['dp/radar:notes'].recordCount, 0);
+  assert.throws(() => patternRecordSources({ style: 'dp', counts: { NOTES: -1 } }), /유효/);
+  assert.throws(() => radarRecordSources({ dump: { dp: [{ ex_score: 1 }] } }), /유효/);
 });

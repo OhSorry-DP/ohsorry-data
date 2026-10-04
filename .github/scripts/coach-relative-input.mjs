@@ -1,5 +1,5 @@
 // 상대 순위 입력 전용 순수 어댑터. 버전·해시는 생산자가 계산해서 주입한다.
-// 현행 덤프에는 축별 기록 수와 수치 σ가 없으므로 전체 dp/sp 길이로 대체하지 않는다.
+// 축별 기록 수는 생산자 helper로 공급하며 수치 σ는 명시적 원천만 사용한다.
 const DEFAULT_AXES = ['NOTES', 'CHORD', 'PEAK', 'CHARGE', 'SCRATCH', 'SOF-LAN', 'PHRASE', 'JACK', 'TRILL', 'RAND'];
 const RADAR_AXES = ['notes', 'peak', 'charge', 'chord', 'scratch', 'soflan'];
 const finite = value => typeof value === 'number' && Number.isFinite(value);
@@ -7,7 +7,7 @@ const token = key => key.toUpperCase().replace(/[^A-Z0-9]/g, '');
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 // 메타는 feature-scores의 _meta 객체다. 약점 추가 축은 현행 보고에 쓰이는 축만 생산자가 지정한다.
-export function buildRelativeRegistry({ featureMeta = {}, weaknessAxes = DEFAULT_AXES } = {}) {
+export function buildRelativeRegistry({ featureMeta = {}, weaknessAxes = [] } = {}) {
   const names = (featureMeta.feats || []).map(item => typeof item === 'string' ? item : item?.name);
   const canonical = [...new Set([...DEFAULT_AXES, ...names,
     ...Object.keys(featureMeta.maxScoreByFeat || {})])];
@@ -51,6 +51,33 @@ function recordCount(source) {
   }
   // recordCount는 생산자가 이미 중복을 제거한 해당 축의 유효 채보 수다. nCharts/nzCount는 이 계약이 아니다.
   return Number.isInteger(source.recordCount) && source.recordCount >= 0 ? source.recordCount : null;
+}
+
+// 커널 countPatternScoreRecords 결과를 R03/R04의 axisSources 계약으로 연결한다.
+// entries의 매칭·skip과 커널 호출은 생산자가 수행하며 여기서는 점수를 재계산하지 않는다.
+export function patternRecordSources({ style, counts }) {
+  if (!['dp', 'sp'].includes(style) || !object(counts)) throw new Error('패턴 기록 수 입력이 유효하지 않습니다');
+  const sources = {};
+  for (const [axis, count] of Object.entries(counts)) {
+    if (!axis || !Number.isInteger(count) || count < 0) throw new Error('패턴 기록 수가 유효하지 않습니다');
+    sources[`${style}/osPattern:${axis}`] = { recordCount: count };
+  }
+  return sources;
+}
+
+// 게임 radar는 방식별 전체 플레이 집합에서 산출되므로 EX>0인 서로 다른 채보 수를 공유한다.
+// grid 결손은 빈 플레이 집합으로 간주하지 않고 해당 방식의 공급을 생략한다.
+export function radarRecordSources({ dump }) {
+  if (!object(dump)) throw new Error('레이더 기록 수 입력이 유효하지 않습니다');
+  const sources = {};
+  for (const style of ['dp', 'sp']) {
+    if (!Array.isArray(dump[style])) continue;
+    const records = dump[style].filter(row => finite(row?.ex_score) && row.ex_score > 0);
+    const count = recordCount({ records });
+    if (count === null) throw new Error('레이더 채보의 song_id·diff가 유효하지 않습니다');
+    for (const axis of RADAR_AXES) sources[`${style}/radar:${axis}`] = { recordCount: count };
+  }
+  return sources;
 }
 
 // axisSources는 선택적 생산자 수치 계약: 레지스트리 키 → {sigma?, recordCount? 또는 records?}.
