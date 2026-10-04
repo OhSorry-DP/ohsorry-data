@@ -42,6 +42,10 @@ export async function run({ apply = false, webBase = 'https://iidx.in/', maxUser
     const assets = await probeAssets(state.assets, network, readAsset);
     const key = inputKey(graph.modules, assets);
     const targets = selectTargets(users, arrangements, state, key);
+    for (const id of users.keys()) {
+      if (!remote.has(`uslice/${id}-vec-dp.json`) && !targets.includes(id)) targets.push(id);
+    }
+    targets.sort();
     stats.targets = targets.length;
     const readCache = new Map();
     const readInput = async (objectKey) => {
@@ -82,8 +86,13 @@ export async function run({ apply = false, webBase = 'https://iidx.in/', maxUser
       await save();
     }
     const completed = [];
+    const start = Number.isInteger(state.cursor) && state.cursor >= 0 ? state.cursor % Math.max(1, targets.length) : 0;
+    const orderedTargets = targets.length ? [...targets.slice(start), ...targets.slice(0, start)] : [];
+    let attempted = 0;
     try {
-      for (const id of targets.slice(0, budget)) {
+      for (const id of orderedTargets) {
+        if (attempted >= budget) break;
+        attempted++;
         let slice;
         try { slice = await computeUvecSlice(id, { fetchImpl: sliceFetch, fetch: sliceFetch }); }
         catch (error) {
@@ -105,6 +114,7 @@ export async function run({ apply = false, webBase = 'https://iidx.in/', maxUser
         completed.push(id); stats.computed++;
         await save();
       }
+      if (targets.length && attempted) state.cursor = (start + attempted) % targets.length;
     } finally {
       // 새로 발견한 공통 자산도 이번 회차의 모든 완료 유저에 동일하게 반영한다.
       const finalKey = inputKey(graph.modules, assets);

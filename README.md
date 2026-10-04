@@ -88,6 +88,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-04 — dump-uvec: 지워진 vec 복구 · 실패 유저의 회차 독점 해소
+
+- 입력·완료 상태가 같아도 원격 `uslice/{ID}-vec-dp.json` 이 없으면 다시 만든다 — hist 만 바뀌어 Admin 이 vec 를 지운 유저가 영영 복구되지 않던 문제(웹은 전체 폴백이라 결과는 맞았지만 slice 절감이 사라졌다). `vec:null` 객체는 정상 존재로 본다.
+- 계산 실패 유저가 매 회차 상한을 독점해 뒤 유저가 생산되지 않던 문제 — `meta/uvec-state.json` 의 `cursor` 로 회차마다 시작 위치를 돌린다. 실패는 완료로 기록하지 않고 다음 순환에 재시도, 회당 `maxUsers` 상한은 그대로.
+
 ### 2026-10-03 — README 를 현행 워크플로에 맞춤
 
 - 현행 워크플로 11개·cron·R2 산출물 표 추가, git 데이터 커밋 중단·REST 업로드·ETag 메모 반영, songs cron 30분, Actions secrets 에 R2 토큰, `version.json` 은 현행 공유 자산 아님, 트리거는 CF Pages `functions/api/dump-trigger.js`(Vercel 아님).
