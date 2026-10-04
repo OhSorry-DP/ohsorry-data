@@ -91,6 +91,8 @@ https://data.iidx.in/version.json
 ### 2026-10-04 — persona popmean 갱신 (디코더 시간축 수정 반영)
 
 - 디코더 시간축 수정으로 패턴·피처 스코어가 바뀌어 persona 정규화 기준을 다시 만들었다. DP 336명 · SP 260명 표본. R2·gist 의 같은 이름 자산과 동일 바이트.
+- **10-04 밤 시간축 산출물 운영 배포 완료**: 재생성 전 백업 = 운영 R2 바이트 일치(10-01 변경은 10-03 이미 배포). R2·gist에 patterns 4종 · feature-scores slim/meta/1112(08-31 판 현행화, 코치 소비) · sp-feature-scores-slim · sp-fallback-tier · sp-osr · dbr-inf-recommend · rhythm 3종 · weakness-popmean · persona-popmean(+sp) 게시 완료. ohsorry-data 루트 popmean 동기화(`7d421b16e`), 곡별 피처 slice 4,425, Supabase DP 백필 ok 363/skip 131/실패 0, dump-user 494명 재덤프(1명 실패), users-list 전체 재생성, uvec 남은 대상 0.
+- 후속: `C248717108787` anon scores 조회 statement timeout `57014`(기존 문제). dump-uvec은 처리 중 한 유저의 `user/`·`arrange/` ETag 변경 시 「목록 이후 입력 변경」으로 회차 전체 중단하므로 유저 단위 skip으로 변경해야 한다. 임시 우회 `--max-users 60` 반복.
 
 ### 2026-10-04 — dump-uvec: 지워진 vec 복구 · 실패 유저의 회차 독점 해소
 
