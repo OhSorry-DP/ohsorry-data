@@ -88,6 +88,10 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-04 — persona popmean 갱신 (디코더 시간축 수정 반영)
+
+- 디코더 시간축 수정으로 패턴·피처 스코어가 바뀌어 persona 정규화 기준을 다시 만들었다. DP 336명 · SP 260명 표본. R2·gist 의 같은 이름 자산과 동일 바이트.
+
 ### 2026-10-04 — dump-uvec: 지워진 vec 복구 · 실패 유저의 회차 독점 해소
 
 - 입력·완료 상태가 같아도 원격 `uslice/{ID}-vec-dp.json` 이 없으면 다시 만든다 — hist 만 바뀌어 Admin 이 vec 를 지운 유저가 영영 복구되지 않던 문제(웹은 전체 폴백이라 결과는 맞았지만 slice 절감이 사라졌다). `vec:null` 객체는 정상 존재로 본다.
