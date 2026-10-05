@@ -4,7 +4,16 @@ on:
     inputs:
       limit:
         type: number
-        default: 50
+        description: 'shard당 처리 수 (0은 shard 전체)'
+        default: 0
+      shard:
+        type: number
+        description: '0부터 시작하는 shard 번호 (-1은 전체 matrix)'
+        default: -1
+      shards:
+        type: number
+        description: '전체 shard 수 (1..256)'
+        default: 8
       dry_run:
         type: boolean
         default: true
@@ -17,15 +26,43 @@ on:
       time_axis_version:
         type: string
         default: ta-20261004
-concurrency: { group: backfill-phys, cancel-in-progress: false }
 permissions: { contents: read }
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.result }}
+    steps:
+      - uses: actions/github-script@v7
+        id: matrix
+        env:
+          SHARD: ${{ inputs.shard }}
+          SHARDS: ${{ inputs.shards }}
+          LIMIT: ${{ inputs.limit }}
+        with:
+          script: |
+            const shard = Number(process.env.SHARD);
+            const shards = Number(process.env.SHARDS);
+            const limit = Number(process.env.LIMIT);
+            if (!Number.isInteger(shards) || shards < 1 || shards > 256 ||
+                !Number.isInteger(shard) || shard < -1 || shard >= shards ||
+                !Number.isSafeInteger(limit) || limit < 0) throw new Error('shard/shards/limit 형식 오류');
+            return { shard: shard === -1 ? Array.from({ length: shards }, (_, i) => i) : [shard] };
   backfill:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    concurrency:
+      group: backfill-phys-${{ inputs.model_version }}-s${{ matrix.shard }}of${{ inputs.shards }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
       LIMIT: ${{ inputs.limit }}
+      SHARD: ${{ matrix.shard }}
+      SHARDS: ${{ inputs.shards }}
       DRY_RUN: ${{ inputs.dry_run }}
       MODEL_VERSION: ${{ inputs.model_version }}
       Q_VERSION: ${{ inputs.q_version }}

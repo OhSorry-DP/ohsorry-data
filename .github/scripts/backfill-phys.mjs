@@ -1,12 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { conditionalR2Client } from './r2-client.mjs';
 import { producePhysUser } from './phys-lib.mjs';
+import os from 'node:os';
+import { createFitPool } from './phys-fit-pool.mjs';
 
-const require = createRequire(import.meta.url);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const VALID_ID = /^[A-Za-z0-9_-]+$/;
 const CHECKPOINT_SCHEMA = 'phys-backfill-checkpoint/1';
@@ -24,7 +24,7 @@ export function parseArgs(args) {
       if (values.has(key)) throw new Error('중복 옵션');
       values.set(key, true); options[key] = true; continue;
     }
-    if (!['--users-list', '--manifest', '--model-version', '--q-version', '--time-axis-version', '--only', '--limit', '--resume'].includes(arg)) throw new Error(`알 수 없는 옵션: ${arg}`);
+    if (!['--users-list', '--manifest', '--model-version', '--q-version', '--time-axis-version', '--only', '--limit', '--resume', '--shard', '--shards'].includes(arg)) throw new Error(`알 수 없는 옵션: ${arg}`);
     if (values.has(arg)) throw new Error(`중복 옵션: ${arg}`);
     const value = args[++i];
     if (value === undefined || value.startsWith('--')) throw new Error(`옵션 값 누락: ${arg}`);
@@ -37,9 +37,14 @@ export function parseArgs(args) {
     time_axis_version: values.get('--time-axis-version') || null };
   if (values.has('--only')) options.only = [...new Set(values.get('--only').split(',').filter(Boolean))];
   if (options.only?.some(id => !VALID_ID.test(id))) throw new Error('--only에 유효하지 않은 ID가 있습니다');
+  if (values.has('--shard') || values.has('--shards')) {
+    options.shard = Number(values.get('--shard'));
+    options.shards = Number(values.get('--shards'));
+    validateShard(options.shard, options.shards);
+  }
   if (values.has('--limit')) {
     const n = Number(values.get('--limit'));
-    if (!Number.isInteger(n) || n < 1 || n > 50) throw new Error('--limit은 1..50 정수여야 합니다');
+    if (!Number.isSafeInteger(n) || (options.shards == null ? n < 1 || n > 50 : n < 0)) throw new Error('--limit은 단일 실행에서 1..50, shard 실행에서 0 이상 정수여야 합니다');
     options.limit = n;
   }
   options.resume = values.get('--resume') || null;
@@ -57,6 +62,22 @@ export function extractUserIds(list) {
     ids.add(id);
   }
   return [...ids].sort();
+}
+
+function validateShard(shard, shards) {
+  if (!Number.isInteger(shards) || shards < 1 || shards > 256 || !Number.isInteger(shard) || shard < 0 || shard >= shards) throw new Error('shard 형식 오류: 0 <= shard < shards <= 256');
+}
+
+export function shardUserIds(ids, shard, shards) {
+  if (shards == null && shard == null) return ids;
+  validateShard(shard, shards);
+  return ids.filter((id, index) => index % shards === shard);
+}
+
+export function checkpointKey(model, shard, shards) {
+  if (shards == null && shard == null) return `phys/backfill/checkpoint-${model}.json`;
+  validateShard(shard, shards);
+  return `phys/backfill/checkpoint-${model}-s${shard}of${shards}.json`;
 }
 
 const sha256 = value => createHash('sha256').update(value, 'utf8').digest('hex');
@@ -78,7 +99,9 @@ export async function runBackfill(options, deps = {}) {
   const manifestHash = sha256(manifestText);
   const idsAll = extractUserIds(JSON.parse(listText));
   const manifest = JSON.parse(manifestText);
-  let ids = options.only ? idsAll.filter(id => options.only.includes(id)) : idsAll;
+  const shardIds = shardUserIds(idsAll, options.shard, options.shards);
+  const ids = options.only ? shardIds.filter(id => options.only.includes(id)) : shardIds;
+  const limit = options.shards != null && options.limit === 0 ? ids.length : Math.min(options.limit, ids.length);
   const versions = options.versions;
   const summary = { attempted: 0, ready: 0, skipped: 0, failed: 0, next_cursor: 0, versions, manifest_hash: manifestHash, failures: [] };
   const checkpointPath = options.resume;
@@ -86,7 +109,8 @@ export async function runBackfill(options, deps = {}) {
   if (checkpointPath) {
     try {
       const previous = await readJson(checkpointPath);
-      if (previous.schema === CHECKPOINT_SCHEMA && previous.manifest_hash === manifestHash && versionsEqual(previous.versions, versions)) checkpoint = previous;
+      if (previous.schema === CHECKPOINT_SCHEMA && previous.manifest_hash === manifestHash && versionsEqual(previous.versions, versions) &&
+          (previous.shard ?? null) === (options.shard ?? null) && (previous.shards ?? null) === (options.shards ?? null)) checkpoint = previous;
     } catch (error) { if (error?.code !== 'ENOENT') throw error; }
     if (checkpoint.schema !== CHECKPOINT_SCHEMA || checkpoint.manifest_hash !== manifestHash || !versionsEqual(checkpoint.versions, versions)) {
       checkpoint = { schema: CHECKPOINT_SCHEMA, versions, manifest_hash: manifestHash, cursor: 0, success: {}, failures: {} };
@@ -108,28 +132,33 @@ export async function runBackfill(options, deps = {}) {
       const value = await client.read(key); return value == null ? null : (typeof value === 'string' ? value : value.body);
     } });
   });
-  const fitUser = deps.fitUser || require('./vendor/physTheta.js').fitUser;
-  const max = Math.min(options.limit, ids.length);
+  let pool;
+  const fitUser = deps.fitUser || (async input => {
+    pool ||= createFitPool(input.model, options.concurrency ?? os.availableParallelism());
+    return pool.fitUser(input);
+  });
+  const max = limit;
   const startIndex = index;
   while (index < ids.length && visited < max) {
     const id = ids[index++]; visited++; attempts.push({ id, retry: false });
   }
   for (const id of retryIds) {
-    if (attempts.length >= options.limit) break;
+    if (attempts.length >= limit) break;
+    if (attempts.some(item => item.id === id)) continue;
     attempts.push({ id, retry: true });
   }
-  // Failed IDs rejoin only after the current normal traversal reaches its end.
-  if (startIndex >= ids.length && attempts.length < options.limit) {
-    for (const id of retryIds) if (attempts.length < options.limit && !attempts.some(item => item.id === id)) attempts.push({ id, retry: true });
+  // 일반 순회가 끝난 뒤 남은 회차 용량으로 실패 ID를 재시도한다.
+  if (startIndex >= ids.length && attempts.length < limit) {
+    for (const id of retryIds) if (attempts.length < limit && !attempts.some(item => item.id === id)) attempts.push({ id, retry: true });
   }
   if (!versions.model_version || !versions.q_version || !versions.time_axis_version || manifest?.publishable !== true) {
     summary.skipped = attempts.length; summary.next_cursor = index;
     for (const { id } of attempts) summary.failures.push({ id, reason: !versions.model_version || !versions.q_version || !versions.time_axis_version ? 'versions_unset' : 'assets_unpublished' });
   } else {
-    const concurrency = options.concurrency ?? 1;
+    const concurrency = options.concurrency ?? (deps.produce || deps.fitUser ? 1 : os.availableParallelism());
     if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('유저 병렬 수는 양의 정수여야 합니다');
     let attemptIndex = 0;
-    await Promise.all(Array.from({ length: Math.min(concurrency, attempts.length) }, async () => {
+    try { await Promise.all(Array.from({ length: Math.min(concurrency, attempts.length) }, async () => {
     while (attemptIndex < attempts.length) {
       const { id } = attempts[attemptIndex++];
       summary.attempted++;
@@ -180,11 +209,12 @@ export async function runBackfill(options, deps = {}) {
         summary.failures.push({ id, reason, error_message });
       }
     }
-    }));
+    })); } finally { await pool?.close(); }
   }
   summary.next_cursor = index >= ids.length ? 0 : index;
   checkpoint.cursor = summary.next_cursor;
   checkpoint.versions = versions; checkpoint.manifest_hash = manifestHash;
+  if (options.shards != null) { checkpoint.shard = options.shard; checkpoint.shards = options.shards; }
   if (checkpointPath && !options.dryRun) await atomicJson(checkpointPath, checkpoint);
   const cpu = process.cpuUsage(cpuStart), wallMs = Math.max(0, now().getTime() - wallStart);
   summary.timing = { wall_ms: wallMs, cpu_user_ms: Math.round(cpu.user / 1000), cpu_system_ms: Math.round(cpu.system / 1000) };
@@ -192,7 +222,7 @@ export async function runBackfill(options, deps = {}) {
   return summary;
 }
 
-export const HELP = `사용법: node backfill-phys.mjs --users-list <local JSON> --manifest <local T04 JSON> [옵션]\n\n옵션:\n  --model-version <값> --q-version <값> --time-axis-version <값>\n  --only <ID,ID> --limit <1..50> --resume <checkpoint path>\n  --dry-run (기본값) | --write\n`;
+export const HELP = `사용법: node backfill-phys.mjs --users-list <local JSON> --manifest <local T04 JSON> [옵션]\n\n옵션:\n  --model-version <값> --q-version <값> --time-axis-version <값>\n  --only <ID,ID> --limit <1..50> --resume <checkpoint path>\n  --shard <0부터 시작하는 번호> --shards <1..256>\n  shard 실행의 --limit은 0 이상이며 0은 shard 전체를 처리합니다.\n  --dry-run (기본값) | --write\n`;
 
 async function main() {
   try {

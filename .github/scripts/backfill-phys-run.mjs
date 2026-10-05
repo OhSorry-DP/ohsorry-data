@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { parseArgs, runBackfill } from './backfill-phys.mjs';
+import { parseArgs, runBackfill, checkpointKey } from './backfill-phys.mjs';
 import { conditionalR2Client } from './r2-client.mjs';
 
 export async function run(env = process.env, deps = {}) {
@@ -14,15 +14,16 @@ export async function run(env = process.env, deps = {}) {
   if (!['true', 'false'].includes(dryRun)) throw new Error('dry_run 형식 오류');
   const options = parseArgs(['--users-list', 'users-list.json', '--manifest', 'phys/manifest/phys-clear-v1.json',
     '--model-version', model, '--q-version', q, '--time-axis-version', timeAxis,
-    '--limit', env.LIMIT || '50', dryRun === 'true' ? '--dry-run' : '--write']);
+    ...(env.SHARDS != null || env.SHARD != null ? ['--shard', env.SHARD ?? '0', '--shards', env.SHARDS ?? '1'] : []),
+    '--limit', env.LIMIT || (env.SHARDS != null ? '0' : '50'), dryRun === 'true' ? '--dry-run' : '--write']);
   options.concurrency = (deps.cores || os.availableParallelism)();
   const r2 = deps.r2 || conditionalR2Client({ account: env.CLOUDFLARE_ACCOUNT_ID, token: env.CLOUDFLARE_API_TOKEN });
-  const checkpointKey = `phys/backfill/checkpoint-${model}.json`;
+  const key = checkpointKey(model, options.shard, options.shards);
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'phys-backfill-run-'));
   options.resume = path.join(dir, 'checkpoint.json');
   try {
     // R2를 선택하면 artifact 실행 이력 조회 없이 다음 회차에서 바로 복원할 수 있다.
-    const previous = await r2.read(checkpointKey);
+    const previous = await r2.read(key);
     if (previous) await fs.writeFile(options.resume, previous.body, 'utf8');
     const result = await (deps.runBackfill || runBackfill)(options, {
       r2,
@@ -35,8 +36,8 @@ export async function run(env = process.env, deps = {}) {
     });
     if (!options.dryRun) {
       const body = await fs.readFile(options.resume, 'utf8');
-      await r2.put(checkpointKey, body, previous?.etag ?? null);
-      if ((await r2.read(checkpointKey))?.body !== body) throw new Error('checkpoint 게시 검증 실패');
+      await r2.put(key, body, previous?.etag ?? null);
+      if ((await r2.read(key))?.body !== body) throw new Error('checkpoint 게시 검증 실패');
     }
     return result;
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
