@@ -228,7 +228,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Verify uploaded R2 user and refresh coach results
+      - name: Verify uploaded R2 user and refresh physical evidence
         run: |
           node --input-type=module <<'JS'
           import { createHash } from 'node:crypto';

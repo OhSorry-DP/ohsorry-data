@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { cdnEtag, conditionalR2Client, createRequestGate, md5 } from '../r2-client.mjs';
 
 function fakeClock() {
@@ -27,14 +26,14 @@ test('GET, HEAD, and PUT use the same request gate', async () => {
   const client = conditionalR2Client({ account: 'a', token: 'secret', requestGate: gate,
     fetchImpl: async (url, init) => {
       starts.push([init.method, clock.now()]);
-      if (url.includes('?prefix=')) return response(200, JSON.stringify({ result: [{ key: 'coach/relative/current.json', etag: md5('{}') }] }));
+      if (url.includes('?prefix=')) return response(200, JSON.stringify({ result: [{ key: 'fixture/current.json', etag: md5('{}') }] }));
       if (init.method === 'PUT') return response(200);
       return response(200, '{}', { etag: '"strong"' });
     } });
   await Promise.all([
-    client.read('coach/relative/current.json'),
+    client.read('fixture/current.json'),
     cdnEtag('asset', { requestGate: gate, fetchImpl: async (_url, init) => { starts.push([init.method, clock.now()]); return response(200, '', { etag: '"x"' }); } }),
-    client.put('coach/relative/current.json', '{}', '"strong"'),
+    client.put('fixture/current.json', '{}', '"strong"'),
   ]);
   assert.deepEqual(starts.map(([method]) => method), ['GET', 'HEAD', 'PUT', 'GET']);
   assert.deepEqual(starts.map(([, time]) => time), [0, 500, 1000, 1500]);
@@ -67,12 +66,4 @@ test('a failed attempt releases the queue for retry and later work', async () =>
   await assert.rejects(client.listEntries('first'), /fixture/);
   await Promise.all([client.listEntries('retry'), client.listEntries('next')]);
   assert.deepEqual(starts, [0, 500, 1000]);
-});
-
-test('relative workflow injects 2req/s and preserves the daily 03:05 cron', () => {
-  const workflow = fs.readFileSync(new URL('../../workflows/dump-users-list.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /cron: '5 18 \* \* \*'.*UTC 18:05 = KST 03:05/);
-  assert.match(workflow, /cron: '\*\/30 \* \* \* \*'/);
-  assert.match(workflow, /args=\(.*--request-rate 2\)/);
-  assert.match(workflow, /github\.event\.schedule/);
 });

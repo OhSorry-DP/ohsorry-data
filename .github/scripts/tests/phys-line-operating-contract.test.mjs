@@ -168,12 +168,11 @@ test('dump 후 직접 CLI, continue-on-error, 수동 refresh와 v2 기본 버전
   assert.match(backfill, /conditionalR2Client/);
 });
 
-test('야간 2 req/s·03:05 설정과 checkout의 vendor 경로를 보장한다', async () => {
+test('users-list 03:05 설정과 checkout의 물리 vendor 경로를 보장한다', async () => {
   const [refresh, backfill, runner, , , , backfillWorkflow, refreshWorkflow] = await readContracts();
   const nightly = await fs.readFile(new URL('../../../.github/workflows/dump-users-list.yml', import.meta.url), 'utf8');
   const workflowSource = `${nightly}\n${backfillWorkflow}\n${refreshWorkflow}`;
   assert.match(workflowSource, /schedule:[\s\S]*cron: ['"]5 18 \* \* \*['"]/);
-  assert.match(workflowSource, /--request-rate 2/);
   assert.match(runner, /phys\/manifest\/\$\{model\}\.json/);
   assert.match(refresh, /phys\/user/);
   const dataPath = new URL('../vendor/physLine.js', import.meta.url);

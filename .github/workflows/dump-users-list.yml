@@ -21,17 +21,6 @@ on:
     - cron: '*/30 * * * *'   # songs.json 만
     - cron: '5 18 * * *'     # 전체 재생성 — UTC 18:05 = KST 03:05
   workflow_dispatch:         # 수동 실행은 항상 전체 재생성
-    inputs:
-      relative_dry_run:
-        description: '상대 모집단 계산만 검증하고 게시하지 않음'
-        required: false
-        default: false
-        type: boolean
-      relative_limit:
-        description: '상대 모집단 대상 상한 (예: 50)'
-        required: false
-        default: ''
-        type: string
 
 concurrency:
   group: dump-users-list
@@ -46,8 +35,6 @@ jobs:
     env:
       # schedule 문자열로 어느 cron 이 깨웠는지 구분한다(수동 실행이면 빈 값 → 전체).
       SCHEDULE: ${{ github.event.schedule }}
-      RELATIVE_DRY_RUN: ${{ github.event.inputs.relative_dry_run || 'false' }}
-      RELATIVE_LIMIT: ${{ github.event.inputs.relative_limit || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,12 +47,10 @@ jobs:
           if [ "$SCHEDULE" = "*/30 * * * *" ]; then
             echo "BUILD_ARGS=--songs"                 >> "$GITHUB_ENV"
             echo "FILES=songs.json"                   >> "$GITHUB_ENV"
-            echo "RELATIVE_BUILD=false"               >> "$GITHUB_ENV"
             echo "범위: songs.json 만 (30분 주기)"
           else
             echo "BUILD_ARGS="                        >> "$GITHUB_ENV"
             echo "FILES=users-list.json users-list-slim.json songs.json" >> "$GITHUB_ENV"
-            echo "RELATIVE_BUILD=true"                >> "$GITHUB_ENV"
             echo "범위: 전체 재생성 (users-list + songs)"
           fi
 
@@ -126,48 +111,3 @@ jobs:
           }
           for f in $FILES; do put "$f"; done
           exit $rc
-
-      - name: Validate relative inputs
-        if: ${{ !cancelled() && env.RELATIVE_BUILD == 'true' }}
-        id: relative_options
-        env:
-          RELATIVE_DRY_RUN: ${{ env.RELATIVE_DRY_RUN }}
-          RELATIVE_LIMIT: ${{ env.RELATIVE_LIMIT }}
-        run: |
-          if [ -n "$RELATIVE_LIMIT" ] && [ "$RELATIVE_DRY_RUN" != "true" ]; then
-            echo "::error::relative_limit은 relative_dry_run=true일 때만 사용할 수 있습니다"
-            exit 1
-          fi
-          if [ -n "$RELATIVE_LIMIT" ] && ! [[ "$RELATIVE_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::relative_limit은 양의 정수여야 합니다"
-            exit 1
-          fi
-
-      - name: Prepare relative resume directory
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.upload.outcome == 'success' && env.RELATIVE_BUILD == 'true' }}
-        run: mkdir -p .coach-relative-resume
-
-      - name: Build relative population
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.upload.outcome == 'success' && env.RELATIVE_BUILD == 'true' }}
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
-          RELATIVE_DRY_RUN: ${{ env.RELATIVE_DRY_RUN }}
-          RELATIVE_LIMIT: ${{ env.RELATIVE_LIMIT }}
-        run: |
-          args=(--users-list users-list.json --resume .coach-relative-resume --request-rate 2)
-          if [ -n "$RELATIVE_LIMIT" ]; then args+=(--limit "$RELATIVE_LIMIT"); fi
-          if [ "$RELATIVE_DRY_RUN" = "true" ]; then args+=(--dry-run); fi
-          node .github/scripts/dump-coach-relative.mjs "${args[@]}"
-
-      - name: Preserve relative resume state
-        if: ${{ always() && env.RELATIVE_BUILD == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: coach-relative-resume-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            .coach-relative-resume/manifest.json
-            .coach-relative-resume/inputs.json
-            .coach-relative-resume/result.json
-          if-no-files-found: ignore
-          retention-days: 7
