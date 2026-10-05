@@ -88,6 +88,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-05 — 실력선 phys-line-v2 생산 경로
+
+- 자산 로더·생산자·백필이 `phys-line-v2`(35축·DP 전채보 자산)를 읽는다. v1 경로 보존, repo variable `PHYS_MODEL_VERSION` 로 전환.
+- 백필 checkpoint 키에 manifest 해시 포함(자산이 바뀌면 이전 진행 기록을 쓰지 않음), shard 당 1 req/s 게이트.
+
 ### 2026-10-05 — 코치 절대 실력: θ 피팅 → 피처별 평균 NPS 실력선(DBR 방식)
 
 - 채보 축별 평균 NPS(`phys-line-v1` 자산) × 램프 가중(FC 1.00·EXH 0.95·HC 0.88·EASY/NORMAL 0.77·ASSIST 0.66·FAILED 0)으로 DBR 실력선과 같은 교차 보간 → 축별 50% 실력선·85% 안정선. 모델 피팅 없음, 유저 1명 수 ms.
