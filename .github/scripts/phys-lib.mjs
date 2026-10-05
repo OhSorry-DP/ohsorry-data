@@ -153,7 +153,8 @@ export async function producePhysUser({ id, dump, versions, manifest, io, comput
       generated_at: previous.absolute.generated_at, changed: false, counts };
     if (dryRun) return { status: 'planned', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };
     const compute = computePhysLine || require('./vendor/physLine.js').computePhysLine;
-    const result = compute({ rows, config });
+    // 계산 설정은 모델 자산이 아니라 physLine 정본 설정을 쓴다(v1 은 기본값 그대로).
+    const result = config.model_version === 'phys-line-v2' ? compute({ rows, config: require('./vendor/physLine.js').CONFIG_V2 }) : compute({ rows });
     // 계산값에 리더 계약의 단위·배치 가정·검증된 자산 출처를 붙인다.
     const axes = Object.fromEntries(Object.entries(result.axes ?? {}).map(([axis, value]) => [axis, config.model_version === 'phys-line-v2' ? {
       ...value,
@@ -163,6 +164,7 @@ export async function producePhysUser({ id, dump, versions, manifest, io, comput
       provenance: value.provenance ?? { source: 'phys-assets', model_hash: modelHash, source_revision },
     } : {
       ...value,
+      unit: value.unit ?? (axis.startsWith('HSTAIR') ? 'notes/s/both-hands' : 'notes/s/hand'),
       arrange_assumed: value.arrange_assumed ?? (rows.length && rows.every(row => row.arrange_assumed === rows[0].arrange_assumed)
         ? rows[0].arrange_assumed : 'unknown'),
       provenance: value.provenance ?? { source: 'phys-assets', model_hash: modelHash, source_revision },

@@ -84,21 +84,23 @@ test('주입한 검증 자산으로 생산할 때 로더를 다시 호출하지 
 
 test('동일 revision은 no-op, 배치 변경은 revision을 바꿔 한 번 fit한다', async () => {
   const io = ioOf(), fitted = [];
+  // 재생 판정은 운영 버전(phys-line-v1)과 저장본 버전을 비교한다.
+  const v1 = { ...versions, model_version: 'phys-line-v1' };
   const computePhysLine = input => { const revision = 'r' + fitted.length; fitted.push({ ...input, source_revision: revision }); return { model_version:'phys-line-v1', line_version:'phys-line-v1', mean_version:'mean-feature-span-v1', axes:{} }; };
-  const first = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, loadAssets: assetLoader, computePhysLine });
+  const first = await producePhysUser({ id: 'USER', dump: baseDump(), versions: v1, manifest, io, loadAssets: assetLoader, computePhysLine });
   const saved = JSON.parse(io.state.value.body);
   saved.absolute.source_revision = first.source_revision;
-  Object.assign(saved.absolute, versions);
+  Object.assign(saved.absolute, v1);
   saved.absolute.model_version = 'phys-line-v1';
   saved.absolute.line_version = 'phys-line-v1';
   saved.absolute.mean_version = 'mean-feature-span-v1';
   io.state.value = { body: JSON.stringify(saved), etag: 'etag-next' };
-  const same = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, loadAssets: assetLoader, computePhysLine });
+  const same = await producePhysUser({ id: 'USER', dump: baseDump(), versions: v1, manifest, io, loadAssets: assetLoader, computePhysLine });
   assert.equal(same.changed, false);
   assert.equal(fitted.length, 1);
   const changed = baseDump();
   changed.chart_arrange[0].arrange = 'RANDOM';
-  await producePhysUser({ id: 'USER', dump: changed, versions, manifest, io, loadAssets: assetLoader, computePhysLine });
+  await producePhysUser({ id: 'USER', dump: changed, versions: v1, manifest, io, loadAssets: assetLoader, computePhysLine });
   assert.equal(fitted.length, 2);
   assert.notEqual(fitted[0].source_revision, fitted[1].source_revision);
 });

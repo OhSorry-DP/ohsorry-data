@@ -76,7 +76,8 @@ function inflectionLevelV2(pairs) {
   const rates = groups.map(g => ({ level: g.levelSum / g.total, rate: g.clear / g.total }));
   if (rates.length < 2) return null;
   for (let i = 0; i < rates.length - 1; i++) { const a = rates[i], b = rates[i + 1]; if (a.rate >= 0.5 && b.rate < 0.5) { const t = (a.rate - 0.5) / (a.rate - b.rate); return a.level + t * (b.level - a.level); } }
-  return rates[rates.length - 1].rate >= 0.5 ? rates[rates.length - 1].level : rates[0].level;
+  // DBR 원본(inflectionLevelSec)과 같이 전 구간이 50% 이상이면 최고 레벨을 쓴다.
+  return rates[rates.length - 1].rate >= 0.5 ? Math.max(...pairs.map(p => p.level)) : rates[0].level;
 }
 
 function computePhysLineV1(selected, config) {
