@@ -140,9 +140,10 @@ export async function producePhysUser({ id, dump, versions, manifest, io, comput
     const rows = makeRows(String(id), dump, loaded.charts, counts);
     counts.included = rows.length;
     const modelHash = loaded.model.content_hash;
+    const config = loaded.model.line_config ?? loaded.model;
     const source_revision = sha256({ rows, versions, assets: [...loaded.charts].filter(([chartKey]) => rows.some((r) => r.chartKey === chartKey))
-      .map(([chartKey, chart]) => [chartKey, chart.content_hash]), modelHash, configHash: loaded.model.line_config?.content_hash,
-      line_version: loaded.model.line_config?.line_version, mean_version: loaded.model.line_config?.mean_version,
+      .map(([chartKey, chart]) => [chartKey, chart.content_hash]), modelHash, configHash: config.content_hash,
+      line_version: config.line_version, mean_version: config.mean_version,
       implementation: 'phys-line-v1', producer: IMPLEMENTATION });
     if (isReadyFor(previous, String(id), versions, source_revision)) return { status: 'ready', reason: null, key, source_revision,
       generated_at: previous.absolute.generated_at, changed: false, counts };
@@ -159,8 +160,9 @@ export async function producePhysUser({ id, dump, versions, manifest, io, comput
     }]));
     const absolute = { ...result, status: 'ready', purpose: 'clear', unit: 'notes/s', source_revision, generated_at: generatedAt, stale: false,
       axes,
-      model_version: result.model_version || loaded.model.line_config.model_version,
-      line_version: result.line_version || loaded.model.line_config.line_version, mean_version: result.mean_version || loaded.model.line_config.mean_version };
+      model_version: result.model_version || config.model_version,
+      line_version: result.line_version || config.line_version, mean_version: result.mean_version || config.mean_version,
+      q_version: config.q_version, time_axis_version: config.time_axis_version };
     const record = { schema_version: 'coach-skill-evidence/1', iidx_id: String(id), play_style: 'DP', absolute };
     await client.put(key, JSON.stringify(record), etag);
     return { status: 'ready', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };

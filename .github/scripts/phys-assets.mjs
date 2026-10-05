@@ -59,12 +59,14 @@ function validateHash(asset, raw, entry, label) {
 }
 
 function validateLineModel(model, label) {
-  const config = model.line_config;
+  // 게시된 모델은 실력선 설정 자체이며 기존 중첩 설정도 읽을 수 있다.
+  const config = model.schema_version === 'phys-line-config/1' ? model : model.line_config;
   if (!config || config.schema_version !== 'phys-line-config/1') throw new Error(`${label}: line config mismatch`);
   for (const [field, expected] of Object.entries(LINE_VERSIONS)) if (config[field] !== expected) throw new Error(`${label}: ${field} mismatch`);
-  if (config.purpose !== 'clear' || config.unit !== 'notes/s' || !Array.isArray(config.axes) || !sameValue(config.axes, LINE_AXES)) throw new Error(`${label}: immutable line config mismatch`);
+  if (!Array.isArray(config.axes) || !sameValue(config.axes, LINE_AXES)) throw new Error(`${label}: immutable line config mismatch`);
   for (const field of ['q_version', 'time_axis_version']) if (config[field] !== model[field]) throw new Error(`${label}: ${field} mismatch`);
   if (typeof config.content_hash !== 'string' || !/^[a-f0-9]{64}$/.test(config.content_hash) || contentHash(config) !== config.content_hash) throw new Error(`${label}: line config content_hash mismatch`);
+  if (model.schema_version === 'phys-line-config/1') return;
   if (!model.mean || typeof model.mean !== 'object') throw new Error(`${label}: mean assets missing`);
   for (const axis of LINE_AXES) {
     const mean = model.mean[axis];
@@ -161,7 +163,7 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
   const modelRaw = await readAsset(modelKey);
   const { parsed: model } = parseAsset(modelRaw, `model ${modelKey}`);
   validateHash(model, modelRaw, manifest.model, `model ${modelKey}`);
-  for (const [field, expected] of Object.entries(MODEL_FIELDS)) {
+  for (const [field, expected] of Object.entries(model.schema_version === 'phys-line-config/1' ? {} : MODEL_FIELDS)) {
     if (model[field] !== expected) throw new Error(`model ${field} mismatch`);
   }
   for (const field of VERSION_FIELDS) {
@@ -184,6 +186,10 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
     for (const field of VERSION_FIELDS) {
       if (chart[field] !== versions[field]) throw new Error(`chart ${field} mismatch: ${chartKey}`);
     }
+    if (!chart.features || Object.keys(chart.features).length !== LINE_AXES.length || LINE_AXES.some(axis => {
+      const feature = chart.features[axis];
+      return !feature || !(feature.meanNps === null || typeof feature.meanNps === 'number' && Number.isFinite(feature.meanNps) && feature.meanNps >= 0);
+    })) throw new Error(`chart mean features invalid: ${chartKey}`);
     loadedCharts.set(chartKey, chart);
   }
   return { status: 'ready', model, charts: loadedCharts, manifest };

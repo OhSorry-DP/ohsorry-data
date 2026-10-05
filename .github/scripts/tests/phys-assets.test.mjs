@@ -1,9 +1,29 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadPhysAssets, sha256 } from '../phys-assets.mjs';
 
 const versions = { model_version: 'phys-line-v1', q_version: 'q1', time_axis_version: 't1' };
 const axes = ['STAIR_UP', 'STAIR_DN', 'DOUBLE_STAIR', 'KEIMA', 'SPIRAL_UP', 'SPIRAL_DN', 'JUMP_WIDE', 'HSTAIR_SYM', 'HSTAIR_ASYM', 'CN'];
+test('불변 게시본 원문을 묶음과 개별 파일에서 그대로 검증한다', async (t) => {
+  const root = new URL('../../../../ohSorryRating/experiments/phys-proto/out/phys-assets/phys-line-v1/', import.meta.url);
+  let raw;
+  try { raw = await fs.readFile(new URL('manifest.json', root), 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return t.skip('로컬 게시본 없음'); throw error; }
+  const manifest = JSON.parse(raw);
+  const files = new Map([manifest.model, ...manifest.assets, manifest.bundle].filter(Boolean).map(entry => [entry.key, entry.path]));
+  const getText = key => fs.readFile(path.join(fileURLToPath(root), files.get(key)), 'utf8');
+  const bundled = await loadPhysAssets({ versions: manifest.versions, manifest, getText });
+  const { bundle, ...individualManifest } = manifest;
+  const individual = await loadPhysAssets({ versions: manifest.versions, manifest: individualManifest, getText });
+  assert.equal(bundled.status, 'ready');
+  assert.equal(bundled.model.schema_version, 'phys-line-config/1');
+  assert.equal(bundled.charts.size, manifest.assets.length);
+  assert.deepEqual(individual.model, bundled.model);
+  assert.deepEqual(individual.charts, bundled.charts);
+});
 function lineModel() {
   const config = { schema_version: 'phys-line-config/1', model_version: 'phys-line-v1', line_version: 'phys-line-v1', mean_version: 'mean-feature-span-v1',
     purpose: 'clear', unit: 'notes/s', axes, ...versions };
@@ -33,7 +53,7 @@ function fixture() {
     ...versions, source_revision: 'local', generated_at: '2026-10-05T00:00:00Z', b: { b0: 1, b1: 0, b2: 1, b3: 1 },
     ...lineModel(), kappa: [1, 2, 3, 4, 5, 6], covariateStats: { notes: { mean: 100, sd: 10 }, duration: { mean: 10, sd: 1 } }, pool: {} });
   const chart = hashed({ schema_version: 'phys-chart/1', chartKey, ...versions, songId: 'song/a', diff: 'ANOTHER', notes: 100,
-    duration: 10, features: { STAIR_UP: { maxQ: 2 } }, arrange: 'MIRROR', worstWindows: { STAIR_UP: [{ start: 1 }] } });
+    duration: 10, features: Object.fromEntries(axes.map(axis => [axis, { maxQ: 2, meanNps: null }])), arrange: 'MIRROR', worstWindows: { STAIR_UP: [{ start: 1 }] } });
   const chartAsset = { chartKey, key: `phys/chart/${versions.model_version}/${encodeURIComponent(chartKey)}.json`,
     content_hash: chart.content_hash, ...versions };
   const manifest = { schema_version: 'phys-assets-manifest/1', publishable: true, ...versions,
