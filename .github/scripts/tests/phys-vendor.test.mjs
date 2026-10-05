@@ -47,6 +47,12 @@ test('vendor import without Rating performs no network or filesystem reads', () 
     const net = require('node:net');
     const tls = require('node:tls');
     const Module = require('node:module');
+    // Read the module source before monitoring: Node's loader must read it to import it.
+    const filename = require('node:path').resolve(process.argv[1]);
+    const source = fs.readFileSync(filename, 'utf8');
+    const mod = new Module(filename, module);
+    mod.filename = filename;
+    mod.paths = Module._nodeModulePaths(require('node:path').dirname(filename));
     const calls = [];
     let monitoring = false;
     for (const [object, names, label] of [
@@ -62,9 +68,9 @@ test('vendor import without Rating performs no network or filesystem reads', () 
       fs[name] = function (...args) { if (monitoring) calls.push('fs.' + name); return original.apply(this, args); };
     }
     monitoring = true;
-    const mod = require(process.argv[1]);
+    mod._compile(source, filename);
     monitoring = false;
-    if (mod.AXES.length !== 10 || typeof mod.fitUser !== 'function') process.exit(3);
+    if (mod.exports.AXES.length !== 10 || typeof mod.exports.fitUser !== 'function') process.exit(3);
     if (calls.length) { process.stderr.write(calls.join(',') + '\n'); process.exit(4); }
   `;
   const result = spawnSync(process.execPath, ['-e', probe, vendorPath], {
