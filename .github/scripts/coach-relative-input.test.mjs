@@ -13,10 +13,10 @@ const dump = () => ({ user: { iidx_id: '00000001', star: 6.4, r_star: 20, native
 
 test('기본·canonical 축, 단위·방향 및 DP/SP 원천 값을 보존한다', () => {
   const user = input(dump());
-  assert.equal(registry.length, 36);
+  assert.equal(registry.length, 86);
   assert.equal(registry.some(item => item.key.includes('/weakness:')), false);
-  assert.deepEqual(registry.find(item => item.key === 'dp/osPattern:HSTAIR_SYM'),
-    { key: 'dp/osPattern:HSTAIR_SYM', valueUnit: 'feature_score', higherIsBetter: true });
+  assert.equal(registry.find(item => item.key === 'dp/osPattern:HSTAIR_SYM'), undefined);
+  assert.ok(registry.some(item => item.key === 'dp/osPattern:HANDS'));
   assert.equal(user.star, 6.4);
   for (const [key, value] of Object.entries({ 'dp/osPattern:NOTES': 12.5, 'sp/osPattern:NOTES': 99,
     'dp/osPattern:SOF-LAN': 0, 'dp/osPattern:KEIMA_L': 42, 'dp/radar:soflan': 27, 'sp/radar:notes': 88 })) {
@@ -28,7 +28,7 @@ test('원천 결손·비유한 값·문자열·보고문을 null로 보존하고
   const source = dump(); source.osPattern[1].peak = Infinity; source.osPattern[1].charge = '45';
   const before = structuredClone(source);
   const user = input(source);
-  for (const key of ['dp/osPattern:HSTAIR_SYM', 'dp/osPattern:PEAK', 'dp/osPattern:CHARGE']) {
+  for (const key of ['dp/osPattern:PEAK', 'dp/osPattern:CHARGE']) {
     assert.deepEqual(user.features[key], { value: null, recordCount: null });
   }
   assert.deepEqual(source, before);

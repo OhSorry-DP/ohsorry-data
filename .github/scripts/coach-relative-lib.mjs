@@ -64,6 +64,15 @@ export async function produceRelativeUser({ id, dump, io, assets, generatedAt, d
   if (!manifest) return staleOrMissing('manifest_missing', 0);
   if (!validManifest(manifest)) return staleOrMissing('invalid_manifest', 0, manifest?.population_version);
   if (assets?.featureVersion !== manifest.feature_version) return staleOrMissing('feature_mismatch', 0, manifest.population_version);
+  // 슬림 덤프의 곡 조인을 복원하며 refresh 호출부의 파일은 변경하지 않는다.
+  if (!assets.songsById && dump.dp?.some(row => row.ex_score > 0 && !row.textage_song_id)) {
+    try {
+      const songs = parse(await io.read('songs.json'));
+      if (!Array.isArray(songs) || songs.some(song => !song || song.song_id == null)
+        || new Set(songs.map(song => String(song.song_id))).size !== songs.length) throw new Error('invalid_songs');
+      assets = { ...assets, songsById: Object.fromEntries(songs.map(song => [song.song_id, song])), songsHash: sha256(songs) };
+    } catch { return staleOrMissing('songs_read_failed', 0, manifest.population_version); }
+  }
 
   const calculate = () => {
     const snapshotKey = `coach/relative/population/${manifest.population_version}.json`;
@@ -73,7 +82,7 @@ export async function produceRelativeUser({ id, dump, io, assets, generatedAt, d
       const { registry, calculation } = validatePopulation(parse(item), manifest);
       const versions = assets.versions || { featureVersion: manifest.feature_version };
       const sourceRegistry = assets.sourceRegistry || registry.filter(item => item.key.startsWith('dp/'));
-      const sourceRevision = sha256({ dump: sha256(dump), assets: assets.hashes, registry: sourceRegistry,
+      const sourceRevision = sha256({ dump: sha256(dump), songsHash: assets.songsHash, assets: assets.hashes, registry: sourceRegistry,
         codeHashes: assets.codeHashes });
       const fullRegistry = registry.map(item => item.key.startsWith('dp/') ? item : ({ ...item, key: `dp/${item.key}` }));
       const user = calculateUser(dump, fullRegistry, { featureVersion: manifest.feature_version, sourceRevision }, assets, assets.kernel);

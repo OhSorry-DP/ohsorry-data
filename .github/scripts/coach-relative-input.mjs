@@ -1,16 +1,19 @@
 // 상대 순위 입력 전용 순수 어댑터. 버전·해시는 생산자가 계산해서 주입한다.
 // 축별 기록 수는 생산자 helper로 공급하며 수치 σ는 명시적 원천만 사용한다.
 const DEFAULT_AXES = ['NOTES', 'CHORD', 'PEAK', 'CHARGE', 'SCRATCH', 'SOF-LAN', 'PHRASE', 'JACK', 'TRILL', 'RAND'];
+// 덤프의 user_ohsorry_radars 저장 축만 사용한다. 차트 전용 메타 축은 포함하지 않는다.
+const PATTERN_AXES = [...DEFAULT_AXES, 'STAIR_UP_L', 'STAIR_UP_R', 'STAIR_DN_L', 'STAIR_DN_R',
+  ...Array.from({ length: 7 }, (_, index) => [`K${index + 1}_L`, `K${index + 1}_R`]).flat(),
+  'DOUBLE_STAIR_L', 'DOUBLE_STAIR_R', 'KEIMA_L', 'KEIMA_R',
+  'HSTAIR_ONEHAND', 'HSTAIR_SYNC', 'HSTAIR_SAMESHAPE', 'HSTAIR_DIFFSHAPE', 'HANDS'];
 const RADAR_AXES = ['notes', 'peak', 'charge', 'chord', 'scratch', 'soflan'];
 const finite = value => typeof value === 'number' && Number.isFinite(value);
 const token = key => key.toUpperCase().replace(/[^A-Z0-9]/g, '');
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
-// 메타는 feature-scores의 _meta 객체다. 약점 추가 축은 현행 보고에 쓰이는 축만 생산자가 지정한다.
+// 메타 확장은 저장 축을 늘리지 않는다. 약점 추가 축은 현행 보고에 쓰이는 축만 생산자가 지정한다.
 export function buildRelativeRegistry({ featureMeta = {}, weaknessAxes = [] } = {}) {
-  const names = (featureMeta.feats || []).map(item => typeof item === 'string' ? item : item?.name);
-  const canonical = [...new Set([...DEFAULT_AXES, ...names,
-    ...Object.keys(featureMeta.maxScoreByFeat || {})])];
+  const canonical = PATTERN_AXES;
   if (canonical.some(key => typeof key !== 'string' || !key)) throw new Error('canonical 피처 이름이 유효하지 않습니다');
   const registry = [];
   for (const style of ['dp', 'sp']) {

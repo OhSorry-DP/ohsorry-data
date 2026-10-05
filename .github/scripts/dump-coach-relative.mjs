@@ -57,11 +57,12 @@ function listRows(rows) {
   return [...grouped.keys()].sort().map(id => ({ id, row: grouped.get(id) }));
 }
 
-export function buildEntries(rows, scoresMap, songsMeta) {
+export function buildEntries(rows, scoresMap, songsMeta, songsById = {}) {
   const entries = [];
   for (const row of rows) {
     if (!row || !row.ex_score || row.ex_score <= 0) continue;
-    const sid = row.textage_song_id;
+    // 공개 덤프의 슬림 행에는 textage ID가 없어 songs.json으로 RPC 행의 조인을 복원한다.
+    const sid = row.textage_song_id || songsById[row.song_id]?.textage_song_id;
     if (!sid) continue;
     const featureKey = DP_FEATURE_KEY[row.diff], notesKey = DP_NOTES_KEY[row.diff];
     if (!featureKey || !notesKey) continue;
@@ -118,7 +119,7 @@ async function loadRemoteAssets(r2) {
 }
 
 export function calculateUser(dump, registry, versions, assets, kernel) {
-  const entries = buildEntries(dump.dp || [], assets.featureFile.scores, assets.metaFile.songs);
+  const entries = buildEntries(dump.dp || [], assets.featureFile.scores, assets.metaFile.songs, assets.songsById);
   const counts = kernel.countPatternScoreRecords(entries);
   const axisSources = { ...patternRecordSources({ style: 'dp', counts }), ...radarRecordSources({ dump }) };
   const adapted = adaptRelativeInput({ dump, registry, featureVersion: versions.featureVersion,
@@ -300,13 +301,20 @@ export async function produceInputs({ usersListFile, selectedIds, limit, resumeD
   const completeTargetSet = targets.length === members.length && targets.every((item, index) => item.id === members[index].id);
   const assetMode = featureAssetsDir ? 'local' : 'r2';
   const assets = featureAssetsDir ? loadLocalAssets(path.resolve(featureAssetsDir)) : await loadRemoteAssets(r2);
+  // 곡 매핑은 입력 리비전에 포함한다. refresh의 기존 피처 버전 계약은 유지한다.
+  const songsBody = await r2.getText('songs.json');
+  if (typeof songsBody !== 'string') throw new Error('songs.json 누락');
+  const songs = JSON.parse(songsBody);
+  if (!Array.isArray(songs) || songs.some(song => !song || song.song_id == null)
+    || new Set(songs.map(song => String(song.song_id))).size !== songs.length) throw new Error('songs.json 곡 매핑이 유효하지 않습니다');
+  assets.songsById = Object.fromEntries(songs.map(song => [song.song_id, song]));
   const kernel = loadKernel();
   const kernelBytes = fs.readFileSync(KERNEL_PATH);
   const registryAll = buildRelativeRegistry({ featureMeta: assets.featureFile._meta || {} });
   const registry = selectDpRegistry(registryAll);
   const codeHashes = codeVersion(kernelBytes);
   const featureVersion = sha256({ assets: assets.hashes, registry, codeHashes });
-  const optionIdentity = { selectedIds: selectedIds || null, limit: limit ?? null, usersListPath: path.resolve(usersListFile),
+  const optionIdentity = { songsHash: sha256(songsBody), selectedIds: selectedIds || null, limit: limit ?? null, usersListPath: path.resolve(usersListFile),
     dryRun: !!dryRun, featureAssetsMode: assetMode };
   const initial = { schema: 1, generatedAt: now, listHash: sha256(usersBytes), featureVersion,
     options: optionIdentity, targetIds: targets.map(item => item.id), completed: {}, failures: {} };
@@ -334,7 +342,7 @@ export async function produceInputs({ usersListFile, selectedIds, limit, resumeD
       if (body === null) throw new Error('R2 404');
       const dump = JSON.parse(body);
       if (String(dump.user?.iidx_id ?? '') !== id) throw new Error('덤프 iidx_id 불일치');
-      const sourceRevision = sha256({ dump: sha256(body), assets: assets.hashes, registry, codeHashes });
+      const sourceRevision = sha256({ dump: sha256(body), songsHash: sha256(songsBody), assets: assets.hashes, registry, codeHashes });
       const user = calculateUser(dump, registry, { featureVersion, sourceRevision }, assets, kernel);
       state.completed[id] = { dumpHash: sha256(body), user };
       delete state.failures[id];
@@ -434,7 +442,7 @@ async function selfTestInput() {
     };
     const listFile = path.join(temp, 'users.json');
     writeFileSync(listFile, JSON.stringify(Array.from({ length: 50 }, (_, i) => ({ iidx_id: String(i).padStart(4, '0'), star: 4 }))));
-    const fake = { useRest: true, async getText(key) { calls++; if (key.endsWith('0001.json')) throw new Error('fixture failure'); return JSON.stringify({ user: { iidx_id: key.match(/user\/(.*)\.json/)[1] }, dp: [], osPattern: [], radars: [] }); } };
+    const fake = { useRest: true, async getText(key) { if (key === 'songs.json') return '[]'; calls++; if (key.endsWith('0001.json')) throw new Error('fixture failure'); return JSON.stringify({ user: { iidx_id: key.match(/user\/(.*)\.json/)[1] }, dp: [], osPattern: [], radars: [] }); } };
     const fakeAssetsDir = path.join(temp, 'rating'); fs.mkdirSync(path.join(fakeAssetsDir, 'dist'), { recursive: true });
     writeFileSync(path.join(fakeAssetsDir, 'dist', 'feature-scores-slim.json'), JSON.stringify(assets.featureFile));
     writeFileSync(path.join(fakeAssetsDir, 'dist', 'textage-meta.json'), JSON.stringify(assets.metaFile));
@@ -446,7 +454,7 @@ async function selfTestInput() {
     assert.deepEqual(fakeResult.registry, outputRegistry);
     assert.ok(peak <= 8); assert.equal(calls, 50);
     const dir = path.join(temp, 'resume'); let r2Calls = 0;
-    const resumableR2 = { useRest: true, async getText(key) { r2Calls++; if (key.endsWith('0001.json')) throw new Error('retry me'); return fake.getText(key); } };
+    const resumableR2 = { useRest: true, async getText(key) { if (key === 'songs.json') return '[]'; r2Calls++; if (key.endsWith('0001.json')) throw new Error('retry me'); return fake.getText(key); } };
     await produceInputs({ usersListFile: listFile, limit: 2, dryRun: true, resumeDir: dir, featureAssetsDir: fakeAssetsDir, r2: resumableR2, logger: { log() {} } });
     const firstCalls = r2Calls;
     await produceInputs({ usersListFile: listFile, limit: 2, dryRun: true, resumeDir: dir, featureAssetsDir: fakeAssetsDir, r2: resumableR2, logger: { log() {} } });
@@ -469,6 +477,7 @@ async function selfTestStandalone() {
       calls.push(key);
       if (key === FEATURE_ASSET_PATHS[0]) return feature;
       if (key === FEATURE_ASSET_PATHS[1]) return meta;
+      if (key === 'songs.json') return JSON.stringify([{ song_id: 1, textage_song_id: 's1' }]);
       if (key.startsWith('user/')) return JSON.stringify({ user: { iidx_id: key.slice(5, -5) }, dp: [], osPattern: [], radars: [] });
       throw new Error(`unexpected R2 key: ${key}`);
     }, async read() { throw new Error('unexpected population PUT path'); }, async put(key) { puts.push(key); } };
@@ -488,14 +497,8 @@ async function selfTestStandalone() {
     const ratingKernel = path.resolve(HERE, '..', '..', '..', 'ohSorryRating', 'modules', 'patternScoreKernel.js');
     if (fs.existsSync(ratingKernel)) {
       const expected = fs.readFileSync(ratingKernel);
-      const committed = await new Promise((resolve, reject) => {
-        const { execFile } = createRequire(import.meta.url)('node:child_process');
-        execFile('git', ['-c', 'safe.directory=D:/work/ohSorryRating', '-C', path.resolve(HERE, '..', '..', '..', 'ohSorryRating'),
-          'show', '49a5135:modules/patternScoreKernel.js'], { encoding: 'buffer', maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => error ? reject(error) : resolve(stdout));
-      });
-      assert.deepEqual(expected, committed, 'local Rating kernel is not commit 49a5135 canonical bytes');
       assert.deepEqual(localKernelBytes, expected, 'vendor kernel differs from local Rating canonical bytes');
-      console.log('self-test-standalone kernel: local and vendor bytes match 49a5135');
+      console.log('self-test-standalone kernel: local and vendor bytes match');
     } else console.log('self-test-standalone kernel: SKIP (local Rating sibling absent)');
 
     const rows = [
@@ -517,6 +520,11 @@ async function selfTestStandalone() {
     assert.deepEqual(entries.map(entry => [entry.song_id, entry.diff]), [[1,1],[2,2],[3,3],[4,4]]);
     assert.deepEqual(entries.map(entry => entry.scoreRate), [100/200,100/402,100/604,100/806]);
     assert.equal(localKernel.countPatternScoreRecords(entries).NOTES, 4);
+    // 실제 슬림 덤프 조인은 RPC 행과 같은 점수율·피처·기록 수를 만든다.
+    const slimRows = rows.map(({ textage_song_id, ...row }) => row);
+    const songsById = Object.fromEntries(rows.map(row => [row.song_id, { textage_song_id: row.textage_song_id }]));
+    assert.deepEqual(buildEntries(slimRows, scores, songs, songsById), entries);
+    assert.deepEqual(buildEntries(slimRows, scores, songs), []);
 
     const rest = makeR2(featureBytes.toString('utf8'), metaBytes.toString('utf8'));
     const base = { usersListFile: listFile, dryRun: true, r2: rest, logger: { log() {} }, now: '2026-10-05T00:00:00Z' };

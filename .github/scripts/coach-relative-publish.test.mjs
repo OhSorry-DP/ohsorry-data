@@ -6,13 +6,14 @@ import { buildRelativeRegistry } from './coach-relative-input.mjs';
 for (const legacy of [false, true]) {
   test(`실제 덤프 행 모양을 입력부터 게시까지 보존한다 (${legacy ? '이전 접두 체크포인트' : '정규화 입력'})`, async () => {
     const assets = { featureFile: { scores: { song: { DP_NOR: { NOTES: 100 } } } },
-      metaFile: { songs: { song: { notes: { DN: 100 } } } } };
+      metaFile: { songs: { song: { notes: { DN: 100 } } } },
+      songsById: Object.fromEntries(Array.from({ length: 30 }, (_, song_id) => [song_id, { textage_song_id: 'song' }])) };
     const sourceRegistry = selectDpRegistry(buildRelativeRegistry());
     // 실제 덤프의 방식별 집계 행·null 축·유효 DP 성적 구조를 축소해 고정한다.
     const dump = { user: { iidx_id: 'C200074777849', star: 5.78 },
       osPattern: [{ play_style: 0, notes: 712.51 }, { play_style: 1, notes: 879.396, chord: null }],
       radars: [{ play_style: 0, notes: 99 }, { play_style: 1, notes: 120, soft: 0 }],
-      dp: Array.from({ length: 30 }, (_, song_id) => ({ song_id, diff: 1, ex_score: 100, textage_song_id: 'song' })) };
+      dp: Array.from({ length: 30 }, (_, song_id) => ({ song_id, diff: 1, ex_score: 100 })) };
     const user = calculateUser(dump, sourceRegistry, { featureVersion: 'v', sourceRevision: 's' }, assets,
       { countPatternScoreRecords: entries => ({ NOTES: entries.length }) });
     const users = Array.from({ length: 30 }, (_, i) => ({ ...user, iidxId: String(i).padStart(8, '0') }));
