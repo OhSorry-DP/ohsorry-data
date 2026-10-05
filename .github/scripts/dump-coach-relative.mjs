@@ -146,6 +146,22 @@ const parseRemote = (item, key) => {
 };
 
 export async function publishSnapshot(report, { r2, resumeDir, poolFn = pool, logger = console } = {}) {
+  try { return await publishSnapshotImpl(report, { r2, resumeDir, poolFn, logger }); }
+  catch (error) {
+    if (error.publishSummary) {
+      const failed = error.publishSummary.failed || { manifest: error.message };
+      const reasons = {};
+      for (const reason of Object.values(failed)) {
+        const category = String(reason).match(/\bHTTP\s+\d{3}\b/)?.[0] || String(reason);
+        reasons[category] = (reasons[category] || 0) + 1;
+      }
+      logger.log(`게시 실패 요약: 실패=${Object.keys(failed).length}, 사유별=${JSON.stringify(reasons)}, 앞10개ID=${JSON.stringify(Object.keys(failed).sort().slice(0, 10))}, populationVersion=${error.publishSummary.populationVersion}`);
+    }
+    throw error;
+  }
+}
+
+async function publishSnapshotImpl(report, { r2, resumeDir, poolFn, logger }) {
   if (!report?.completePopulation || !Array.isArray(report.users) || !r2?.read || !r2?.put) {
     throw new Error('완전 모집단과 조건부 R2 client가 필요합니다');
   }
@@ -160,7 +176,7 @@ export async function publishSnapshot(report, { r2, resumeDir, poolFn = pool, lo
   // 모집단 버전은 실제로 게시하는 입력으로만 정한다. 입력 단계 값은 메모리 객체(undefined 포함)로 계산돼
   // JSON 왕복 뒤 값과 다를 수 있어 로그용으로만 쓴다(10-05 본 실행에서 불일치로 중단됨).
   const populationVersion = sha256(versionInput);
-  const population = buildPopulation({ users: sortedUsers, registry, featureVersion, populationVersion, generatedAt });
+  let population = buildPopulation({ users: sortedUsers, registry, featureVersion, populationVersion, generatedAt });
   const populationKey = `coach/relative/population/${populationVersion}.json`;
   const populationRecord = { schema_version: 'coach-relative-population/1', rank_version: population.rank_version,
     feature_version: featureVersion, population_version: populationVersion,
@@ -169,15 +185,29 @@ export async function publishSnapshot(report, { r2, resumeDir, poolFn = pool, lo
   const immutablePut = async (key, value) => {
     const body = jsonBody(value); const existing = await r2.read(key);
     if (existing) {
-      if (sha256(existing.body) !== sha256(body)) throw new Error(`immutable 자산 불일치: ${key}`);
-      return { body, hash: sha256(body), skipped: true };
+      // 계약의 시각을 보존하고 회차 시각만 비교에서 제외한다. 다른 필드는 모두 검사한다.
+      const comparable = record => {
+        const copy = JSON.parse(jsonBody(record));
+        if (key === populationKey && copy.calculation) delete copy.calculation.generated_at;
+        else if (copy.relative) {
+          delete copy.relative.generated_at;
+          delete copy.relative.population_generated_at;
+        }
+        return stableJson(copy);
+      };
+      if (comparable(parseRemote(existing, key)) !== comparable(value)) throw new Error(`immutable 자산 불일치: ${key}`);
+      return { body: existing.body, hash: sha256(existing.body), skipped: true };
     }
     await r2.put(key, body, null);
     const verified = await r2.read(key);
     if (!verified || sha256(verified.body) !== sha256(body)) throw new Error(`immutable PUT 검증 실패: ${key}`);
     return { body, hash: sha256(body), skipped: false };
   };
-  const populationSaved = await immutablePut(populationKey, populationRecord);
+  const populationSaved = await immutablePut(populationKey, populationRecord).catch(error => {
+    error.publishSummary = { populationVersion, failed: { population: String(error?.message || error) } };
+    throw error;
+  });
+  population = JSON.parse(populationSaved.body).calculation;
   const stateFile = resumeDir ? path.join(resumeDir, `publish-${populationVersion}.json`) : null;
   let state = stateFile && fs.existsSync(stateFile) ? readJson(stateFile) : { populationVersion, staged: {}, users: {} };
   if (state.populationVersion !== populationVersion) throw new Error('resume 게시 버전 불일치');
@@ -190,32 +220,40 @@ export async function publishSnapshot(report, { r2, resumeDir, poolFn = pool, lo
     const body = jsonBody(result); outputs.set(user.iidxId, { result, body, hash: sha256(body) });
   }
   const putImmutableUser = async (id, stageKey) => {
-    if (state.staged[id]) return;
     const output = outputs.get(id); const saved = await immutablePut(stageKey, output.result);
     if (saved.skipped) skips++; else puts++;
     const verified = await r2.read(stageKey); gets++;
-    if (!verified || sha256(verified.body) !== output.hash) throw new Error(`staging 검증 실패: ${id}`);
-    state.staged[id] = output.hash; await saveState();
+    if (!verified || sha256(verified.body) !== saved.hash) throw new Error(`staging 검증 실패: ${id}`);
+    outputs.set(id, { result: JSON.parse(saved.body), body: saved.body, hash: saved.hash });
+    state.staged[id] = saved.hash; await saveState();
+  };
+  // 기존 클라이언트 재시도가 소진된 429 키만 단계 끝에서 한 번 더 처리한다.
+  const retryRateLimited = async (failures, execute) => {
+    const retryIds = new Set();
+    const attempt = async user => {
+      try { await execute(user); delete failures[user.iidxId]; }
+      catch (error) {
+        failures[user.iidxId] = String(error?.message || error);
+        if (error?.status === 429 || error?.statusCode === 429 || /\bHTTP\s+429\b/.test(failures[user.iidxId])) retryIds.add(user.iidxId);
+      }
+    };
+    await poolFn(sortedUsers, 4, attempt);
+    await poolFn(sortedUsers.filter(user => retryIds.has(user.iidxId)), 4, attempt);
   };
   const stageFailures = {};
-  await poolFn(sortedUsers, 8, async user => {
-    try { await putImmutableUser(user.iidxId, `coach/relative/snapshot/${populationVersion}/user/${user.iidxId}.json`); }
-    catch (error) { stageFailures[user.iidxId] = String(error?.message || error); }
-  });
+  await retryRateLimited(stageFailures, user => putImmutableUser(user.iidxId, `coach/relative/snapshot/${populationVersion}/user/${user.iidxId}.json`));
   if (Object.keys(stageFailures).length) throw Object.assign(new Error('staging 게시 실패'), { publishSummary: { populationVersion, failed: stageFailures, gets, puts, skips } });
   const changed = []; const userFailures = {};
-  await poolFn(sortedUsers, 8, async user => {
+  await retryRateLimited(userFailures, async user => {
     const id = user.iidxId; const output = outputs.get(id);
-    try {
-      if (state.users[id] === output.hash) return;
-      const key = `coach/relative/user/${id}.json`; const current = await r2.read(key); gets++;
-      if (current && sha256(current.body) === output.hash) { state.users[id] = output.hash; skips++; await saveState(); return; }
-      const etag = current?.etag ?? null;
-      await r2.put(key, output.body, etag); puts++;
-      const verified = await r2.read(key); gets++;
-      if (!verified || sha256(verified.body) !== output.hash) throw new Error('계약 키 사후 검증 불일치');
-      state.users[id] = output.hash; changed.push(id); await saveState();
-    } catch (error) { userFailures[id] = String(error?.message || error); }
+    if (state.users[id] === output.hash) return;
+    const key = `coach/relative/user/${id}.json`; const current = await r2.read(key); gets++;
+    if (current && sha256(current.body) === output.hash) { state.users[id] = output.hash; skips++; await saveState(); return; }
+    const etag = current?.etag ?? null;
+    await r2.put(key, output.body, etag); puts++;
+    const verified = await r2.read(key); gets++;
+    if (!verified || sha256(verified.body) !== output.hash) throw new Error('계약 키 사후 검증 불일치');
+    state.users[id] = output.hash; changed.push(id); await saveState();
   });
   if (Object.keys(userFailures).length) throw Object.assign(new Error('user 계약 키 게시 실패'), { publishSummary: { populationVersion, failed: userFailures, changed: changed.sort(), gets, puts, skips, mismatch_risk: changed.sort() } });
   const userHashes = Object.fromEntries([...outputs].sort(([a], [b]) => a.localeCompare(b)).map(([id, output]) => [id, output.hash]));
@@ -224,7 +262,7 @@ export async function publishSnapshot(report, { r2, resumeDir, poolFn = pool, lo
   const currentManifest = parseRemote(current, manifestKey);
   const manifest = { schema_version: 'coach-relative-manifest/1', rank_version: population.rank_version,
     feature_version: featureVersion, population_version: populationVersion, population_key: populationKey,
-    generated_at: generatedAt, users_count: sortedUsers.length, source_hash: sourceHash, user_hashes: userHashes };
+    generated_at: population.generated_at, users_count: sortedUsers.length, source_hash: sourceHash, user_hashes: userHashes };
   if (currentManifest?.source_hash === sourceHash && currentManifest.population_version === populationVersion) {
     logger.log(`게시 요약: 성공=${sortedUsers.length}, 실패=0, skip=${skips}, GET=${gets}, PUT=${puts}, populationVersion=${populationVersion}, no-op`);
     return { ...report, publication: { status: 'noop', populationVersion, gets, puts, skips } };
@@ -233,7 +271,7 @@ export async function publishSnapshot(report, { r2, resumeDir, poolFn = pool, lo
     await r2.put(manifestKey, jsonBody(manifest), current?.etag ?? null); puts++;
   } catch (error) {
     throw Object.assign(new Error(`manifest conditional PUT 실패: ${String(error?.message || error)}`),
-      { publishSummary: { populationVersion, failed: { manifest: '경합·412·응답 유실; 이전 manifest 유지' }, changed, gets, puts, skips, mismatch_risk: changed } });
+      { publishSummary: { populationVersion, failed: { manifest: String(error?.message || error) }, changed, gets, puts, skips, mismatch_risk: changed } });
   }
   const verifiedManifest = await r2.read(manifestKey); gets++;
   if (!verifiedManifest || sha256(verifiedManifest.body) !== sha256(jsonBody(manifest))) {
@@ -532,10 +570,49 @@ async function selfTestPublish() {
     assert.equal(manifest.schema_version, 'coach-relative-manifest/1'); assert.equal(Object.keys(manifest.user_hashes).length, 30);
     assert.ok(r2.calls.findIndex(call => call[1].includes('/population/')) < r2.calls.findIndex(call => call[1].includes('/snapshot/')));
     assert.ok(r2.calls.findIndex(call => call[1].includes('/snapshot/')) < r2.calls.findIndex(call => call[1] === 'coach/relative/current.json' && call[0] === 'PUT'));
-    assert.ok(r2.peak <= 8);
+    assert.ok(r2.peak <= 4);
     const putCount = r2.calls.filter(call => call[0] === 'PUT').length;
     const second = await publishSnapshot(makeReport('2026-10-05T00:00:00.000Z'), { r2, resumeDir: path.join(temp, 'resume'), logger: { log() {} } });
     assert.equal(second.publication.status, 'noop'); assert.equal(r2.calls.filter(call => call[0] === 'PUT').length, putCount);
+    // 새 회차는 로컬 재개 상태 없이도 기존 시각과 본문 해시를 그대로 사용한다.
+    const third = await publishSnapshot(makeReport('2026-10-06T00:00:00.000Z'), { r2, logger: { log() {} } });
+    assert.equal(third.publication.status, 'noop');
+    assert.equal(r2.calls.filter(call => call[0] === 'PUT').length, putCount);
+    for (const [id, hash] of Object.entries(manifest.user_hashes)) {
+      assert.equal(sha256(r2.objects.get(`coach/relative/user/${id}.json`).body), hash);
+    }
+    const changedUsers = users.map(user => user.iidxId === '00'
+      ? { ...user, features: { 'osPattern:NOTES': { value: 51, recordCount: 30 } } } : user);
+    await assert.rejects(() => publishSnapshot({ ...makeReport('2026-10-06T00:00:00.000Z'), users: changedUsers },
+      { r2, logger: { log() {} } }), /immutable 자산 불일치/);
+    for (const prefix of ['coach/relative/snapshot/', 'coach/relative/user/']) {
+      const limited = makeR2(); const originalPut = limited.put.bind(limited); const attempts = new Map();
+      limited.put = async (key, body, etag) => {
+        if (key.startsWith(prefix)) {
+          const count = (attempts.get(key) || 0) + 1; attempts.set(key, count);
+          if (key.endsWith('/00.json') && count === 1) throw new Error(`R2 PUT ${key} HTTP 429`);
+        }
+        return originalPut(key, body, etag);
+      };
+      await publishSnapshot(makeReport('2026-10-05T00:00:00.000Z'), { r2: limited, logger: { log() {} } });
+      assert.equal([...attempts].find(([key]) => key.endsWith('/00.json'))[1], 2);
+      assert.ok([...attempts].filter(([key]) => !key.endsWith('/00.json')).every(([, count]) => count === 1));
+      assert.ok(limited.peak <= 4);
+    }
+    const exhausted = makeR2(); const exhaustedPut = exhausted.put.bind(exhausted); const attempts = {}; const logs = [];
+    exhausted.put = async (key, body, etag) => {
+      if (key.includes('/snapshot/') && /\/(00|01)\.json$/.test(key)) {
+        const id = key.slice(-7, -5); attempts[id] = (attempts[id] || 0) + 1;
+        throw new Error(`R2 PUT ${key} HTTP ${id === '00' ? 429 : 403}`);
+      }
+      return exhaustedPut(key, body, etag);
+    };
+    await assert.rejects(() => publishSnapshot(makeReport('2026-10-05T00:00:00.000Z'),
+      { r2: exhausted, logger: { log(message) { logs.push(message); } } }), /staging 게시 실패/);
+    assert.deepEqual(attempts, { '00': 2, '01': 1 });
+    assert.ok(logs.some(message => message.includes('실패=2') && message.includes('"HTTP 429":1')
+      && message.includes('"HTTP 403":1') && message.includes('["00","01"]')));
+    assert.equal(exhausted.objects.has('coach/relative/current.json'), false);
     const broken = makeR2(); let userPuts = 0; const basePut = broken.put.bind(broken);
     broken.put = async (key, body, etag) => { if (key.startsWith('coach/relative/user/') && ++userPuts === 4) throw new Error('fixture fail'); return basePut(key, body, etag); };
     const resume = path.join(temp, 'resume-fail');
