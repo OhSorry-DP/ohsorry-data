@@ -13,7 +13,7 @@ const versions = { model_version: 'phys-line-v2', line_version: 'phys-line-v2', 
 const id = 'OPERATING-USER';
 const contractFiles = [
   '../refresh-coach-user.mjs', '../backfill-phys.mjs', '../backfill-phys-run.mjs',
-  '../phys-lib.mjs', '../vendor/physLine.js', '../phys-fit-pool.mjs',
+  '../phys-lib.mjs', '../vendor/physLine.js',
   '../../../.github/workflows/backfill-phys.yml', '../../../.github/workflows/refresh-coach-user.yml',
 ];
 const readContracts = async () => Promise.all(contractFiles.map(file => fs.readFile(new URL(file, import.meta.url), 'utf8')));
@@ -151,11 +151,11 @@ test('refresh 단일 실행과 backfill은 동일 producer 함수를 쓰고 운�
   assert.match(backfill, /const produce = deps\.produce \|\| producePhysUser/);
   assert.match(backfill, /await produce\(/);
   assert.match(producer, /computePhysLine \|\| require\('\.\/vendor\/physLine\.js'\)\.computePhysLine/);
-  assert.doesNotMatch(`${refresh}\n${backfill}\n${runner}`, /createFitPool|phys-fit-pool|physTheta\.js|fitUser\(/);
+  assert.doesNotMatch(`${refresh}\n${backfill}\n${runner}`, /createFitPool|fitUser\(/);
 });
 
 test('dump 후 직접 CLI, continue-on-error, 수동 refresh와 v2 기본 버전을 유지한다', async () => {
-  const [refresh, backfill, runner, , , , backfillWorkflow, refreshWorkflow] = await readContracts();
+  const [refresh, backfill, runner, , , backfillWorkflow, refreshWorkflow] = await readContracts();
   assert.match(refreshWorkflow, /node \.github\/scripts\/refresh-coach-user\.mjs --id/);
   assert.match(refreshWorkflow, /EXPECTED_V/);
   assert.match(refreshWorkflow, /PHYS_MODEL_VERSION: \$\{\{ vars\.PHYS_MODEL_VERSION \|\| 'phys-line-v2' \}\}/);
@@ -169,7 +169,7 @@ test('dump 후 직접 CLI, continue-on-error, 수동 refresh와 v2 기본 버전
 });
 
 test('users-list 03:05 설정과 checkout의 물리 vendor 경로를 보장한다', async () => {
-  const [refresh, backfill, runner, , , , backfillWorkflow, refreshWorkflow] = await readContracts();
+  const [refresh, backfill, runner, , , backfillWorkflow, refreshWorkflow] = await readContracts();
   const nightly = await fs.readFile(new URL('../../../.github/workflows/dump-users-list.yml', import.meta.url), 'utf8');
   const workflowSource = `${nightly}\n${backfillWorkflow}\n${refreshWorkflow}`;
   assert.match(workflowSource, /schedule:[\s\S]*cron: ['"]5 18 \* \* \*['"]/);

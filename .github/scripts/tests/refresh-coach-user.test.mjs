@@ -39,7 +39,7 @@ function fixture({ versions = false, physFail = false, race = 0, stale = false, 
   const state = { raceLeft: race, body: null };
   const env = versions ? { PHYS_MODEL_VERSION: 'm1', PHYS_Q_VERSION: 'q1', PHYS_TIME_AXIS_VERSION: 't1', PHYS_ASSETS_MANIFEST_KEY: 'phys-manifest.json' } : {};
   const deps = { io, env,
-    loadPhysAssets: async () => { if (physFail) throw new Error('theta fixture failure'); return { status: 'ready', model: { content_hash: 'model' }, charts: new Map() }; } };
+    loadPhysAssets: async () => { if (physFail) throw new Error('line fixture failure'); return { status: 'ready', model: { content_hash: 'model' }, charts: new Map() }; } };
   return { deps, io, calls, objects, state };
 }
 
@@ -98,7 +98,7 @@ test('physical failure preserves its summary', async () => {
   const f = fixture({ versions: true, physFail: true });
   const result = await runRefresh({ id: ID, expectedV: V }, f.deps);
   assert.equal(result.phys.status, 'missing', JSON.stringify(result));
-  assert.equal(result.phys.error_message, 'theta fixture failure');
+  assert.equal(result.phys.error_message, 'line fixture failure');
   assert.equal(result.ok, true);
 });
 
@@ -107,7 +107,7 @@ test('refresh dry-run은 생산자의 generation_failed 원 예외를 보존한�
   const result = await runRefresh({ id: ID, expectedV: V, dryRun: true }, f.deps);
   assert.equal(result.phys.status, 'failed');
   assert.equal(result.phys.reason, 'generation_failed');
-  assert.equal(result.phys.error_message, 'theta fixture failure');
+  assert.equal(result.phys.error_message, 'line fixture failure');
   assert.equal(f.calls.some(call => call[0] === 'PUT'), false);
 });
 

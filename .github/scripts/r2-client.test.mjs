@@ -52,7 +52,7 @@ test('getText keeps the single-object URL', async () => {
 });
 
 test('채보 키의 리터럴 퍼센트는 HTTP 경로에서 한 번 더 인코딩한다', async () => {
-  const key = `phys/chart/phys-clear-v1/${encodeURIComponent('仮想|ANOTHER')}.json`;
+  const key = `phys/chart/phys-line-v1/${encodeURIComponent('仮想|ANOTHER')}.json`;
   const urls = [];
   const client = conditionalR2Client({ account, token: 'test-token', fetchImpl: async url => {
     urls.push(String(url)); return new Response('{}', { headers: { etag: '"test-etag"' } });

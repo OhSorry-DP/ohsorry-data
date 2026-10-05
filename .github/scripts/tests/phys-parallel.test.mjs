@@ -70,6 +70,6 @@ test('운영 병렬 경로는 fit pool 없이 순수 실력선 계산과 유저 
   assert.match(refresh, /producePhysUser \}\s+from '\.\/phys-lib\.mjs'/);
   assert.match(refresh, /\(deps\.producePhysUser \|\| producePhysUser\)\(/);
   assert.match(producer, /require\('\.\/vendor\/physLine\.js'\)\.computePhysLine/);
-  assert.doesNotMatch(`${backfill}\n${refresh}\n${runner}`, /createFitPool|phys-fit-pool|physTheta\.js/);
+  assert.doesNotMatch(`${backfill}\n${refresh}\n${runner}`, /createFitPool|fitUser\(/);
   assert.match(runner, /runBackfill\)\(options/);
 });
