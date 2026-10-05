@@ -1,0 +1,151 @@
+import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
+
+const require = createRequire(import.meta.url);
+const KEY = (id) => `phys/user/${encodeURIComponent(id)}.json`;
+const IMPLEMENTATION = 'phys-user-producer/1';
+const DIFFS = { 1: 'NORMAL', 2: 'HYPER', 3: 'ANOTHER', 4: 'LEGGENDARIA' };
+
+export function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
+export function sha256(value) {
+  return createHash('sha256').update(typeof value === 'string' ? value : canonical(value), 'utf8').digest('hex');
+}
+
+function versionsReady(versions) {
+  return ['model_version', 'q_version', 'time_axis_version'].every((k) => typeof versions?.[k] === 'string' && versions[k]);
+}
+
+function songMapOf(dump) {
+  const source = dump?.songMap || dump?.songs;
+  if (source instanceof Map) return source;
+  if (Array.isArray(source)) return new Map(source.filter((s) => s && s.song_id != null && s.textage_song_id != null)
+    .map((s) => [String(s.song_id), String(s.textage_song_id)]));
+  if (source && typeof source === 'object') return new Map(Object.entries(source).map(([k, v]) => [String(k),
+    String(typeof v === 'object' ? (v.textage_song_id ?? v.songId ?? '') : v)]));
+  return new Map();
+}
+
+function arrangeMapOf(dump) {
+  const values = dump?.chart_arrange || dump?.arrange || [];
+  const map = new Map();
+  for (const row of Array.isArray(values) ? values : []) {
+    if (row?.play_style === 1 && row.song_id != null && Number.isInteger(row.diff)) {
+      map.set(`${row.song_id}|${row.diff}`, row.arrange);
+    }
+  }
+  return map;
+}
+
+function makeRows(id, dump, charts, counts) {
+  if (!Array.isArray(dump?.dp)) throw new TypeError('dump.dp 배열 필요');
+  if (!(charts instanceof Map)) throw new TypeError('검증된 채보 Map 필요');
+  const songMap = songMapOf(dump), arrangeMap = arrangeMapOf(dump), best = new Map();
+  for (const row of dump.dp) {
+    if (!row || !Number.isInteger(row.song_id) || !Number.isInteger(row.diff)) { counts.invalid_row++; continue; }
+    const diff = DIFFS[row.diff];
+    if (!diff) { counts.unsupported_diff++; continue; }
+    const textageId = songMap.get(String(row.song_id));
+    if (!textageId) { counts.song_mapping_missing++; continue; }
+    const chartKey = `${textageId}|${diff}`;
+    const chart = charts.get(chartKey);
+    if (!chart || String(chart.songId) !== textageId || chart.diff !== diff || chart.chartKey !== chartKey) {
+      counts.chart_missing++;
+      continue;
+    }
+    // persona-lib.chartsFromGridRows: numeric lamp passes through; non-numeric becomes 0.
+    const lampNum = typeof row.lamp === 'number' ? row.lamp : 0;
+    if (!Number.isInteger(lampNum) || lampNum < 1 || lampNum > 7) { counts.invalid_lamp++; continue; }
+    const arrange = arrangeMap.get(`${row.song_id}|${row.diff}`) ?? chart.arrange ?? chart.arrange_assumed ?? null;
+    const out = { userId: String(id), songId: textageId, chartKey, lampNum,
+      notes: chart.notes, duration: chart.duration, features: chart.features,
+      ...(arrange != null ? { arrange, arrange_assumed: arrange } : { arrangeAssumed: true, arrange_assumed: 'unknown' }),
+      ...(chart.provenance ? { chartProvenance: chart.provenance } : {}),
+      ...(chart.excludedHands ? { excludedHands: chart.excludedHands } : {}) };
+    const previous = best.get(chartKey);
+    if (!previous || lampNum > previous.lampNum) best.set(chartKey, out);
+  }
+  return [...best.values()].sort((a, b) => a.chartKey.localeCompare(b.chartKey));
+}
+
+function isReadyFor(previous, id, versions, revision) {
+  const absolute = previous?.absolute;
+  return previous?.schema_version === 'coach-skill-evidence/1' && previous?.iidx_id === id && previous?.play_style === 'DP' &&
+    absolute?.status === 'ready' && absolute.source_revision === revision &&
+    ['model_version', 'q_version', 'time_axis_version'].every((k) => absolute[k] === versions[k]);
+}
+
+function staleRecord(previous, id, generatedAt) {
+  if (previous?.schema_version === 'coach-skill-evidence/1' && previous?.iidx_id === id && previous?.play_style === 'DP' &&
+      previous.absolute && ['ready', 'stale'].includes(previous.absolute.status)) {
+    return { ...previous, absolute: { ...previous.absolute, status: 'stale', reason: 'generation_failed', stale: true } };
+  }
+  return { schema_version: 'coach-skill-evidence/1', iidx_id: id, play_style: 'DP',
+    absolute: { status: 'missing', reason: 'not_generated', purpose: 'clear', unit: 'notes/s',
+      model_version: null, q_version: null, time_axis_version: null, source_revision: null,
+      generated_at: generatedAt, stale: false, axes: {} } };
+}
+
+async function defaultIO() {
+  const r2 = await import('./r2-client.mjs');
+  if (!r2.useRest) throw new Error('조건부 R2 REST client 설정 없음');
+  const client = r2.conditionalR2Client({ account: process.env.CLOUDFLARE_ACCOUNT_ID || '607eea1b073bea6747e6e9b76f2d7b41',
+    token: process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN });
+  return { read: (key) => client.read(key), put: (key, body, etag) => client.put(key, body, etag) };
+}
+
+async function loadAssets(versions, manifest, io) {
+  const { loadPhysAssets } = await import('./phys-assets.mjs');
+  return loadPhysAssets({ versions, manifest, getText: async (key) => {
+    const result = await io.read(key);
+    return result == null ? null : (typeof result === 'string' ? result : result.body);
+  } });
+}
+
+export async function producePhysUser({ id, dump, versions, manifest, io, fitUser, loadAssets: loadAssetsFn, generatedAt = new Date().toISOString(), dryRun = false }) {
+  const key = KEY(String(id));
+  const counts = { input_dp: Array.isArray(dump?.dp) ? dump.dp.length : 0, included: 0, invalid_row: 0,
+    unsupported_diff: 0, song_mapping_missing: 0, chart_missing: 0, invalid_lamp: 0 };
+  if (!versionsReady(versions)) return { status: 'skipped', reason: 'versions_unset', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
+  if (manifest?.publishable !== true) return { status: 'skipped', reason: 'assets_unpublished', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
+  const client = io || await defaultIO();
+  let previousRead;
+  try { previousRead = await client.read(key); }
+  catch { return { status: 'failed', reason: 'previous_read_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts }; }
+  let previous;
+  try { previous = previousRead == null ? null : JSON.parse(typeof previousRead === 'string' ? previousRead : previousRead.body); }
+  catch { return { status: 'failed', reason: 'previous_read_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts }; }
+  const etag = previousRead == null ? null : previousRead.etag;
+  try {
+    const loaded = await (loadAssetsFn || loadAssets)(versions, manifest, client);
+    if (loaded?.status !== 'ready') throw new Error(loaded?.reason || 'assets_unavailable');
+    const rows = makeRows(String(id), dump, loaded.charts, counts);
+    counts.included = rows.length;
+    const modelHash = loaded.model.content_hash;
+    const source_revision = sha256({ rows, versions, assets: [...loaded.charts].filter(([chartKey]) => rows.some((r) => r.chartKey === chartKey))
+      .map(([chartKey, chart]) => [chartKey, chart.content_hash]), modelHash, implementation: 'phys-theta-local/1', producer: IMPLEMENTATION });
+    if (isReadyFor(previous, String(id), versions, source_revision)) return { status: 'ready', reason: null, key, source_revision,
+      generated_at: previous.absolute.generated_at, changed: false, counts };
+    if (dryRun) return { status: 'planned', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };
+    if (typeof fitUser !== 'function') throw new TypeError('fitUser 함수 필요');
+    const absolute = await fitUser({ model: loaded.model, userId: String(id), rows, source_revision, generated_at: generatedAt }, { concurrency: 1 });
+    const record = { schema_version: 'coach-skill-evidence/1', iidx_id: String(id), play_style: 'DP', absolute };
+    await client.put(key, JSON.stringify(record), etag);
+    return { status: 'ready', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };
+  } catch (error) {
+    if (error?.status === 412 || /HTTP 412/.test(String(error?.message))) return { status: 'conflict', reason: 'precondition_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
+    if (dryRun) return { status: 'failed', reason: 'generation_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
+    const stale = staleRecord(previous, String(id), generatedAt);
+    try { await client.put(key, JSON.stringify(stale), etag); }
+    catch (writeError) {
+      if (writeError?.status === 412 || /HTTP 412/.test(String(writeError?.message))) return { status: 'conflict', reason: 'precondition_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
+      return { status: 'failed', reason: 'generation_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
+    }
+    return { status: stale.absolute.status, reason: stale.absolute.reason, key, source_revision: stale.absolute.source_revision,
+      generated_at: stale.absolute.generated_at, changed: true, counts };
+  }
+}
