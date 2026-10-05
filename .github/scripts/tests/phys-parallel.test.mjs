@@ -38,11 +38,12 @@ test('shard 전체 회차는 50명 상한을 넘어 완료하며 only는 분할 
 
 test('runner는 shard별 R2 checkpoint를 복원하고 저장한다', async () => {
   for (const shard of [0, 1]) {
-    const key = checkpointKey('phys-line-v1', shard, 8), reads = [];
+    // checkpoint 키는 manifest 해시를 포함한다(자산이 바뀌면 이전 진행 기록을 쓰지 않는다).
+    const key = checkpointKey('phys-line-v1', shard, 8).replace('.json', '-h.json'), reads = [];
     let stored = null;
     const fs = await import('node:fs/promises');
     await run({ SHARD: String(shard), SHARDS: '8', DRY_RUN: 'false' }, {
-      cores: () => 2,
+      cores: () => 2, manifestHash: 'h',
       r2: { read: async k => { reads.push(k); return stored == null ? null : { body: stored }; },
         put: async (k, body) => { assert.equal(k, key); stored = body; } },
       runBackfill: async options => {

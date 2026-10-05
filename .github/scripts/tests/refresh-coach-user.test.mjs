@@ -211,8 +211,8 @@ test('workflow structure refreshes directly after dump and keeps manual workflow
   assert.match(dispatchJob, /refresh-coach-user\.mjs/);
   assert.doesNotMatch(dispatchJob, /repository_dispatch|\/dispatches|GITHUB_TOKEN|contents: write/);
   assert.match(dispatchJob, /PHYS_MODEL_VERSION: \$\{\{ vars\.PHYS_MODEL_VERSION \|\| 'phys-line-v2' \}\}/); // 기본은 v2, 명시한 repo variable 로 v1 override 가능
-  assert.match(dispatchJob, /PHYS_Q_VERSION: q-samehand-2s-v1/);
-  assert.match(dispatchJob, /PHYS_TIME_AXIS_VERSION: ta-20261004/);
+  assert.match(dispatchJob, /PHYS_Q_VERSION: \$\{\{ vars\.PHYS_Q_VERSION \}\}/);
+  assert.match(dispatchJob, /PHYS_TIME_AXIS_VERSION: \$\{\{ vars\.PHYS_TIME_AXIS_VERSION \}\}/);
   assert.match(dispatchJob, /PHYS_ASSETS_MANIFEST_KEY: \$\{\{ vars\.PHYS_ASSETS_MANIFEST_KEY \}\}/);
   assert.match(manualWorkflow, /workflow_dispatch:/);
   assert.doesNotMatch(manualWorkflow, /repository_dispatch|client_payload/);
