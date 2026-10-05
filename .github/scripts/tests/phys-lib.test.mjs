@@ -8,12 +8,12 @@ test('v2 maximum fields survive producer storage including zero and null', async
   const io = ioOf(), assets = await assetLoader();
   const { CONFIG_V2 } = (await import('../vendor/physLine.js')).default;
   assets.model.line_config = CONFIG_V2;
-  const maxima = { NOTES: { line: null, max_line: 0, max_chart: { chartKey: 'tx-a|ANOTHER', mean_nps: 0, lamp: 3 } }, CHORD: { line: null, max_line: null, max_chart: null } };
+  const maxima = { NOTES: { line: null, max_by_lamp: { easy: { chartKey: 'tx-a|ANOTHER', mean_nps: 0, lamp: 3 }, hard: { chartKey: 'tx-b|ANOTHER', mean_nps: 2.5, lamp: 5 }, exhard: { chartKey: 'tx-c|ANOTHER', mean_nps: 1.25, lamp: 6 }, fc: null } }, CHORD: { line: null, max_by_lamp: { easy: null, hard: null, exhard: null, fc: null } } };
   const result = await producePhysUser({ id: 'USER', dump: baseDump(), versions: CONFIG_V2, manifest, io, assets,
     computePhysLine: () => ({ ...CONFIG_V2, axes: maxima }) });
   assert.equal(result.status, 'ready');
   const saved = JSON.parse(io.state.writes[0].body).absolute.axes;
-  for (const key of Object.keys(maxima)) for (const field of ['line', 'max_line', 'max_chart']) assert.deepEqual(saved[key][field], maxima[key][field]);
+  for (const key of Object.keys(maxima)) for (const field of ['line', 'max_by_lamp']) assert.deepEqual(saved[key][field], maxima[key][field]);
 });
 const chart = (songId, diff, extra = {}) => ({ chartKey: `${songId}|${diff}`, songId, diff, notes: 100, duration: 10,
   features: { STAIR_UP: { maxQ: 2 }, CN: { maxQ: 0 } }, arrange_assumed: 'unknown', content_hash: sha256({ songId, diff }), ...extra });
