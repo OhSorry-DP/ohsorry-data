@@ -95,10 +95,20 @@ test('중단 전 atomic checkpoint와 tuple 변경 epoch 초기화', async () =>
   const checkpoint = path.join(dir, 'checkpoint.json'), f = await fixture(['A']);
   const first = await runBackfill(options({ dryRun: false, resume: checkpoint }), { ...f, produce: async () => ({ status: 'planned' }) });
   const saved = JSON.parse(await fs.readFile(checkpoint, 'utf8'));
-  assert.equal(saved.schema, 'phys-backfill-checkpoint/1'); assert.equal(saved.manifest_hash, first.manifest_hash);
+  assert.equal(saved.schema, 'phys-backfill-checkpoint/2'); assert.equal(saved.manifest_hash, first.manifest_hash);
   await runBackfill(options({ dryRun: false, resume: checkpoint, versions: { ...versions, model_version: 'm2' } }), { ...f, produce: async () => ({ status: 'planned' }) });
   assert.equal(JSON.parse(await fs.readFile(checkpoint, 'utf8')).versions.model_version, 'm2');
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('v2 producer receives the fixed line and mean versions while v1 remains unchanged', async () => {
+  assert.deepEqual(parseArgs(['--users-list', 'u', '--manifest', 'm', '--model-version', 'phys-line-v1']).versions,
+    { model_version: 'phys-line-v1', q_version: null, time_axis_version: null });
+  const f = await fixture(['A']);
+  let received;
+  await runBackfill(options({ versions: { ...versions, model_version: 'phys-line-v2', line_version: 'phys-line-v2', mean_version: 'mean-os-pattern-span-v2' } }),
+    { ...f, produce: async args => { received = args.versions; return { status: 'planned' }; } });
+  assert.deepEqual(received, { ...versions, model_version: 'phys-line-v2', line_version: 'phys-line-v2', mean_version: 'mean-os-pattern-span-v2' });
 });
 
 test('backfill은 덤프의 누락된 곡 매핑을 공유하고 원 예외를 로그로 전달한다', async () => {
