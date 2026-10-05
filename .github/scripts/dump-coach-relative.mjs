@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { fileURLToPath } from 'node:url';
-import { useRest, getText, pool, conditionalR2Client } from './r2-client.mjs';
+import { useRest, getText, pool, conditionalR2Client, createRequestGate } from './r2-client.mjs';
 import { buildRelativeRegistry, adaptRelativeInput, patternRecordSources, radarRecordSources } from './coach-relative-input.mjs';
 import { buildPopulation, projectRelative } from './coach-relative.mjs';
 
@@ -134,10 +134,10 @@ async function atomicJson(file, value) {
   fs.renameSync(temp, file);
 }
 function statePaths(directory) { return { manifest: path.join(directory, 'manifest.json'), checkpoint: path.join(directory, 'inputs.json') }; }
-function conditionalR2ClientFromEnv() {
+function conditionalR2ClientFromEnv(requestGate) {
   const account = process.env.CLOUDFLARE_ACCOUNT_ID || '607eea1b073bea6747e6e9b76f2d7b41';
   const token = process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN;
-  return conditionalR2Client({ account, token });
+  return conditionalR2Client({ account, token, requestGate });
 }
 
 const jsonBody = value => JSON.stringify(value);
@@ -285,9 +285,11 @@ async function publishSnapshotImpl(report, { r2, resumeDir, poolFn, logger }) {
 }
 
 export async function produceInputs({ usersListFile, selectedIds, limit, resumeDir, dryRun, featureAssetsDir,
-  r2 = { useRest, getText, read: (...args) => conditionalR2ClientFromEnv().read(...args),
-    put: (...args) => conditionalR2ClientFromEnv().put(...args) }, poolFn = pool,
+  requestGate, r2, poolFn = pool,
   now = new Date().toISOString(), logger = console }) {
+  r2 ||= { useRest, getText: key => getText(key, { requestGate }),
+    read: (...args) => conditionalR2ClientFromEnv(requestGate).read(...args),
+    put: (...args) => conditionalR2ClientFromEnv(requestGate).put(...args) };
   if (!r2.useRest) throw new Error('R2 REST 토큰이 필요합니다');
   const usersBytes = fs.readFileSync(usersListFile);
   const members = listRows(JSON.parse(usersBytes.toString('utf8')));
@@ -380,6 +382,7 @@ function parseArgs(args) {
     else if (arg === '--limit') { const n = Number(next()); if (!Number.isInteger(n) || n < 1) throw new Error('--limit은 양의 정수여야 합니다'); out.limit = n; }
     else if (arg === '--resume') out.resumeDir = next();
     else if (arg === '--feature-assets') out.featureAssetsDir = next();
+    else if (arg === '--request-rate') { const n = Number(next()); if (!Number.isFinite(n) || n <= 0) throw new Error('--request-rate must be positive'); out.requestRate = n; }
     else if (arg === '--dry-run') out.dryRun = true;
     else if (arg === '--self-test-standalone') out.selfTestStandalone = true;
     else if (arg === '--self-test-input') out.selfTest = true;
@@ -666,8 +669,9 @@ export async function main(args = process.argv.slice(2)) {
   if (options.selfTestStandalone) return selfTestStandalone();
   if (options.selfTest) return selfTestInput();
   if (options.selfTestPublish) return selfTestPublish();
-  const result = await produceInputs(options);
-  if (!options.dryRun && result.completePopulation) return publishSnapshot(result, { r2: conditionalR2ClientFromEnv(), resumeDir: options.resumeDir });
+  const requestGate = options.requestRate ? createRequestGate({ intervalMs: 1000 / options.requestRate }) : undefined;
+  const result = await produceInputs({ ...options, requestGate });
+  if (!options.dryRun && result.completePopulation) return publishSnapshot(result, { r2: conditionalR2ClientFromEnv(requestGate), resumeDir: options.resumeDir });
   if (!options.dryRun) throw new Error('부분 모집단은 게시할 수 없습니다');
   return result;
 }

@@ -63,12 +63,39 @@ function wrangler(args) {
 
 const RETRY_AFTER_MAX_MS = 60_000;
 
+export function createRequestGate({ intervalMs = 500, now = Date.now, sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  if (!Number.isFinite(intervalMs) || intervalMs < 0) throw new Error('request gate intervalMs must be non-negative');
+  let tail = Promise.resolve();
+  let nextAt = 0;
+  let blockedUntil = 0;
+  return {
+    async run(startRequest) {
+      let release;
+      const previous = tail;
+      tail = new Promise(resolve => { release = resolve; });
+      await previous;
+      try {
+        const startAt = Math.max(nextAt, blockedUntil, now());
+        const delay = startAt - now();
+        if (delay > 0) await sleep(delay);
+        const startedAt = now();
+        nextAt = Math.max(startAt, startedAt) + intervalMs;
+        return startRequest();
+      } finally { release(); }
+    },
+    defer(ms) {
+      if (Number.isFinite(ms) && ms > 0) blockedUntil = Math.max(blockedUntil, now() + ms);
+    },
+  };
+}
+
 async function restFetch(key, init, tries = 4, base = REST_BASE, options = {}) {
   for (let i = 0; i < tries; i++) {
-    const r = await (options.fetchImpl || fetch)(base + key, {
+    const startRequest = () => (options.fetchImpl || fetch)(base + key, {
       ...init,
       headers: { Authorization: `Bearer ${options.token || TOKEN}`, ...(init.headers || {}) },
     });
+    const r = await (options.requestGate ? options.requestGate.run(startRequest) : startRequest());
     if (r.status === 429 || r.status >= 500) {
       if (i === tries - 1) return r;
       // 429 에 Retry-After 가 있으면 따르되 60초로 자른다 — 이 헬퍼는 users-list 병합(GET→PUT→검증)도 쓰므로
@@ -79,7 +106,8 @@ async function restFetch(key, init, tries = 4, base = REST_BASE, options = {}) {
       const waitMs = r.status === 429 && Number.isFinite(retryMs) && retryMs >= 0
         ? Math.min(retryMs, RETRY_AFTER_MAX_MS)
         : 500 * (i + 1) * (i + 1);
-      await (options.sleep || ((ms) => new Promise((s) => setTimeout(s, ms))))(waitMs);
+      if (r.status === 429 && options.requestGate) options.requestGate.defer(waitMs);
+      else await (options.sleep || ((ms) => new Promise((s) => setTimeout(s, ms))))(waitMs);
       continue;
     }
     return r;
@@ -92,9 +120,9 @@ async function restFetch(key, init, tries = 4, base = REST_BASE, options = {}) {
 //   dump-user 워크플로에 R2 토큰을 빼먹은 채로, 기존 유저가 전부 '신규 유저' 로 찍혀
 //   persona 보존 장치가 통째로 무력화된 사고가 있다(2026-09-04). 조회 실패는 값이 없는 게 아니라
 //   **모르는 것**이다 — 모르면 throw 해서 호출부가 보존 경로로 가게 한다.
-export async function getText(key) {
+export async function getText(key, { requestGate } = {}) {
   if (useRest) {
-    const r = await restFetch(key, { method: 'GET' });
+    const r = await restFetch(key, { method: 'GET' }, 4, REST_BASE, { requestGate });
     if (r.status === 404) return null;
     if (!r.ok) throw new Error(`R2 GET ${key} — HTTP ${r.status}`);
     return await r.text();
@@ -132,10 +160,10 @@ export async function listEntries(prefix, options = {}) {
 
 // 조건부 갱신은 REST만 사용한다. GET 본문의 ETag로 잠그고 새 객체는 생성만 허용한다.
 // fetch를 주입하면 자격증명이나 네트워크 없이 실제 REST 요청을 검증할 수 있다.
-export function conditionalR2Client({ account, token, fetchImpl = fetch } = {}) {
+export function conditionalR2Client({ account, token, fetchImpl = fetch, requestGate } = {}) {
   if (!account || !token) throw new Error('R2 REST account / token 없음');
   const base = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${BUCKET}/objects`;
-  const options = { base, token, fetchImpl };
+  const options = { base, token, fetchImpl, requestGate };
   const objectKey = (key) => key.split('/').map(encodeURIComponent).join('/');
   const strongEtag = (etag) => typeof etag === 'string' && /^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag);
   // 목록 ETag는 단일 파트 MD5만 허용하며 조건부 헤더에는 따옴표를 붙인다.
@@ -216,17 +244,18 @@ export async function del(key) {
 
 // 공개 CDN 의 etag(= 단일 PUT 객체의 md5). 없으면 null.
 //   ⚠️ `W/` 를 반드시 벗긴다 — 안 그러면 md5 와 절대 안 맞아 "변경 없음" 판정이 통째로 죽는다.
-export async function cdnEtag(key) {
+export async function cdnEtag(key, { requestGate, fetchImpl = fetch } = {}) {
   try {
-    const r = await fetch(CDN + key, { method: 'HEAD' });
+    const startRequest = () => fetchImpl(CDN + key, { method: 'HEAD' });
+    const r = await (requestGate ? requestGate.run(startRequest) : startRequest());
     if (!r.ok) return null;
     return String(r.headers.get('etag') || '').replace(/^W\//i, '').replace(/"/g, '') || null;
   } catch { return null; }
 }
 
 // 내용이 이미 같으면 올리지 않는다. 반환 { ok, skipped }
-export async function putIfChanged(key, body, contentType = null) {
-  const remote = await cdnEtag(key);
+export async function putIfChanged(key, body, contentType = null, { requestGate } = {}) {
+  const remote = await cdnEtag(key, { requestGate });
   if (remote && remote === md5(body)) return { ok: true, skipped: true };
   const r = await putText(key, body, contentType);
   return { ...r, skipped: false };

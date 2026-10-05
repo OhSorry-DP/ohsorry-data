@@ -155,7 +155,7 @@ jobs:
           RELATIVE_DRY_RUN: ${{ env.RELATIVE_DRY_RUN }}
           RELATIVE_LIMIT: ${{ env.RELATIVE_LIMIT }}
         run: |
-          args=(--users-list users-list.json --resume .coach-relative-resume)
+          args=(--users-list users-list.json --resume .coach-relative-resume --request-rate 2)
           if [ -n "$RELATIVE_LIMIT" ]; then args+=(--limit "$RELATIVE_LIMIT"); fi
           if [ "$RELATIVE_DRY_RUN" = "true" ]; then args+=(--dry-run); fi
           node .github/scripts/dump-coach-relative.mjs "${args[@]}"
