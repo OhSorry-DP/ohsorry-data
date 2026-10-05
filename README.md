@@ -88,6 +88,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-05 — 코치 절대 실력: θ 피팅 → 피처별 평균 NPS 실력선(DBR 방식)
+
+- 채보 축별 평균 NPS(`phys-line-v1` 자산) × 램프 가중(FC 1.00·EXH 0.95·HC 0.88·EASY/NORMAL 0.77·ASSIST 0.66·FAILED 0)으로 DBR 실력선과 같은 교차 보간 → 축별 50% 실력선·85% 안정선. 모델 피팅 없음, 유저 1명 수 ms.
+- dump-user 후속 job 이 실력선·상대 순위를 직접 계산(별도 `refresh-coach-user` 기동 제거 → 업로드당 Actions job 1개 감소). 버전은 repo variables `PHYS_*`.
+- 야간 상대 모집단 R2 요청 2 req/s 상한(업로드 경합 완화).
+
 ### 2026-10-05 — 코치 상대 순위·θ 생산 (`refresh-coach-user` · 야간 모집단)
 
 - θ 계약 버전은 `phys-clear-v1` / `q-samehand-2s-v1` / `ta-20261004` 이다. 불변 모델·차트·번들 자산은 R2 `phys/model/…`, `phys/chart/…`, `phys/bundle/…` 에 두고 `phys/manifest/…` manifest 가 자산과 버전을 고정한다.
