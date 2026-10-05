@@ -100,7 +100,9 @@ test('dump 후 직접 CLI, continue-on-error, 수동 refresh와 버전 환경 �
   const [refresh, backfill, runner, , , , backfillWorkflow, refreshWorkflow] = await readContracts();
   assert.match(refreshWorkflow, /node \.github\/scripts\/refresh-coach-user\.mjs --id/);
   assert.match(refreshWorkflow, /EXPECTED_V/);
-  assert.match(refreshWorkflow, /PHYS_MODEL_VERSION: \$\{\{ vars\.PHYS_MODEL_VERSION \}\}/);
+  assert.match(refreshWorkflow, /PHYS_MODEL_VERSION: \$\{\{ vars\.PHYS_MODEL_VERSION \|\| 'phys-line-v2' \}\}/);
+  assert.match(refreshWorkflow, /PHYS_Q_VERSION: q-samehand-2s-v1/);
+  assert.match(refreshWorkflow, /PHYS_TIME_AXIS_VERSION: ta-20261004/);
   assert.match(refresh, /PHYS_MODEL_VERSION/);
   assert.match(backfillWorkflow, /run: node \.github\/scripts\/backfill-phys-run\.mjs/);
   assert.match(backfillWorkflow, /MODEL_VERSION: \$\{\{ inputs\.model_version \}\}/);

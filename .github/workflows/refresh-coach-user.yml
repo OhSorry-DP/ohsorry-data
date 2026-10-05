@@ -28,9 +28,9 @@ jobs:
       EXPECTED_V: ${{ inputs.expected_v }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
-      PHYS_MODEL_VERSION: ${{ vars.PHYS_MODEL_VERSION }}
-      PHYS_Q_VERSION: ${{ vars.PHYS_Q_VERSION }}
-      PHYS_TIME_AXIS_VERSION: ${{ vars.PHYS_TIME_AXIS_VERSION }}
+      PHYS_MODEL_VERSION: ${{ vars.PHYS_MODEL_VERSION || 'phys-line-v2' }}
+      PHYS_Q_VERSION: q-samehand-2s-v1
+      PHYS_TIME_AXIS_VERSION: ta-20261004
       PHYS_ASSETS_MANIFEST_KEY: ${{ vars.PHYS_ASSETS_MANIFEST_KEY }}
     steps:
       - uses: actions/checkout@v4
