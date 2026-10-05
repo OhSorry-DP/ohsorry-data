@@ -79,3 +79,15 @@ test('중단 전 atomic checkpoint와 tuple 변경 epoch 초기화', async () =>
   assert.equal(JSON.parse(await fs.readFile(checkpoint, 'utf8')).versions.model_version, 'm2');
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test('backfill은 덤프의 누락된 곡 매핑을 공유하고 원 예외를 로그로 전달한다', async () => {
+  const f = await fixture(['A', 'B']);
+  let reads = 0;
+  const message = 'asset: ' + 'x'.repeat(250);
+  const result = await runBackfill(options(), { ...f,
+    io: { read: async key => { if (key !== 'songs.json') return null; reads++; return JSON.stringify([{ song_id: 1, textage_song_id: 'song' }]); } },
+    produce: async ({ dump }) => { assert.equal(dump.songs[0].textage_song_id, 'song'); return { status: 'failed', reason: 'generation_failed', error_message: message }; } });
+  assert.equal(reads, 1);
+  assert.equal(result.failed, 2);
+  assert.deepEqual(result.failures[0], { id: 'A', reason: 'generation_failed', error_message: message.slice(0, 200) });
+});

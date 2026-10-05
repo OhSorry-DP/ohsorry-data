@@ -21,7 +21,7 @@ export function sha256(value) {
 
 export function contentHash(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('asset must be an object');
-  const { content_hash, file_sha256, ...withoutHash } = value;
+  const { content_hash, ...withoutHash } = value;
   return sha256(withoutHash);
 }
 
@@ -44,13 +44,12 @@ function sameValue(a, b) {
   return canonical(a) === canonical(b);
 }
 
-function validateHash(asset, raw, label) {
-  if (typeof asset.file_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(asset.file_sha256)) {
+function validateHash(asset, raw, entry, label) {
+  if (typeof entry?.file_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(entry.file_sha256)) {
     throw new Error(`${label}: file_sha256 missing or invalid`);
   }
-  const fileView = { ...asset };
-  delete fileView.file_sha256;
-  if (sha256(canonical(fileView)) !== asset.file_sha256) throw new Error(`${label}: file_sha256 mismatch`);
+  // 파일 해시는 매니페스트에 있으며 직렬화 전 객체가 아닌 업로드 원문을 검증한다.
+  if (sha256(raw) !== entry.file_sha256) throw new Error(`${label}: file_sha256 mismatch`);
   if (typeof asset.content_hash !== 'string' || !/^[a-f0-9]{64}$/.test(asset.content_hash)) {
     throw new Error(`${label}: content_hash missing or invalid`);
   }
@@ -86,8 +85,10 @@ function chartEntries(manifest, modelVersion) {
     const expectedKey = `phys/chart/${modelVersion}/${encodeURIComponent(chartKey)}.json`;
     if (entry.key !== expectedKey) throw new Error(`chart key mismatch: ${chartKey}`);
     if (entry.model_version !== undefined && entry.model_version !== modelVersion) throw new Error(`chart model version mismatch: ${chartKey}`);
-    if (entry.q_version !== undefined && entry.q_version !== manifest.q_version) throw new Error(`chart q version mismatch: ${chartKey}`);
-    if (entry.time_axis_version !== undefined && entry.time_axis_version !== manifest.time_axis_version) throw new Error(`chart time axis version mismatch: ${chartKey}`);
+    for (const field of VERSION_FIELDS) {
+      const declared = entry.version_tuple?.[field] ?? entry[field];
+      if (declared !== undefined && declared !== (manifest.versions || manifest)[field]) throw new Error(`chart ${field} mismatch: ${chartKey}`);
+    }
     result.push([chartKey, entry]);
   }
   return result;
@@ -97,7 +98,10 @@ async function defaultGetText(key) {
   const client = await import('./r2-client.mjs');
   if (!client.useRest) throw new Error('R2 REST credentials required for physical asset loading');
   try {
-    const raw = await client.getText(key);
+    // 키에 포함된 리터럴 %도 HTTP 경로에서 인코딩해야 실제 업로드 키를 조회한다.
+    const reader = client.conditionalR2Client({ account: process.env.CLOUDFLARE_ACCOUNT_ID || '607eea1b073bea6747e6e9b76f2d7b41',
+      token: process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN });
+    const raw = (await reader.read(key))?.body ?? null;
     if (raw === null) throw Object.assign(new Error(`R2 GET ${key}: 404 not found`), { status: 404 });
     return raw;
   } catch (error) {
@@ -120,7 +124,7 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
   const modelKey = `phys/model/${modelVersion}.json`;
   const modelRaw = await source(modelKey);
   const { parsed: model } = parseAsset(modelRaw, `model ${modelKey}`);
-  validateHash(model, modelRaw, `model ${modelKey}`);
+  validateHash(model, modelRaw, manifest.model, `model ${modelKey}`);
   for (const [field, expected] of Object.entries(MODEL_FIELDS)) {
     if (model[field] !== expected) throw new Error(`model ${field} mismatch`);
   }
@@ -136,7 +140,7 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
   for (const [chartKey, entry] of charts) {
     const raw = await source(entry.key);
     const { parsed: chart } = parseAsset(raw, `chart ${chartKey} (${entry.key})`);
-    validateHash(chart, raw, `chart ${chartKey}`);
+    validateHash(chart, raw, entry, `chart ${chartKey}`);
     if (chart.schema_version !== CHART_SCHEMA) throw new Error(`chart schema mismatch: ${chartKey}`);
     if (chart.chartKey !== chartKey || entry.content_hash !== chart.content_hash) throw new Error(`chart declaration mismatch: ${chartKey}`);
     for (const field of VERSION_FIELDS) {

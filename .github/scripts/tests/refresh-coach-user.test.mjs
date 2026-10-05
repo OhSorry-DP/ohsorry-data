@@ -97,8 +97,18 @@ test('theta failure is summarized independently and relative continues', async (
   const f = fixture({ versions: true, physFail: true });
   const result = await runRefresh({ id: ID, expectedV: V }, f.deps);
   assert.equal(result.phys.status, 'missing', JSON.stringify(result));
+  assert.equal(result.phys.error_message, 'theta fixture failure');
   assert.ok(['ready', 'missing'].includes(result.relative.status));
   assert.equal(result.ok, true);
+});
+
+test('refresh dry-run은 생산자의 generation_failed 원 예외를 보존한다', async () => {
+  const f = fixture({ versions: true, physFail: true });
+  const result = await runRefresh({ id: ID, expectedV: V, dryRun: true }, f.deps);
+  assert.equal(result.phys.status, 'failed');
+  assert.equal(result.phys.reason, 'generation_failed');
+  assert.equal(result.phys.error_message, 'theta fixture failure');
+  assert.equal(f.calls.some(call => call[0] === 'PUT'), false);
 });
 
 test('invalid ID, malformed source, missing object and stale _v never write', async () => {

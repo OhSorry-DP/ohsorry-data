@@ -17,8 +17,7 @@ function rawAsset(value) {
   delete clean.content_hash;
   const content_hash = sha256(clean);
   const withoutFileHash = { ...clean, content_hash };
-  const file_sha256 = sha256(withoutFileHash);
-  return JSON.stringify({ ...withoutFileHash, file_sha256 });
+  return `${JSON.stringify(withoutFileHash, null, 2)}\n`;
 }
 
 function fixture() {
@@ -33,6 +32,8 @@ function fixture() {
   const manifest = { schema_version: 'phys-assets-manifest/1', publishable: true, ...versions,
     model: { key: `phys/model/${versions.model_version}.json`, content_hash: model.content_hash }, charts: [chartAsset], assets: [chartAsset] };
   const objects = new Map([[manifest.model.key, rawAsset(model)], [chartAsset.key, rawAsset(chart)]]);
+  manifest.model.file_sha256 = sha256(objects.get(manifest.model.key));
+  chartAsset.file_sha256 = sha256(objects.get(chartAsset.key));
   const calls = [];
   const getText = async (key) => { calls.push(key); if (!objects.has(key)) throw Object.assign(new Error(`HTTP 404 ${key}`), { status: 404 }); return objects.get(key); };
   return { manifest, model, chart, chartKey, chartAsset, objects, calls, getText };
@@ -67,12 +68,14 @@ test('rejects changed model content hash', async () => {
   const f = fixture();
   const changed = { ...f.model, b: { ...f.model.b, b0: 2 } };
   f.objects.set(f.manifest.model.key, rawAsset(changed));
+  f.manifest.model.file_sha256 = sha256(f.objects.get(f.manifest.model.key));
   await assert.rejects(loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText }), /manifest model declaration mismatch/);
 });
 
 test('rejects chart tuple, hash, and key mismatches', async () => {
   const f = fixture();
   f.objects.set(f.chartAsset.key, rawAsset({ ...f.chart, q_version: 'wrong' }));
+  f.chartAsset.file_sha256 = sha256(f.objects.get(f.chartAsset.key));
   await assert.rejects(loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText }), /chart declaration mismatch/);
   const g = fixture();
   g.manifest.charts[0] = { ...g.manifest.charts[0], key: 'other/location.json' };
@@ -87,4 +90,17 @@ test('preserves not found and authentication failures as distinct errors', async
   const f = fixture();
   await assert.rejects(loadPhysAssets({ versions, manifest: f.manifest, getText: async () => null }), /not found/);
   await assert.rejects(loadPhysAssets({ versions, manifest: f.manifest, getText: async () => { throw new Error('HTTP 401 unauthorized'); } }), /HTTP 401/);
+});
+
+test('매니페스트 파일 해시는 원문 공백까지 검증하고 중첩 버전 tuple을 검사한다', async () => {
+  const f = fixture();
+  f.manifest.versions = versions;
+  delete f.manifest.q_version;
+  delete f.manifest.time_axis_version;
+  f.chartAsset.version_tuple = versions;
+  assert.equal((await loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText })).status, 'ready');
+  f.objects.set(f.chartAsset.key, f.objects.get(f.chartAsset.key) + ' ');
+  await assert.rejects(loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText }), /file_sha256 mismatch/);
+  f.chartAsset.version_tuple = { ...versions, q_version: 'wrong' };
+  await assert.rejects(loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText }), /chart q_version mismatch/);
 });

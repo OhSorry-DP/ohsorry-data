@@ -137,15 +137,16 @@ export async function producePhysUser({ id, dump, versions, manifest, io, fitUse
     await client.put(key, JSON.stringify(record), etag);
     return { status: 'ready', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };
   } catch (error) {
+    const error_message = String(error?.message || error).slice(0, 200);
     if (error?.status === 412 || /HTTP 412/.test(String(error?.message))) return { status: 'conflict', reason: 'precondition_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
-    if (dryRun) return { status: 'failed', reason: 'generation_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
+    if (dryRun) return { status: 'failed', reason: 'generation_failed', error_message, key, source_revision: null, generated_at: generatedAt, changed: false, counts };
     const stale = staleRecord(previous, String(id), generatedAt);
     try { await client.put(key, JSON.stringify(stale), etag); }
     catch (writeError) {
       if (writeError?.status === 412 || /HTTP 412/.test(String(writeError?.message))) return { status: 'conflict', reason: 'precondition_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
-      return { status: 'failed', reason: 'generation_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
+      return { status: 'failed', reason: 'generation_failed', error_message, key, source_revision: null, generated_at: generatedAt, changed: false, counts };
     }
-    return { status: stale.absolute.status, reason: stale.absolute.reason, key, source_revision: stale.absolute.source_revision,
+    return { status: stale.absolute.status, reason: stale.absolute.reason, error_message, key, source_revision: stale.absolute.source_revision,
       generated_at: stale.absolute.generated_at, changed: true, counts };
   }
 }

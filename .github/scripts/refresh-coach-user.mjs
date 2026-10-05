@@ -139,11 +139,12 @@ export async function runRefresh(options, deps = {}) {
           loadAssets: deps.loadPhysAssets ? (v, m, client) => deps.loadPhysAssets(v, m, client) : (v, m, client) => loadPhysAssets({ versions: v, manifest: m, getText: async key => { const value = await client.read(key); return value == null ? null : typeof value === 'string' ? value : value.body; } }),
           generatedAt: source.version, dryRun: !!options.dryRun });
         summary.phys = { status: result.status, reason: result.reason || null, source_revision: result.source_revision || null,
+          ...(result.error_message ? { error_message: result.error_message } : {}),
           attempts: 1, puts: result.changed && result.status === 'ready' && !options.dryRun ? 1 : 0 };
-        if (result.status === 'failed' || result.status === 'conflict' || result.status === 'stale') throw Object.assign(new Error(result.reason || result.status), { phaseFailure: 'phys' });
+        if (result.status === 'failed' || result.status === 'conflict' || result.status === 'stale') throw Object.assign(new Error(result.error_message || result.reason || result.status), { phaseFailure: 'phys', reason: result.reason || result.status });
       } catch (error) {
         if (error.code === 'source_changed') throw error;
-        summary.phys = { status: 'failed', reason: String(error.message || error), attempts: 1, puts: 0 };
+        summary.phys = { status: 'failed', reason: error.reason || String(error.message || error), error_message: String(error.message || error).slice(0, 200), attempts: 1, puts: 0 };
       }
     }
     try {

@@ -117,3 +117,14 @@ test('412 conflict 및 이전 GET 실패는 기록을 덮지 않음', async () =
   assert.equal(failed.reason, 'previous_read_failed');
   assert.equal(failedIo.state.writes.length, 0);
 });
+
+test('생성 원 예외는 dry-run과 최초 missing 및 stale 경로에서 200자로 보존한다', async () => {
+  const message = 'model: ' + 'x'.repeat(250);
+  for (const dryRun of [true, false]) {
+    const io = ioOf();
+    const result = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, dryRun,
+      loadAssets: async () => { throw new Error(message); } });
+    assert.equal(result.error_message, message.slice(0, 200));
+    assert.equal(io.state.writes.length, dryRun ? 0 : 1);
+  }
+});

@@ -101,6 +101,7 @@ export async function runBackfill(options, deps = {}) {
   const r2 = deps.r2 || null;
   const produce = deps.produce || producePhysUser;
   const io = deps.io || r2;
+  let songsPromise;
   const loader = deps.loadAssets || (async (v, m, client) => {
     const { loadPhysAssets } = await import('./phys-assets.mjs');
     return loadPhysAssets({ versions: v, manifest: m, getText: async key => {
@@ -146,6 +147,15 @@ export async function runBackfill(options, deps = {}) {
           return JSON.parse(body)?.absolute?.source_revision ?? null;
         })() : null);
         if (prior?.source_revision === sourceRevision && currentRemote != null && currentRemote === prior.remote_revision) { summary.ready++; continue; }
+        if (!dump.songMap && !dump.songs && io?.read) {
+          // 회차 내에서 동일한 곡 매핑을 공유하며 실패한 조회는 다음 유저에서 재시도한다.
+          songsPromise ||= (async () => {
+            const value = await io.read('songs.json');
+            if (value == null) throw new Error('songs_missing');
+            return JSON.parse(typeof value === 'string' ? value : value.body);
+          })().catch(error => { songsPromise = null; throw error; });
+          dump.songs = await songsPromise;
+        }
         const result = await produce({ id, dump, versions, manifest, io, fitUser, loadAssets: loader, dryRun: options.dryRun });
         if (['ready', 'planned'].includes(result.status)) {
           summary.ready++;
@@ -158,12 +168,13 @@ export async function runBackfill(options, deps = {}) {
           if (!options.dryRun && result.status === 'ready') checkpoint.success[id] = { source_revision: sourceRevision, remote_revision: result.source_revision };
           delete checkpoint.failures[id];
         } else if (result.status === 'skipped') { summary.skipped++; checkpoint.failures[id] = { attempts: (checkpoint.failures?.[id]?.attempts || 0) + 1, reason: result.reason }; }
-        else throw Object.assign(new Error(result.reason || result.status), { reason: result.reason || result.status });
+        else throw Object.assign(new Error(result.error_message || result.reason || result.status), { reason: result.reason || result.status });
       } catch (error) {
         summary.failed++; const reason = error.reason || error.code || 'generation_failed';
         const attemptsSoFar = (checkpoint.failures?.[id]?.attempts || 0) + 1;
-        checkpoint.failures[id] = { attempts: attemptsSoFar, reason };
-        summary.failures.push({ id, reason });
+        const error_message = String(error.message || error).slice(0, 200);
+        checkpoint.failures[id] = { attempts: attemptsSoFar, reason, error_message };
+        summary.failures.push({ id, reason, error_message });
       }
     }
     }));
