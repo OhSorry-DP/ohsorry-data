@@ -216,7 +216,8 @@ jobs:
       IIDX_ID: ${{ github.event.client_payload.iidx_id }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
-      PHYS_MODEL_VERSION: ${{ vars.PHYS_MODEL_VERSION }}
+      # 기본은 v2. Repository variable로 phys-line-v1을 지정하면 기존 생성 경로를 유지한다.
+      PHYS_MODEL_VERSION: ${{ vars.PHYS_MODEL_VERSION || 'phys-line-v2' }}
       PHYS_Q_VERSION: ${{ vars.PHYS_Q_VERSION }}
       PHYS_TIME_AXIS_VERSION: ${{ vars.PHYS_TIME_AXIS_VERSION }}
       PHYS_ASSETS_MANIFEST_KEY: ${{ vars.PHYS_ASSETS_MANIFEST_KEY }}
