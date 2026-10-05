@@ -21,7 +21,7 @@
   - ⚠️ **Worker 허용키가 아니다** — `data.iidx.in` 으로 서빙되지 않는다(백업이지 컨텐츠가 아니다). 접근은 wrangler/REST 로만.
   - `snapshot/index.json` = 회차별 통계(유저 수·이력 행수·persona 보유·용량). 다음 회차 sanity check 의 기준선.
 - `songs.json` — 곡 마스터(공유) `[{ song_id, title, ac, legen, textage_song_id, series_no }]`. 웹 `getSongsCache` 가 supabase 대신 이걸 읽음. cron(`*/30 * * * *`, 30분) 갱신. 일일 전체 재생성(`5 18 * * *`, KST 03:05)과 수동 실행에도 포함되며, `dump-user`가 누락 신곡을 감지하면 [refresh-missing-songs.mjs](.github/scripts/refresh-missing-songs.mjs)로 즉시 갱신한다.
-- `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). **실시간 갱신은 webhook 덤프(dump-user)가 R2 에 증분 병합**([merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs))으로 담당하고, supabase 전체 재생성은 **1일 1회 cron**(정합성 보정 — 삭제 유저 정리·증분 누락 복구)이다. 증분의 베이스는 git 이 아니라 **R2 현재본**이라, 증분 갱신이 누적된다. 같은 생산자가 `users-list-slim.json`(검색용 iidx_id·dj_name·star·r_star 4키)도 생성·업로드한다.
+- `users-list.json` — 전 유저 목록(웹 `fetchAllUsers` 출력). **실시간 갱신은 webhook 덤프(dump-user)가 R2 에 증분 병합**([merge-user-into-list.mjs](.github/scripts/merge-user-into-list.mjs))으로 담당하고, supabase 전체 재생성은 **1일 1회 cron**(정합성 보정 — 삭제 유저 정리·증분 누락 복구)이다. 증분의 베이스는 git 이 아니라 **R2 현재본**이라, 증분 갱신이 누적된다. 같은 생산자가 `users-list-slim.json`(검색용 iidx_id·dj_name·star·r_star 4키)도 생성·업로드한다. 일일 전체 재생성은 이어서 `dump-coach-relative` 를 실행해 frozen 상대 순위 모집단도 갱신한다.
 - `version.json` — 로컬 전체 덤프 타임스탬프 + 유저 수. 현재 Actions는 생성·업로드하지 않으며 ohSorryAdmin 전체 덤프도 로컬 파일만 갱신한다. Worker 허용키이지만 R2 현재값의 최신성 지표로 쓰지 않는다.
 - `persona-pop.json` — persona **usernorm(인구 정규화)** 통계 `{ dp, sp }` (각 10피처 `mean`/`sd` + `_relScale`).
   `persona-lib` 이 읽어 `profile.pop` 으로 주입 → 축별 인구 편향 제거. 없으면 persona 는 종전 동작(하위호환).
@@ -88,12 +88,14 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
-### 2026-10-05 — 코치 상대 순위·θ 생산 (refresh-coach-user · 야간 모집단)
+### 2026-10-05 — 코치 상대 순위·θ 생산 (`refresh-coach-user` · 야간 모집단)
 
-- `dump-user` 는 덤프만 올린다. 성공 뒤 별도 job 이 `refresh-coach-user` repository_dispatch 를 보낸다(실패해도 덤프 무영향).
-- `refresh-coach-user.yml`: R2 덤프를 읽어 θ(`phys/user/<ID>.json`, repo variable `PHYS_*` 미설정 시 skip)와 상대 백분위(`coach/relative/user/<ID>.json`)를 갱신. 유저별 직렬.
-- `dump-users-list.yml`: 야간에 `dump-coach-relative.mjs` 로 전체 모집단 스냅샷 게시(수동 실행 시 `relative_dry_run`·`relative_limit`).
-- 순수 모듈: `coach-relative.mjs`(R01)·`coach-relative-input.mjs`(R02)·`coach-relative-lib.mjs`(R04)·`phys-lib.mjs`·`phys-assets.mjs`·`backfill-phys.mjs`. Rating 비공개라 커널·physTheta 는 `vendor/` 동일 사본(바이트 대조 테스트).
+- θ 계약 버전은 `phys-clear-v1` / `q-samehand-2s-v1` / `ta-20261004` 이다. 불변 모델·차트·번들 자산은 R2 `phys/model/…`, `phys/chart/…`, `phys/bundle/…` 에 두고 `phys/manifest/…` manifest 가 자산과 버전을 고정한다.
+- 생산 순서는 업로드 → `dump-user` 가 덤프를 R2 에 저장 → 별도 `refresh-coach-user` 계산 → 유저 결과를 R2 에 저장 → ohSorryWeb 이 읽기다. `dump-user` 는 계산하지 않는다. dump 성공과 후속 계산은 별도 job 이며, 계산 실패는 덤프 성공을 되돌리지 않는다.
+- 업로드마다 `refresh-coach-user` 가 해당 유저의 θ(`phys/user/<ID>.json`) 및 상대 결과(`coach/relative/user/<ID>.json`)를 투영한다. 대상 모집단은 frozen snapshot 이며, 단일 유저 업로드는 그 모집단에 해당 유저 한 명만 투영한다. `backfill-phys.yml` 은 기존 유저의 θ 백필 담당이다. 이들 workflow 의 실행 성공은 소비 계약 검증 통과나 백필 완료를 뜻하지 않는다.
+- 야간 `dump-coach-relative` 는 `dump-users-list` 와 연계해 전체 frozen 모집단을 다시 계산한다. 전체 결과와 current manifest 를 갱신하며, 상대 순위 v1 축은 `osPattern` 및 radar 6개(notes·peak·charge·chord·scratch·soflan)이고 weakness 는 포함하지 않는다.
+- 실패 시 직전 성공 산출물은 stale 상태로 남고, 성공본이 한 번도 없으면 missing 이다. 산출 상태는 워크플로 실행 상태와 별도로 판정한다. ohSorryWeb profile·analysis 는 `skill_evidence` 와 `getSong?iidxId=` 병목 결과를 소비한다. Knowledge 는 v4 다.
+- 관련 구현: `coach-relative.mjs`(R01)·`coach-relative-input.mjs`(R02)·`coach-relative-lib.mjs`(R04)·`phys-lib.mjs`·`phys-assets.mjs`·`backfill-phys.mjs`. Rating 비공개라 커널·physTheta 는 `vendor/` 동일 사본(바이트 대조 테스트).
 
 ### 2026-10-04 — persona popmean 갱신 (디코더 시간축 수정 반영)
 
