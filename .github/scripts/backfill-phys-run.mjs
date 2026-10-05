@@ -12,7 +12,7 @@ export async function run(env = process.env, deps = {}) {
   if (![model, q, timeAxis].every(v => /^[A-Za-z0-9_-]+$/.test(v))) throw new Error('버전 형식 오류');
   const dryRun = env.DRY_RUN ?? 'true';
   if (!['true', 'false'].includes(dryRun)) throw new Error('dry_run 형식 오류');
-  const options = parseArgs(['--users-list', 'users-list.json', '--manifest', 'phys/manifest/phys-clear-v1.json',
+  const options = parseArgs(['--users-list', 'users-list.json', '--manifest', `phys/manifest/${model}.json`, // 모델 버전마다 manifest 가 따로 있다
     '--model-version', model, '--q-version', q, '--time-axis-version', timeAxis,
     ...(env.SHARDS != null || env.SHARD != null ? ['--shard', env.SHARD ?? '0', '--shards', env.SHARDS ?? '1'] : []),
     '--limit', env.LIMIT || (env.SHARDS != null ? '0' : '50'), dryRun === 'true' ? '--dry-run' : '--write']);
