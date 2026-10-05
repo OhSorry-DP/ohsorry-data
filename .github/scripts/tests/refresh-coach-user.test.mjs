@@ -63,7 +63,7 @@ function fixture({ versions = false, physFail = false, race = 0, stale = false, 
   };
   const state = { raceLeft: race, body: null };
   const env = versions ? { PHYS_MODEL_VERSION: 'm1', PHYS_Q_VERSION: 'q1', PHYS_TIME_AXIS_VERSION: 't1', PHYS_ASSETS_MANIFEST_KEY: 'phys-manifest.json' } : {};
-  const deps = { io, env, fitUser: async () => ({ status: 'ready', generated_at: V, axes: {} }),
+  const deps = { io, env,
     loadPhysAssets: async () => { if (physFail) throw new Error('theta fixture failure'); return { status: 'ready', model: { content_hash: 'model' }, charts: new Map() }; },
     produceRelativeUser: async args => {
       if (args.assets.featureVersion !== relativeVersion) throw new Error('feature tuple mismatch');
@@ -156,4 +156,27 @@ test('relative feature tuple and manifest race policy are retained; dry run avoi
   assert.equal(f.calls.some(call => call[0] === 'PUT'), false);
   assert.equal(result.relative.attempts, 3);
   assert.equal(typeof relativeVersion, 'string');
+});
+
+test('CLI requires and validates the directly supplied source tuple', () => {
+  const hash = 'a'.repeat(64);
+  assert.deepEqual(parseArgs(['--id', ID, '--expected-v', V, '--expected-sha256', hash]),
+    { dryRun: false, id: ID, expectedV: V, expectedSha256: hash });
+  assert.throws(() => parseArgs(['--id', ID, '--expected-v', V, '--expected-sha256', 'bad']), /invalid --expected-sha256/);
+});
+
+test('workflow structure refreshes directly after dump and keeps manual workflow dispatch only', () => {
+  const dumpWorkflow = fs.readFileSync(new URL('../../workflows/dump-user.yml', import.meta.url), 'utf8');
+  const manualWorkflow = fs.readFileSync(new URL('../../workflows/refresh-coach-user.yml', import.meta.url), 'utf8');
+  const dispatchJob = dumpWorkflow.slice(dumpWorkflow.indexOf('  dispatch-coach-user:'));
+  assert.match(dispatchJob, /needs: dump[\s\S]*if: \$\{\{ !cancelled\(\) && needs\.dump\.result == 'success' \}\}/);
+  assert.match(dispatchJob, /continue-on-error: true/);
+  assert.match(dispatchJob, /refresh-coach-user\.mjs/);
+  assert.doesNotMatch(dispatchJob, /repository_dispatch|\/dispatches|GITHUB_TOKEN|contents: write/);
+  assert.match(dispatchJob, /PHYS_MODEL_VERSION: \$\{\{ vars\.PHYS_MODEL_VERSION \}\}/); // 버전은 repo variable 로 전환
+  assert.match(dispatchJob, /PHYS_Q_VERSION: \$\{\{ vars\.PHYS_Q_VERSION \}\}/);
+  assert.match(dispatchJob, /PHYS_TIME_AXIS_VERSION: \$\{\{ vars\.PHYS_TIME_AXIS_VERSION \}\}/);
+  assert.match(dispatchJob, /PHYS_ASSETS_MANIFEST_KEY: \$\{\{ vars\.PHYS_ASSETS_MANIFEST_KEY \}\}/);
+  assert.match(manualWorkflow, /workflow_dispatch:/);
+  assert.doesNotMatch(manualWorkflow, /repository_dispatch|client_payload/);
 });

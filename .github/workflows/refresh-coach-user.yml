@@ -1,8 +1,6 @@
 name: refresh-coach-user
 
 on:
-  repository_dispatch:
-    types: [refresh-coach-user]
   workflow_dispatch:
     inputs:
       iidx_id:
@@ -18,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: coach-user-${{ github.event_name == 'workflow_dispatch' && inputs.iidx_id || github.event.client_payload.iidx_id }}
+  group: coach-user-${{ inputs.iidx_id }}
   cancel-in-progress: false
 
 jobs:
@@ -26,8 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      IIDX_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.iidx_id || github.event.client_payload.iidx_id }}
-      EXPECTED_V: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_v || github.event.client_payload.expected_v }}
+      IIDX_ID: ${{ inputs.iidx_id }}
+      EXPECTED_V: ${{ inputs.expected_v }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
       PHYS_MODEL_VERSION: ${{ vars.PHYS_MODEL_VERSION }}
@@ -58,7 +56,9 @@ jobs:
           if (!dump || String(dump.user?.iidx_id ?? '') !== id || typeof dump._v !== 'string') throw new Error('source_invalid');
           const version = dump._v;
           if (!Number.isFinite(Date.parse(version)) || new Date(version).toISOString() !== version) throw new Error('source_invalid_version');
+          const { createHash } = await import('node:crypto');
+          const hash = createHash('sha256').update(source.body).digest('hex');
           const { main } = await import('./.github/scripts/refresh-coach-user.mjs');
-          await main(['--id', id, '--expected-v', version]);
+          await main(['--id', id, '--expected-v', version, '--expected-sha256', hash]);
           NODE
           fi

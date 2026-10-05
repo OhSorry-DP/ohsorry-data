@@ -22,15 +22,16 @@ export function parseArgs(args) {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--dry-run') { if (seen.has(arg)) throw new Error('duplicate option'); seen.add(arg); out.dryRun = true; continue; }
-    if (arg !== '--id' && arg !== '--expected-v') throw new Error(`unknown option: ${arg}`);
+    if (arg !== '--id' && arg !== '--expected-v' && arg !== '--expected-sha256') throw new Error(`unknown option: ${arg}`);
     if (seen.has(arg)) throw new Error(`duplicate option: ${arg}`);
     seen.add(arg);
     const value = args[++i];
     if (value === undefined || value.startsWith('--')) throw new Error(`missing value: ${arg}`);
-    out[arg === '--id' ? 'id' : 'expectedV'] = value;
+    out[arg === '--id' ? 'id' : arg === '--expected-v' ? 'expectedV' : 'expectedSha256'] = value;
   }
   if (!out.id || !ID_RE.test(out.id)) throw new Error('invalid --id');
   if (!out.expectedV || !Number.isFinite(Date.parse(out.expectedV)) || new Date(out.expectedV).toISOString() !== out.expectedV) throw new Error('invalid --expected-v');
+  if (out.expectedSha256 && !HASH_RE.test(out.expectedSha256)) throw new Error('invalid --expected-sha256');
   return out;
 }
 
@@ -43,15 +44,17 @@ function snapshot(text, id) {
   return { text, dump, version: dump._v, hash: sha(text) };
 }
 
-async function readSource(io, id, expectedV, attempts = 3) {
+async function readSource(io, id, expectedV, attempts = 3, expectedSha256 = null) {
   let current;
   for (let i = 0; i < attempts; i++) {
     const value = await io.read(USER_KEY(id));
     current = snapshot(value == null ? null : typeof value === 'string' ? value : value.body, id);
     current.etag = typeof value === 'object' && value ? value.etag ?? null : null;
-    if (Date.parse(current.version) >= Date.parse(expectedV)) return current;
+    if (Date.parse(current.version) >= Date.parse(expectedV)
+      && (current.version !== expectedV || !expectedSha256 || current.hash === expectedSha256)) return current;
   }
-  throw new Error(`source_stale: ${current?.version || 'missing'} < ${expectedV}`);
+  throw new Error(current?.version === expectedV && expectedSha256 && current.hash !== expectedSha256
+    ? 'source_hash_mismatch' : `source_stale: ${current?.version || 'missing'} < ${expectedV}`);
 }
 
 function relativeAssets() {
@@ -91,6 +94,8 @@ export async function runRefresh(options, deps = {}) {
   const expectedV = options.expectedV;
   if (typeof expectedV !== 'string' || !Number.isFinite(Date.parse(expectedV)) || new Date(expectedV).toISOString() !== expectedV) throw new Error('invalid --expected-v');
   const env = deps.env || process.env;
+  const expectedSha256 = options.expectedSha256 ?? env.SOURCE_SHA256 ?? null;
+  if (expectedSha256 !== null && (typeof expectedSha256 !== 'string' || !HASH_RE.test(expectedSha256))) throw new Error('invalid --expected-sha256');
   const io = deps.io || await (async () => {
     const client = conditionalR2Client({ account: env.CLOUDFLARE_ACCOUNT_ID || '607eea1b073bea6747e6e9b76f2d7b41', token: env.CLOUDFLARE_R2_TOKEN || env.CLOUDFLARE_API_TOKEN });
     return { read: client.read, put: client.put, getText: async key => { const item = await client.read(key); return item?.body ?? null; } };
@@ -100,7 +105,7 @@ export async function runRefresh(options, deps = {}) {
   let source, sourceChanged = false, phase = 'input';
   const summary = { id, expected_v: expectedV, dry_run: !!options.dryRun, source: null, phys: null, relative: null, attempts: 0 };
   async function sourceCheck() {
-    const latest = await readSource(io, id, expectedV);
+    const latest = await readSource(io, id, expectedV, 3, expectedSha256);
     if (!source || latest.version !== source.version || latest.hash !== source.hash) { sourceChanged = true; throw Object.assign(new Error('source_changed'), { code: 'source_changed' }); }
   }
   io.put = async (key, body, etag) => {
@@ -113,7 +118,7 @@ export async function runRefresh(options, deps = {}) {
   };
   const runOne = async () => {
     sourceChanged = false;
-    source = await readSource(io, id, expectedV);
+    source = await readSource(io, id, expectedV, 3, expectedSha256);
     summary.attempts++;
     summary.source = { _v: source.version, sha256: source.hash, etag: source.etag };
     const dump = JSON.parse(source.text);
@@ -135,7 +140,6 @@ export async function runRefresh(options, deps = {}) {
         }
         phase = 'phys';
         const result = await (deps.producePhysUser || producePhysUser)({ id, dump, versions, manifest, io,
-          fitUser: deps.fitUser || require('./vendor/physTheta.js').fitUser,
           loadAssets: deps.loadPhysAssets ? (v, m, client) => deps.loadPhysAssets(v, m, client) : (v, m, client) => loadPhysAssets({ versions: v, manifest: m, getText: async key => { const value = await client.read(key); return value == null ? null : typeof value === 'string' ? value : value.body; } }),
           generatedAt: source.version, dryRun: !!options.dryRun });
         summary.phys = { status: result.status, reason: result.reason || null, source_revision: result.source_revision || null,
