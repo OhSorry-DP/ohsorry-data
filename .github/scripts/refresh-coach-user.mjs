@@ -84,8 +84,10 @@ async function loadRelativeAssets(io) {
 }
 
 function configuredVersions(env) {
-  return { model_version: env.PHYS_MODEL_VERSION || null, q_version: env.PHYS_Q_VERSION || null,
-    time_axis_version: env.PHYS_TIME_AXIS_VERSION || null };
+  const model_version = env.PHYS_MODEL_VERSION || null;
+  return { model_version,
+    ...(model_version === 'phys-line-v2' ? { line_version: 'phys-line-v2', mean_version: 'mean-os-pattern-span-v2' } : {}),
+    q_version: env.PHYS_Q_VERSION || null, time_axis_version: env.PHYS_TIME_AXIS_VERSION || null };
 }
 
 export async function runRefresh(options, deps = {}) {

@@ -8,7 +8,7 @@ import os from 'node:os';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const VALID_ID = /^[A-Za-z0-9_-]+$/;
-const CHECKPOINT_SCHEMA = 'phys-backfill-checkpoint/1';
+const CHECKPOINT_SCHEMA = 'phys-backfill-checkpoint/2';
 const RETRY_LIMIT = 10;
 
 export function parseArgs(args) {
@@ -32,8 +32,11 @@ export function parseArgs(args) {
   if (options.help) return options;
   if (!values.has('--users-list') || !values.has('--manifest')) throw new Error('--users-list와 --manifest가 필요합니다');
   options.usersList = values.get('--users-list'); options.manifestPath = values.get('--manifest');
-  options.versions = { model_version: values.get('--model-version') || null, q_version: values.get('--q-version') || null,
-    time_axis_version: values.get('--time-axis-version') || null };
+  const modelVersion = values.get('--model-version') || null;
+  const v2 = modelVersion === 'phys-line-v2';
+  options.versions = { model_version: modelVersion,
+    ...(v2 ? { line_version: modelVersion, mean_version: 'mean-os-pattern-span-v2' } : {}),
+    q_version: values.get('--q-version') || null, time_axis_version: values.get('--time-axis-version') || null };
   if (values.has('--only')) options.only = [...new Set(values.get('--only').split(',').filter(Boolean))];
   if (options.only?.some(id => !VALID_ID.test(id))) throw new Error('--only에 유효하지 않은 ID가 있습니다');
   if (values.has('--shard') || values.has('--shards')) {
@@ -88,7 +91,7 @@ const atomicJson = async (file, value) => {
   catch (error) { await fs.rm(temp, { force: true }).catch(() => {}); throw error; }
 };
 const readJson = async file => JSON.parse(await fs.readFile(file, 'utf8'));
-const versionsEqual = (a, b) => ['model_version', 'q_version', 'time_axis_version'].every(k => (a?.[k] ?? null) === (b?.[k] ?? null));
+const versionsEqual = (a, b) => ['model_version', 'line_version', 'mean_version', 'q_version', 'time_axis_version'].every(k => (a?.[k] ?? null) === (b?.[k] ?? null));
 
 export async function runBackfill(options, deps = {}) {
   const now = deps.now || (() => new Date());
@@ -98,21 +101,22 @@ export async function runBackfill(options, deps = {}) {
   const manifestHash = sha256(manifestText);
   const idsAll = extractUserIds(JSON.parse(listText));
   const manifest = JSON.parse(manifestText);
+  const contentHash = sha256(JSON.stringify({ model: manifest.model ?? null, charts: manifest.charts ?? manifest.assets ?? [], bundle: manifest.bundle ?? null }));
   const shardIds = shardUserIds(idsAll, options.shard, options.shards);
   const ids = options.only ? shardIds.filter(id => options.only.includes(id)) : shardIds;
   const limit = options.shards != null && options.limit === 0 ? ids.length : Math.min(options.limit, ids.length);
   const versions = options.versions;
   const summary = { attempted: 0, ready: 0, skipped: 0, failed: 0, next_cursor: 0, versions, manifest_hash: manifestHash, failures: [] };
   const checkpointPath = options.resume;
-  let checkpoint = { schema: CHECKPOINT_SCHEMA, versions, manifest_hash: manifestHash, cursor: 0, success: {}, failures: {} };
+  let checkpoint = { schema: CHECKPOINT_SCHEMA, versions, manifest_hash: manifestHash, content_hash: contentHash, cursor: 0, success: {}, failures: {} };
   if (checkpointPath) {
     try {
       const previous = await readJson(checkpointPath);
-      if (previous.schema === CHECKPOINT_SCHEMA && previous.manifest_hash === manifestHash && versionsEqual(previous.versions, versions) &&
+      if (previous.schema === CHECKPOINT_SCHEMA && previous.manifest_hash === manifestHash && previous.content_hash === contentHash && versionsEqual(previous.versions, versions) &&
           (previous.shard ?? null) === (options.shard ?? null) && (previous.shards ?? null) === (options.shards ?? null)) checkpoint = previous;
     } catch (error) { if (error?.code !== 'ENOENT') throw error; }
-    if (checkpoint.schema !== CHECKPOINT_SCHEMA || checkpoint.manifest_hash !== manifestHash || !versionsEqual(checkpoint.versions, versions)) {
-      checkpoint = { schema: CHECKPOINT_SCHEMA, versions, manifest_hash: manifestHash, cursor: 0, success: {}, failures: {} };
+    if (checkpoint.schema !== CHECKPOINT_SCHEMA || checkpoint.manifest_hash !== manifestHash || checkpoint.content_hash !== contentHash || !versionsEqual(checkpoint.versions, versions)) {
+      checkpoint = { schema: CHECKPOINT_SCHEMA, versions, manifest_hash: manifestHash, content_hash: contentHash, cursor: 0, success: {}, failures: {} };
     }
   }
   const target = new Set(ids);
@@ -146,7 +150,8 @@ export async function runBackfill(options, deps = {}) {
   if (startIndex >= ids.length && attempts.length < limit) {
     for (const id of retryIds) if (attempts.length < limit && !attempts.some(item => item.id === id)) attempts.push({ id, retry: true });
   }
-  if (!versions.model_version || !versions.q_version || !versions.time_axis_version || manifest?.publishable !== true) {
+  if (!versions.model_version || !versions.q_version || !versions.time_axis_version || manifest?.publishable !== true ||
+      (versions.model_version === 'phys-line-v2' && (versions.line_version !== 'phys-line-v2' || versions.mean_version !== 'mean-os-pattern-span-v2'))) {
     summary.skipped = attempts.length; summary.next_cursor = index;
     for (const { id } of attempts) summary.failures.push({ id, reason: !versions.model_version || !versions.q_version || !versions.time_axis_version ? 'versions_unset' : 'assets_unpublished' });
   } else {
@@ -208,7 +213,7 @@ export async function runBackfill(options, deps = {}) {
   }
   summary.next_cursor = index >= ids.length ? 0 : index;
   checkpoint.cursor = summary.next_cursor;
-  checkpoint.versions = versions; checkpoint.manifest_hash = manifestHash;
+  checkpoint.versions = versions; checkpoint.manifest_hash = manifestHash; checkpoint.content_hash = contentHash;
   if (options.shards != null) { checkpoint.shard = options.shard; checkpoint.shards = options.shards; }
   if (checkpointPath && !options.dryRun) await atomicJson(checkpointPath, checkpoint);
   const cpu = process.cpuUsage(cpuStart), wallMs = Math.max(0, now().getTime() - wallStart);

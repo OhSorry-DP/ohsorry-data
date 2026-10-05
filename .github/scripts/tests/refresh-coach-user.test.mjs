@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { parseArgs, runRefresh } from '../refresh-coach-user.mjs';
 import { buildRelativeRegistry } from '../coach-relative-input.mjs';
 import { stableJson, sha256, buildEntries, selectDpRegistry } from '../dump-coach-relative.mjs';
+import { runBackfill } from '../backfill-phys.mjs';
 
 const ID = 'USER1';
 const V = '2026-10-05T00:00:00.000Z';
@@ -91,6 +92,42 @@ test('unset theta tuple skips theta and still attempts relative', async () => {
   assert.equal(result.phys.status, 'skipped');
   assert.equal(f.calls.some(call => call[1]?.startsWith('phys/')), false);
   assert.equal(result.relative.status, 'ready');
+});
+
+test('v2 refresh sends the configured line tuple through the same producer input as backfill', async () => {
+  const f = fixture({ versions: true });
+  f.deps.env = { PHYS_MODEL_VERSION: 'phys-line-v2', PHYS_Q_VERSION: 'q-samehand-2s-v1',
+    PHYS_TIME_AXIS_VERSION: 'ta-20261004', PHYS_ASSETS_MANIFEST_KEY: 'phys-manifest.json' };
+  f.io.getText = async key => {
+    f.calls.push(['GETTEXT', key]);
+    if (key === 'data/feature-scores-slim.json') return JSON.stringify(feature);
+    if (key === 'data/textage-meta.json') return JSON.stringify(meta);
+    if (key === 'phys-manifest.json') return JSON.stringify({ publishable: true });
+    if (key === 'songs.json') return JSON.stringify({});
+    if (key.startsWith('phys/')) return '{}';
+    throw new Error(`unexpected fixture key ${key}`);
+  };
+  const refreshInputs = [];
+  f.deps.producePhysUser = async input => {
+    refreshInputs.push({ dump: input.dump, versions: input.versions });
+    return { status: 'ready', changed: false, source_revision: 'same' };
+  };
+  await runRefresh({ id: ID, expectedV: V }, f.deps);
+
+  const backfillInputs = [];
+  const result = await runBackfill({ usersList: 'users.json', manifestPath: 'manifest.json', limit: 1,
+    dryRun: true, versions: { model_version: 'phys-line-v2', line_version: 'phys-line-v2',
+      mean_version: 'mean-os-pattern-span-v2', q_version: 'q-samehand-2s-v1', time_axis_version: 'ta-20261004' } }, {
+    readFile: async file => file === 'users.json' ? JSON.stringify([{ iidx_id: ID }]) : JSON.stringify({ publishable: true }),
+    getDump: async () => JSON.stringify({ user: { iidx_id: ID }, dp: [], _v: V }),
+    loadAssets: async () => ({ status: 'ready', model: { content_hash: 'model' }, charts: new Map() }),
+    produce: async input => { backfillInputs.push({ dump: input.dump, versions: input.versions }); return { status: 'planned' }; },
+  });
+
+  assert.equal(result.ready, 1);
+  assert.equal(refreshInputs.length, 1);
+  assert.deepEqual(refreshInputs[0].versions, backfillInputs[0].versions);
+  assert.deepEqual({ ...refreshInputs[0].dump, songMap: undefined }, { ...backfillInputs[0].dump, songMap: undefined });
 });
 
 test('theta failure is summarized independently and relative continues', async () => {
