@@ -13,13 +13,14 @@ on:
       shards:
         type: number
         description: '전체 shard 수 (1..256)'
-        default: 8
+        default: 2
       dry_run:
         type: boolean
         default: true
       model_version:
         type: string
-        default: phys-line-v1
+        description: '처리할 phys line 모델 (v1로 지정하면 기존 모델 사용)'
+        default: phys-line-v2
       q_version:
         type: string
         default: q-samehand-2s-v1
@@ -63,6 +64,7 @@ jobs:
       LIMIT: ${{ inputs.limit }}
       SHARD: ${{ matrix.shard }}
       SHARDS: ${{ inputs.shards }}
+      BACKFILL_GATE_MS: 1000
       DRY_RUN: ${{ inputs.dry_run }}
       MODEL_VERSION: ${{ inputs.model_version }}
       Q_VERSION: ${{ inputs.q_version }}
