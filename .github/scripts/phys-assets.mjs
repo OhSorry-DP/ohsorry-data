@@ -203,8 +203,9 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
       if (!v2) return false;
       if (Object.keys(feature).length !== 3 || !['meanNps', 'duration', 'notes'].every(field => Object.hasOwn(feature, field))) return true;
       if (typeof feature.duration !== 'number' || !Number.isFinite(feature.duration) || feature.duration < 0 || !Number.isInteger(feature.notes) || feature.notes < 0) return true;
-      if (feature.meanNps === null) return feature.duration >= 1 || feature.notes !== 0;
-      return feature.duration < 1 || Math.abs(feature.meanNps - feature.notes / feature.duration) > 1e-9 * Math.max(1, feature.meanNps);
+      // 빌더는 유효 구간 1초 미만이면 노트·시간은 그대로 두고 meanNps 만 null 로 낸다(insufficient_span).
+      if (feature.meanNps === null) return feature.duration >= 1;
+      return feature.duration < 1 || feature.notes < 1 || Math.abs(feature.meanNps - feature.notes / feature.duration) > 1e-9 * Math.max(1, feature.meanNps);
     })) throw new Error(`chart mean features invalid: ${chartKey}`);
     loadedCharts.set(chartKey, chart);
   }
