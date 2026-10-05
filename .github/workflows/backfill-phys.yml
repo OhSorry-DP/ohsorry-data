@@ -19,7 +19,7 @@ on:
         default: true
       model_version:
         type: string
-        default: phys-clear-v1
+        default: phys-clear-v2
       q_version:
         type: string
         default: q-samehand-2s-v1
