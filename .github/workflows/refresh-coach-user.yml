@@ -1,0 +1,64 @@
+name: refresh-coach-user
+
+on:
+  repository_dispatch:
+    types: [refresh-coach-user]
+  workflow_dispatch:
+    inputs:
+      iidx_id:
+        description: iidx_id to refresh
+        required: true
+        type: string
+      expected_v:
+        description: Optional source _v; omitted means use the latest R2 user object
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coach-user-${{ github.event_name == 'workflow_dispatch' && inputs.iidx_id || github.event.client_payload.iidx_id }}
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      IIDX_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.iidx_id || github.event.client_payload.iidx_id }}
+      EXPECTED_V: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_v || github.event.client_payload.expected_v }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+      PHYS_MODEL_VERSION: ${{ vars.PHYS_MODEL_VERSION }}
+      PHYS_Q_VERSION: ${{ vars.PHYS_Q_VERSION }}
+      PHYS_TIME_AXIS_VERSION: ${{ vars.PHYS_TIME_AXIS_VERSION }}
+      PHYS_ASSETS_MANIFEST_KEY: ${{ vars.PHYS_ASSETS_MANIFEST_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Refresh coach user from latest R2 source
+        shell: bash
+        run: |
+          if [ -n "$EXPECTED_V" ]; then
+            node .github/scripts/refresh-coach-user.mjs --id "$IIDX_ID" --expected-v "$EXPECTED_V"
+          else
+            node --input-type=module - "$IIDX_ID" <<'NODE'
+          import { conditionalR2Client } from './.github/scripts/r2-client.mjs';
+          const id = process.argv[2];
+          const client = conditionalR2Client({ account: process.env.CLOUDFLARE_ACCOUNT_ID, token: process.env.CLOUDFLARE_API_TOKEN });
+          const source = await client.read(`user/${id}.json`);
+          if (!source) throw new Error('source_missing');
+          let dump;
+          try { dump = JSON.parse(source.body); } catch { throw new Error('source_invalid_json'); }
+          if (!dump || String(dump.user?.iidx_id ?? '') !== id || typeof dump._v !== 'string') throw new Error('source_invalid');
+          const version = dump._v;
+          if (!Number.isFinite(Date.parse(version)) || new Date(version).toISOString() !== version) throw new Error('source_invalid_version');
+          const { main } = await import('./.github/scripts/refresh-coach-user.mjs');
+          await main(['--id', id, '--expected-v', version]);
+          NODE
+          fi
