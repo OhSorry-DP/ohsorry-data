@@ -88,6 +88,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-05 — 코치 상대 순위·θ 생산 (refresh-coach-user · 야간 모집단)
+
+- `dump-user` 는 덤프만 올린다. 성공 뒤 별도 job 이 `refresh-coach-user` repository_dispatch 를 보낸다(실패해도 덤프 무영향).
+- `refresh-coach-user.yml`: R2 덤프를 읽어 θ(`phys/user/<ID>.json`, repo variable `PHYS_*` 미설정 시 skip)와 상대 백분위(`coach/relative/user/<ID>.json`)를 갱신. 유저별 직렬.
+- `dump-users-list.yml`: 야간에 `dump-coach-relative.mjs` 로 전체 모집단 스냅샷 게시(수동 실행 시 `relative_dry_run`·`relative_limit`).
+- 순수 모듈: `coach-relative.mjs`(R01)·`coach-relative-input.mjs`(R02)·`coach-relative-lib.mjs`(R04)·`phys-lib.mjs`·`phys-assets.mjs`·`backfill-phys.mjs`. Rating 비공개라 커널·physTheta 는 `vendor/` 동일 사본(바이트 대조 테스트).
+
 ### 2026-10-04 — persona popmean 갱신 (디코더 시간축 수정 반영)
 
 - 디코더 시간축 수정으로 패턴·피처 스코어가 바뀌어 persona 정규화 기준을 다시 만들었다. DP 336명 · SP 260명 표본. R2·gist 의 같은 이름 자산과 동일 바이트.
