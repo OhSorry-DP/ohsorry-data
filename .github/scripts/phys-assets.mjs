@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 const VERSION_FIELDS = ['model_version', 'q_version', 'time_axis_version'];
 const LINE_VERSIONS = { model_version: 'phys-line-v1', line_version: 'phys-line-v1', mean_version: 'mean-feature-span-v1' };
 const LINE_AXES = ['STAIR_UP', 'STAIR_DN', 'DOUBLE_STAIR', 'KEIMA', 'SPIRAL_UP', 'SPIRAL_DN', 'JUMP_WIDE', 'HSTAIR_SYM', 'HSTAIR_ASYM', 'CN'];
+const LINE_V2_VERSIONS = { model_version: 'phys-line-v2', line_version: 'phys-line-v2', mean_version: 'mean-os-pattern-span-v2' };
+const LINE_V2_AXES = ['NOTES', 'CHORD', 'PEAK', 'CHARGE', 'SCRATCH', 'PHRASE', 'JACK', 'TRILL', 'RAND', 'STAIR_UP_L', 'STAIR_UP_R', 'STAIR_DN_L', 'STAIR_DN_R', 'K1_L', 'K1_R', 'K2_L', 'K2_R', 'K3_L', 'K3_R', 'K4_L', 'K4_R', 'K5_L', 'K5_R', 'K6_L', 'K6_R', 'K7_L', 'K7_R', 'DOUBLE_STAIR_L', 'DOUBLE_STAIR_R', 'KEIMA_L', 'KEIMA_R', 'HSTAIR_ONEHAND', 'HSTAIR_SYNC', 'HSTAIR_SAMESHAPE', 'HSTAIR_DIFFSHAPE'];
+const LINE_V2_UNITS = Object.freeze(Object.fromEntries(LINE_V2_AXES.map(axis => [axis, ['HSTAIR_SYNC', 'HSTAIR_SAMESHAPE', 'HSTAIR_DIFFSHAPE'].includes(axis) ? 'notes/s/both-hands' : 'notes/s/hand'])));
 const MODEL_FIELDS = {
   schema_version: 'phys-model/1', purpose: 'clear', variant: 'baseline-2s', covariates: 'physical',
 };
@@ -58,19 +61,25 @@ function validateHash(asset, raw, entry, label) {
   if (contentHash(asset) !== asset.content_hash) throw new Error(`${label}: content_hash mismatch`);
 }
 
-function validateLineModel(model, label) {
+function validateLineModel(model, label, modelVersion) {
   // 게시된 모델은 실력선 설정 자체이며 기존 중첩 설정도 읽을 수 있다.
   const config = model.schema_version === 'phys-line-config/1' ? model : model.line_config;
   if (!config || config.schema_version !== 'phys-line-config/1') throw new Error(`${label}: line config mismatch`);
-  for (const [field, expected] of Object.entries(LINE_VERSIONS)) if (config[field] !== expected) throw new Error(`${label}: ${field} mismatch`);
-  if (!Array.isArray(config.axes) || !sameValue(config.axes, LINE_AXES)) throw new Error(`${label}: immutable line config mismatch`);
+  const v2 = modelVersion === 'phys-line-v2';
+  const expectedVersions = v2 ? LINE_V2_VERSIONS : LINE_VERSIONS;
+  const axes = v2 ? LINE_V2_AXES : LINE_AXES;
+  for (const [field, expected] of Object.entries(expectedVersions)) if (config[field] !== expected) throw new Error(`${label}: ${field} mismatch`);
+  if (!Array.isArray(config.axes) || !sameValue(config.axes, axes)) throw new Error(`${label}: immutable line config mismatch`);
+  if (v2 && !sameValue(config.units, LINE_V2_UNITS)) throw new Error(`${label}: immutable line units mismatch`);
   for (const field of ['q_version', 'time_axis_version']) if (config[field] !== model[field]) throw new Error(`${label}: ${field} mismatch`);
   if (typeof config.content_hash !== 'string' || !/^[a-f0-9]{64}$/.test(config.content_hash) || contentHash(config) !== config.content_hash) throw new Error(`${label}: line config content_hash mismatch`);
   if (model.schema_version === 'phys-line-config/1') return;
   if (!model.mean || typeof model.mean !== 'object') throw new Error(`${label}: mean assets missing`);
-  for (const axis of LINE_AXES) {
+  for (const axis of axes) {
     const mean = model.mean[axis];
-    if (!mean || !['meanNps', 'meanDuration'].every(field => mean[field] === null || (typeof mean[field] === 'number' && Number.isFinite(mean[field]) && mean[field] >= 0))) throw new Error(`${label}: invalid mean ${axis}`);
+    if (v2) {
+      if (!mean || !Number.isFinite(mean.meanNps) || mean.meanNps < 0 || Object.keys(mean).some(field => !['meanNps'].includes(field))) throw new Error(`${label}: invalid mean ${axis}`);
+    } else if (!mean || !['meanNps', 'meanDuration'].every(field => mean[field] === null || (typeof mean[field] === 'number' && Number.isFinite(mean[field]) && mean[field] >= 0))) throw new Error(`${label}: invalid mean ${axis}`);
   }
 }
 
@@ -169,7 +178,7 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
   for (const field of VERSION_FIELDS) {
     if (model[field] !== versions[field]) throw new Error(`model ${field} mismatch`);
   }
-  validateLineModel(model, `model ${modelKey}`);
+  validateLineModel(model, `model ${modelKey}`, modelVersion);
   const modelEntry = manifest.model;
   if (!modelEntry || modelEntry.key !== modelKey || modelEntry.content_hash !== model.content_hash) {
     throw new Error('manifest model declaration mismatch');
@@ -186,9 +195,16 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
     for (const field of VERSION_FIELDS) {
       if (chart[field] !== versions[field]) throw new Error(`chart ${field} mismatch: ${chartKey}`);
     }
-    if (!chart.features || Object.keys(chart.features).length !== LINE_AXES.length || LINE_AXES.some(axis => {
+    const v2 = modelVersion === 'phys-line-v2';
+    const axes = v2 ? LINE_V2_AXES : LINE_AXES;
+    if (!chart.features || Object.keys(chart.features).length !== axes.length || axes.some(axis => {
       const feature = chart.features[axis];
-      return !feature || !(feature.meanNps === null || typeof feature.meanNps === 'number' && Number.isFinite(feature.meanNps) && feature.meanNps >= 0);
+      if (!feature || !(feature.meanNps === null || typeof feature.meanNps === 'number' && Number.isFinite(feature.meanNps) && feature.meanNps >= 0)) return true;
+      if (!v2) return false;
+      if (Object.keys(feature).length !== 3 || !['meanNps', 'duration', 'notes'].every(field => Object.hasOwn(feature, field))) return true;
+      if (typeof feature.duration !== 'number' || !Number.isFinite(feature.duration) || feature.duration < 0 || !Number.isInteger(feature.notes) || feature.notes < 0) return true;
+      if (feature.meanNps === null) return feature.duration >= 1 || feature.notes !== 0;
+      return feature.duration < 1 || Math.abs(feature.meanNps - feature.notes / feature.duration) > 1e-9 * Math.max(1, feature.meanNps);
     })) throw new Error(`chart mean features invalid: ${chartKey}`);
     loadedCharts.set(chartKey, chart);
   }

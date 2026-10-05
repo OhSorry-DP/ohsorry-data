@@ -7,6 +7,7 @@ import { loadPhysAssets, sha256 } from '../phys-assets.mjs';
 
 const versions = { model_version: 'phys-line-v1', q_version: 'q1', time_axis_version: 't1' };
 const axes = ['STAIR_UP', 'STAIR_DN', 'DOUBLE_STAIR', 'KEIMA', 'SPIRAL_UP', 'SPIRAL_DN', 'JUMP_WIDE', 'HSTAIR_SYM', 'HSTAIR_ASYM', 'CN'];
+const axesV2 = ['NOTES', 'CHORD', 'PEAK', 'CHARGE', 'SCRATCH', 'PHRASE', 'JACK', 'TRILL', 'RAND', 'STAIR_UP_L', 'STAIR_UP_R', 'STAIR_DN_L', 'STAIR_DN_R', 'K1_L', 'K1_R', 'K2_L', 'K2_R', 'K3_L', 'K3_R', 'K4_L', 'K4_R', 'K5_L', 'K5_R', 'K6_L', 'K6_R', 'K7_L', 'K7_R', 'DOUBLE_STAIR_L', 'DOUBLE_STAIR_R', 'KEIMA_L', 'KEIMA_R', 'HSTAIR_ONEHAND', 'HSTAIR_SYNC', 'HSTAIR_SAMESHAPE', 'HSTAIR_DIFFSHAPE'];
 test('불변 게시본 원문을 묶음과 개별 파일에서 그대로 검증한다', async (t) => {
   const root = new URL('../../../../ohSorryRating/experiments/phys-proto/out/phys-assets/phys-line-v1/', import.meta.url);
   let raw;
@@ -180,4 +181,48 @@ test('매니페스트 파일 해시는 원문 공백까지 검증하고 중첩 �
   await assert.rejects(loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText }), /file_sha256 mismatch/);
   f.chartAsset.version_tuple = { ...versions, q_version: 'wrong' };
   await assert.rejects(loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText }), /chart q_version mismatch/);
+});
+
+function v2Fixture() {
+  const v = { model_version: 'phys-line-v2', q_version: 'q-samehand-2s-v1', time_axis_version: 'ta-20261004' };
+  const units = Object.fromEntries(axesV2.map(axis => [axis, ['HSTAIR_SYNC', 'HSTAIR_SAMESHAPE', 'HSTAIR_DIFFSHAPE'].includes(axis) ? 'notes/s/both-hands' : 'notes/s/hand']));
+  const config = { schema_version: 'phys-line-config/1', ...v, line_version: 'phys-line-v2', mean_version: 'mean-os-pattern-span-v2', axes: axesV2, units };
+  config.content_hash = sha256(config);
+  const model = hashed({ schema_version: 'phys-model/1', purpose: 'clear', variant: 'baseline-2s', covariates: 'physical', ...v,
+    source_revision: 'local', generated_at: '2026-10-05T00:00:00Z', line_config: config,
+    mean: Object.fromEntries(axesV2.map(axis => [axis, { meanNps: 0 }])) });
+  const chartKey = 'song/v2|ANOTHER';
+  const features = Object.fromEntries(axesV2.map(axis => [axis, { meanNps: null, duration: 0, notes: 0 }]));
+  const chart = hashed({ schema_version: 'phys-chart/1', chartKey, ...v, notes: 0, duration: 0, features });
+  const entry = { chartKey, key: `phys/chart/${v.model_version}/${encodeURIComponent(chartKey)}.json`, content_hash: chart.content_hash, ...v };
+  const manifest = { schema_version: 'phys-assets-manifest/1', publishable: true, ...v,
+    model: { key: `phys/model/${v.model_version}.json`, content_hash: model.content_hash }, charts: [entry], assets: [entry] };
+  const objects = new Map([[manifest.model.key, rawAsset(model)], [entry.key, rawAsset(chart)]]);
+  manifest.model.file_sha256 = sha256(objects.get(manifest.model.key)); entry.file_sha256 = sha256(objects.get(entry.key));
+  return { v, manifest, chart, chartKey, objects, getText: async key => objects.get(key) };
+}
+
+test('v2 35축·単位メタと空特徴をロードし、窓なしを許す', async () => {
+  const f = v2Fixture();
+  const loaded = await loadPhysAssets({ versions: f.v, manifest: f.manifest, getText: f.getText });
+  assert.equal(loaded.status, 'ready');
+  assert.equal(Object.keys(loaded.charts.get(f.chartKey).features).length, 35);
+  assert.equal(loaded.charts.get(f.chartKey).features.NOTES.meanNps, null);
+  assert.equal('worstWindows' in loaded.charts.get(f.chartKey), false);
+});
+
+test('v2 rejects mixed axis sets, extra feature fields, and inconsistent span ratios', async () => {
+  for (const mutate of [
+    f => { f.chart.features.BAD = { meanNps: 0, duration: 0, notes: 0 }; delete f.chart.features.NOTES; },
+    f => { f.chart.features.NOTES.reason = 'empty'; },
+    f => { f.chart.features.NOTES = { meanNps: 2, duration: 2, notes: 3 }; },
+    f => { f.chart.features.NOTES = { meanNps: 0, duration: 1, notes: 0 }; },
+    f => { f.chart.features.NOTES = { meanNps: null, duration: 1, notes: 0 }; },
+  ]) {
+    const f = v2Fixture(); mutate(f);
+    const raw = rawAsset(f.chart); f.objects.set(f.manifest.assets[0].key, raw);
+    f.manifest.assets[0].file_sha256 = sha256(raw); f.manifest.charts[0].file_sha256 = sha256(raw);
+    f.manifest.assets[0].content_hash = JSON.parse(raw).content_hash; f.manifest.charts[0].content_hash = JSON.parse(raw).content_hash;
+    await assert.rejects(loadPhysAssets({ versions: f.v, manifest: f.manifest, getText: f.getText }), /features invalid/);
+  }
 });
