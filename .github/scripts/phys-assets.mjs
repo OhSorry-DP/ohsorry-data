@@ -157,7 +157,11 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
     const { parsed: bundle } = parseAsset(raw, `bundle ${entry.key}`);
     if (sha256(raw) !== entry.file_sha256) throw new Error('bundle file_sha256 mismatch');
     if (Buffer.byteLength(raw, 'utf8') !== entry.bytes) throw new Error('bundle bytes mismatch');
-    if (bundle.schema_version !== 'phys-assets-bundle/1' || !sameValue(bundle.versions, versions) || !Array.isArray(bundle.assets)) throw new Error('bundle schema/version mismatch');
+    // 실제 빌더 번들은 자산 버전 3종(model·q·time_axis)만 담는다. 번들이 가진 키는 전부 일치해야 하고 3종은 필수다.
+    const bundleVersions = bundle.versions && typeof bundle.versions === 'object' ? bundle.versions : null;
+    const versionsOkay = bundleVersions && ['model_version', 'q_version', 'time_axis_version'].every((key) => Object.hasOwn(bundleVersions, key))
+      && Object.keys(bundleVersions).every((key) => sameValue(bundleVersions[key], versions[key]));
+    if (bundle.schema_version !== 'phys-assets-bundle/1' || !versionsOkay || !Array.isArray(bundle.assets)) throw new Error('bundle schema/version mismatch');
     bundled = new Map();
     const declared = new Map([[modelKey, manifest.model], ...charts.map(([, asset]) => [asset.key, asset])]);
     for (const asset of bundle.assets) {
