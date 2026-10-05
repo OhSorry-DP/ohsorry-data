@@ -105,7 +105,9 @@ function computePhysLineV2(selected) {
     const line = cleared < 6 ? null : inflectionLevelV2(pairs);
     const reason = cleared < 6 ? 'insufficient_clears' : line == null ? 'insufficient_sample' : null;
     const top = valid.filter(row => row.lampNum >= 2).sort((a, b) => b.features[axis].meanNps - a.features[axis].meanNps || a.chartKey.localeCompare(b.chartKey)).slice(0, 3).map(row => ({ chartKey: row.chartKey, mean_nps: row.features[axis].meanNps, lamp: row.lampNum, weight: LAMP_WEIGHT[row.lampNum] }));
-    axes[axis] = { line, basis: BASIS, n_charts: valid.length, n_failed: valid.filter(row => row.lampNum === 1).length, top_charts: top, reason, unit: UNIT_V2[axis] };
+    const maximum = valid.filter(row => row.lampNum >= 3).sort((a, b) => b.features[axis].meanNps - a.features[axis].meanNps || a.chartKey.localeCompare(b.chartKey))[0];
+    const max_chart = maximum ? { chartKey: maximum.chartKey, mean_nps: maximum.features[axis].meanNps, lamp: maximum.lampNum } : null;
+    axes[axis] = { line, max_line: max_chart?.mean_nps ?? null, max_chart, basis: BASIS, n_charts: valid.length, n_failed: valid.filter(row => row.lampNum === 1).length, top_charts: top, reason, unit: UNIT_V2[axis] };
   }
   return { model_version: 'phys-line-v2', line_version: 'phys-line-v2', mean_version: 'mean-os-pattern-span-v2', q_version: 'q-samehand-2s-v1', time_axis_version: 'ta-20261004', axes };
 }
