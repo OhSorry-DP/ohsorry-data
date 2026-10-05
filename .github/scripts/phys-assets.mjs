@@ -122,7 +122,27 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
 
   const charts = chartEntries(manifest, modelVersion);
   const modelKey = `phys/model/${modelVersion}.json`;
-  const modelRaw = await source(modelKey);
+  let bundled;
+  if (manifest.bundle !== undefined) {
+    const entry = manifest.bundle;
+    if (entry?.key !== `phys/bundle/${modelVersion}.json` || !/^[a-f0-9]{64}$/.test(entry.file_sha256 || '') || !Number.isSafeInteger(entry.bytes) || entry.bytes < 1) throw new Error('manifest bundle declaration invalid');
+    const raw = await source(entry.key);
+    const { parsed: bundle } = parseAsset(raw, `bundle ${entry.key}`);
+    if (sha256(raw) !== entry.file_sha256) throw new Error('bundle file_sha256 mismatch');
+    if (Buffer.byteLength(raw, 'utf8') !== entry.bytes) throw new Error('bundle bytes mismatch');
+    if (bundle.schema_version !== 'phys-assets-bundle/1' || !sameValue(bundle.versions, versions) || !Array.isArray(bundle.assets)) throw new Error('bundle schema/version mismatch');
+    bundled = new Map();
+    const declared = new Map([[modelKey, manifest.model], ...charts.map(([, asset]) => [asset.key, asset])]);
+    for (const asset of bundle.assets) {
+      const expected = declared.get(asset?.key);
+      if (!expected || bundled.has(asset.key) || typeof asset.raw !== 'string' || asset.file_sha256 !== expected.file_sha256 || asset.content_hash !== expected.content_hash) throw new Error('bundle asset declaration mismatch');
+      bundled.set(asset.key, asset.raw);
+    }
+    if (bundled.size !== declared.size) throw new Error('bundle assets missing');
+  }
+  // 묶음에서도 개별 파일 원문을 사용해 기존 해시 검증을 그대로 유지한다.
+  const readAsset = bundled ? async key => bundled.get(key) : source;
+  const modelRaw = await readAsset(modelKey);
   const { parsed: model } = parseAsset(modelRaw, `model ${modelKey}`);
   validateHash(model, modelRaw, manifest.model, `model ${modelKey}`);
   for (const [field, expected] of Object.entries(MODEL_FIELDS)) {
@@ -138,7 +158,7 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
 
   const loadedCharts = new Map();
   for (const [chartKey, entry] of charts) {
-    const raw = await source(entry.key);
+    const raw = await readAsset(entry.key);
     const { parsed: chart } = parseAsset(raw, `chart ${chartKey} (${entry.key})`);
     validateHash(chart, raw, entry, `chart ${chartKey}`);
     if (chart.schema_version !== CHART_SCHEMA) throw new Error(`chart schema mismatch: ${chartKey}`);

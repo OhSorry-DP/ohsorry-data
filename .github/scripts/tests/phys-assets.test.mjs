@@ -39,6 +39,56 @@ function fixture() {
   return { manifest, model, chart, chartKey, chartAsset, objects, calls, getText };
 }
 
+function bundleFixture() {
+  const f = fixture();
+  const assets = [f.manifest.model, f.chartAsset].map(entry => ({ key: entry.key, content_hash: entry.content_hash,
+    file_sha256: entry.file_sha256, raw: f.objects.get(entry.key) }));
+  f.bundle = { schema_version: 'phys-assets-bundle/1', versions, assets };
+  f.writeBundle = () => {
+    const raw = `${JSON.stringify(f.bundle)}\n`;
+    f.manifest.bundle = { key: `phys/bundle/${versions.model_version}.json`, file_sha256: sha256(raw), bytes: Buffer.byteLength(raw) };
+    f.objects.set(f.manifest.bundle.key, raw);
+  };
+  f.writeBundle();
+  return f;
+}
+
+test('묶음 하나만 GET하고 기존 채보 로딩 결과를 유지한다', async () => {
+  const f = bundleFixture();
+  const loaded = await loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText });
+  assert.deepEqual(f.calls, [f.manifest.bundle.key]);
+  assert.equal(loaded.status, 'ready');
+  assert.deepEqual(loaded.model, f.model);
+  assert.deepEqual(loaded.charts.get(f.chartKey), f.chart);
+});
+
+test('묶음 파일 해시와 바이트 수 변조를 거부하며 개별 GET으로 우회하지 않는다', async () => {
+  for (const mutate of [f => f.objects.set(f.manifest.bundle.key, f.objects.get(f.manifest.bundle.key) + ' '), f => f.manifest.bundle.bytes++]) {
+    const f = bundleFixture(); mutate(f);
+    await assert.rejects(loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText }), /bundle (file_sha256|bytes) mismatch/);
+    assert.deepEqual(f.calls, [f.manifest.bundle.key]);
+  }
+});
+
+test('묶음 해시가 맞아도 채보 원문·내용 해시와 누락·중복·버전 오류를 거부한다', async () => {
+  const cases = [
+    [f => { f.bundle.assets[1].raw += ' '; }, /file_sha256 mismatch/],
+    [f => {
+      const chart = JSON.parse(f.bundle.assets[1].raw); chart.notes++;
+      const raw = JSON.stringify(chart), hash = sha256(raw);
+      f.bundle.assets[1].raw = raw; f.bundle.assets[1].file_sha256 = hash; f.chartAsset.file_sha256 = hash;
+    }, /content_hash mismatch/],
+    [f => { f.bundle.assets.pop(); }, /assets missing/],
+    [f => { f.bundle.assets.push(f.bundle.assets[1]); }, /declaration mismatch/],
+    [f => { f.bundle.versions = { ...versions, q_version: 'wrong' }; }, /schema\/version mismatch/],
+    [f => { f.bundle.assets[1].file_sha256 = '0'.repeat(64); }, /declaration mismatch/],
+  ];
+  for (const [mutate, expected] of cases) {
+    const f = bundleFixture(); mutate(f); f.writeBundle();
+    await assert.rejects(loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText }), expected);
+  }
+});
+
 test('unset version skips without GET', async () => {
   let calls = 0;
   const result = await loadPhysAssets({ versions: { ...versions, q_version: null }, manifest: { publishable: true }, getText: async () => { calls++; } });

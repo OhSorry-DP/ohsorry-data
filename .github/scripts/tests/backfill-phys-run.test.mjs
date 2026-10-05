@@ -21,6 +21,7 @@ test('기본 dry-run은 REST 원천과 코어 수를 주입하고 checkpoint를 
     versions: { model_version: 'm', q_version: 'q', time_axis_version: 't' }, concurrency: 3 }, {
     readFile: async key => JSON.stringify(key === 'users' ? ['A', 'B', 'C', 'D'].map(iidx_id => ({ iidx_id })) : { publishable: true }),
     getDump: async () => ({ dp: [] }),
+    loadAssets: async () => ({ status: 'ready' }), // 회차당 1회 자산 로드(묶음) — 이 테스트는 병렬도만 본다
     produce: async () => {
       active++; peak = Math.max(peak, active); await new Promise(resolve => setTimeout(resolve, 2)); active--;
       return { status: 'planned' };

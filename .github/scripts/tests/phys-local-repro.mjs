@@ -15,10 +15,11 @@ const songs = JSON.parse(await fs.readFile(songsPath, 'utf8'));
 const manifest = JSON.parse(await fs.readFile(path.join(assetRoot, 'manifest.json'), 'utf8'));
 const versions = manifest.versions;
 const files = new Map([[manifest.model.key, manifest.model.path], ...manifest.assets.map(entry => [entry.key, entry.path])]);
+if (manifest.bundle) files.set(manifest.bundle.key, manifest.bundle.path);
 const id = String(dump.user.iidx_id);
-let record;
+let record, assetGets = 0, totalGets = 0;
 const io = {
-  async read(key) { return files.has(key) ? { body: await fs.readFile(path.join(assetRoot, files.get(key)), 'utf8') } : null; },
+  async read(key) { totalGets++; if (!files.has(key)) return null; assetGets++; return { body: await fs.readFile(path.join(assetRoot, files.get(key)), 'utf8') }; },
   async put(key, body) { assert.equal(key, `phys/user/${encodeURIComponent(id)}.json`); record = JSON.parse(body); },
 };
 const started = performance.now();
@@ -40,7 +41,7 @@ for (const axis of Object.values(evidence.axes)) {
   }
 }
 console.log(JSON.stringify({ id, dump_version: dump._v, production_status: result.status, reader_status: evidence.status,
-  production_ms: Math.round(productionMs), counts: result.counts, versions,
+  production_ms: Math.round(productionMs), asset_gets: assetGets, total_gets: totalGets, bundle_bytes: manifest.bundle?.bytes ?? null, counts: result.counts, versions,
   axes: Object.fromEntries(Object.entries(evidence.axes).map(([axis, value]) => [axis, { estimate_kind: value.estimate_kind,
     support_songs: value.provenance.support_songs, successes: value.provenance.successes, failures: value.provenance.failures,
     unobserved: value.unobserved, prior_driven: value.prior_driven }])) }));

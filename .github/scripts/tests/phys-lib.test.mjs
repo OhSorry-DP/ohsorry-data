@@ -56,6 +56,16 @@ test('버전 미지정 또는 자산 비게시 상태는 I/O·fit 없이 skip', 
   assert.equal(calls, 0);
 });
 
+test('주입한 검증 자산으로 생산할 때 로더를 다시 호출하지 않는다', async () => {
+  const assets = await assetLoader(), io = ioOf(); let fits = 0;
+  const result = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, assets,
+    loadAssets: async () => { throw new Error('unexpected asset load'); },
+    fitUser: async input => { fits++; assert.equal(input.model, assets.model); return { status: 'ready' }; },
+  });
+  assert.equal(result.status, 'ready'); assert.equal(fits, 1);
+  assert.equal(io.state.reads, 1); assert.equal(io.state.writes.length, 1);
+});
+
 test('동일 revision은 no-op, 배치 변경은 revision을 바꿔 한 번 fit한다', async () => {
   const io = ioOf(), fitted = [];
   const fitUser = async (input) => { fitted.push(input); return { status: 'ready' }; };

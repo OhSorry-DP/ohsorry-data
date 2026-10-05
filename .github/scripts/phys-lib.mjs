@@ -106,7 +106,7 @@ async function loadAssets(versions, manifest, io) {
   } });
 }
 
-export async function producePhysUser({ id, dump, versions, manifest, io, fitUser, loadAssets: loadAssetsFn, generatedAt = new Date().toISOString(), dryRun = false }) {
+export async function producePhysUser({ id, dump, versions, manifest, io, fitUser, assets, loadAssets: loadAssetsFn, generatedAt = new Date().toISOString(), dryRun = false }) {
   const key = KEY(String(id));
   const counts = { input_dp: Array.isArray(dump?.dp) ? dump.dp.length : 0, included: 0, invalid_row: 0,
     unsupported_diff: 0, song_mapping_missing: 0, chart_missing: 0, invalid_lamp: 0 };
@@ -121,7 +121,7 @@ export async function producePhysUser({ id, dump, versions, manifest, io, fitUse
   catch { return { status: 'failed', reason: 'previous_read_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts }; }
   const etag = previousRead == null ? null : previousRead.etag;
   try {
-    const loaded = await (loadAssetsFn || loadAssets)(versions, manifest, client);
+    const loaded = assets ?? await (loadAssetsFn || loadAssets)(versions, manifest, client);
     if (loaded?.status !== 'ready') throw new Error(loaded?.reason || 'assets_unavailable');
     const rows = makeRows(String(id), dump, loaded.charts, counts);
     counts.included = rows.length;

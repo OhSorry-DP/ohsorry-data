@@ -101,7 +101,7 @@ export async function runBackfill(options, deps = {}) {
   const r2 = deps.r2 || null;
   const produce = deps.produce || producePhysUser;
   const io = deps.io || r2;
-  let songsPromise;
+  let songsPromise, assetsPromise;
   const loader = deps.loadAssets || (async (v, m, client) => {
     const { loadPhysAssets } = await import('./phys-assets.mjs');
     return loadPhysAssets({ versions: v, manifest: m, getText: async key => {
@@ -156,7 +156,10 @@ export async function runBackfill(options, deps = {}) {
           })().catch(error => { songsPromise = null; throw error; });
           dump.songs = await songsPromise;
         }
-        const result = await produce({ id, dump, versions, manifest, io, fitUser, loadAssets: loader, dryRun: options.dryRun });
+        // 병렬 유저도 같은 로딩 Promise를 공유하며 실패해도 회차 내에서 재조회하지 않는다.
+        assetsPromise ||= Promise.resolve().then(() => loader(versions, manifest, io));
+        const assets = await assetsPromise;
+        const result = await produce({ id, dump, versions, manifest, io, fitUser, assets, loadAssets: () => assetsPromise, dryRun: options.dryRun });
         if (['ready', 'planned'].includes(result.status)) {
           summary.ready++;
           if (!options.dryRun && result.status === 'ready' && result.changed) {

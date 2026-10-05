@@ -10,6 +10,27 @@ const options = (overrides = {}) => ({ usersList: 'users.json', manifestPath: 'm
 const fixture = async ids => ({ readFile: async file => file === 'users.json' ? JSON.stringify(ids.map(iidx_id => ({ iidx_id }))) : JSON.stringify({ publishable: true }),
   getDump: async id => JSON.stringify({ id, dp: [{ song_id: 1 }] }), loadAssets: async () => ({ status: 'ready' }), fitUser: async () => ({ status: 'ready' }) });
 
+test('N명 병렬 백필은 로더를 한 번 호출하고 같은 자산을 주입한다', async () => {
+  const f = await fixture(['A', 'B', 'C']);
+  const assets = { status: 'ready', model: {}, charts: new Map() };
+  let loads = 0, users = 0;
+  const result = await runBackfill(options({ concurrency: 3 }), { ...f,
+    loadAssets: async () => { loads++; await new Promise(resolve => setTimeout(resolve, 5)); return assets; },
+    produce: async args => { users++; assert.equal(args.assets, assets); assert.equal(await args.loadAssets(), assets); return { status: 'planned' }; },
+  });
+  assert.equal(loads, 1); assert.equal(users, 3); assert.equal(result.ready, 3);
+});
+
+test('회차 내 자산 로딩 실패도 공유하며 유저별로 GET을 반복하지 않는다', async () => {
+  const f = await fixture(['A', 'B', 'C']); let loads = 0;
+  const result = await runBackfill(options({ concurrency: 3 }), { ...f,
+    loadAssets: async () => { loads++; throw new Error('bundle hash mismatch'); },
+    produce: async () => { throw new Error('unexpected produce'); },
+  });
+  assert.equal(loads, 1); assert.equal(result.failed, 3);
+  assert.ok(result.failures.every(item => item.error_message === 'bundle hash mismatch'));
+});
+
 test('limit/only 및 users-list 중복 ID 필터', async () => {
   assert.deepEqual(extractUserIds([{ iidx_id: 'B' }, { iidx_id: 'A' }, { iidx_id: 'A' }]), ['A', 'B']);
   const f = await fixture(['A', 'B', 'C', 'B']), seen = [];
