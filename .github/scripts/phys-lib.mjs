@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const KEY = (id) => `phys/user/${encodeURIComponent(id)}.json`;
-const IMPLEMENTATION = 'phys-user-producer/1';
+const IMPLEMENTATION = 'phys-user-producer/2';
 const DIFFS = { 1: 'NORMAL', 2: 'HYPER', 3: 'ANOTHER', 4: 'LEGGENDARIA' };
 
 export function canonical(value) {
@@ -45,15 +45,25 @@ function makeRows(id, dump, charts, counts) {
   if (!Array.isArray(dump?.dp)) throw new TypeError('dump.dp 배열 필요');
   if (!(charts instanceof Map)) throw new TypeError('검증된 채보 Map 필요');
   const songMap = songMapOf(dump), arrangeMap = arrangeMapOf(dump), best = new Map();
+  // 정규화 곡명 키와 Textage ID를 구분하고 자산이 선언한 일대일 조인만 허용한다.
+  const aliases = new Map();
+  for (const chart of charts.values()) {
+    if (!chart.textage_song_id) continue;
+    const key = `${chart.textage_song_id}|${chart.diff}`;
+    if (aliases.has(key) && aliases.get(key)?.chartKey !== chart.chartKey) aliases.set(key, null);
+    else if (!aliases.has(key)) aliases.set(key, chart);
+  }
   for (const row of dump.dp) {
     if (!row || !Number.isInteger(row.song_id) || !Number.isInteger(row.diff)) { counts.invalid_row++; continue; }
     const diff = DIFFS[row.diff];
     if (!diff) { counts.unsupported_diff++; continue; }
     const textageId = songMap.get(String(row.song_id));
     if (!textageId) { counts.song_mapping_missing++; continue; }
-    const chartKey = `${textageId}|${diff}`;
-    const chart = charts.get(chartKey);
-    if (!chart || String(chart.songId) !== textageId || chart.diff !== diff || chart.chartKey !== chartKey) {
+    const lookupKey = `${textageId}|${diff}`;
+    const chart = aliases.has(lookupKey) ? aliases.get(lookupKey) : charts.get(lookupKey);
+    const chartKey = chart?.chartKey;
+    if (!chart || chart.diff !== diff || chartKey !== `${chart.songId}|${diff}` ||
+        (chart.textage_song_id ? String(chart.textage_song_id) !== textageId : String(chart.songId) !== textageId)) {
       counts.chart_missing++;
       continue;
     }
@@ -61,7 +71,7 @@ function makeRows(id, dump, charts, counts) {
     const lampNum = typeof row.lamp === 'number' ? row.lamp : 0;
     if (!Number.isInteger(lampNum) || lampNum < 1 || lampNum > 7) { counts.invalid_lamp++; continue; }
     const arrange = arrangeMap.get(`${row.song_id}|${row.diff}`) ?? chart.arrange ?? chart.arrange_assumed ?? null;
-    const out = { userId: String(id), songId: textageId, chartKey, lampNum,
+    const out = { userId: String(id), songId: String(chart.songId), chartKey, lampNum,
       notes: chart.notes, duration: chart.duration, features: chart.features,
       ...(arrange != null ? { arrange, arrange_assumed: arrange } : { arrangeAssumed: true, arrange_assumed: 'unknown' }),
       ...(chart.provenance ? { chartProvenance: chart.provenance } : {}),
@@ -127,7 +137,7 @@ export async function producePhysUser({ id, dump, versions, manifest, io, fitUse
     counts.included = rows.length;
     const modelHash = loaded.model.content_hash;
     const source_revision = sha256({ rows, versions, assets: [...loaded.charts].filter(([chartKey]) => rows.some((r) => r.chartKey === chartKey))
-      .map(([chartKey, chart]) => [chartKey, chart.content_hash]), modelHash, implementation: 'phys-theta-local/1', producer: IMPLEMENTATION });
+      .map(([chartKey, chart]) => [chartKey, chart.content_hash]), modelHash, implementation: 'phys-theta-local/2', producer: IMPLEMENTATION });
     if (isReadyFor(previous, String(id), versions, source_revision)) return { status: 'ready', reason: null, key, source_revision,
       generated_at: previous.absolute.generated_at, changed: false, counts };
     if (dryRun) return { status: 'planned', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };

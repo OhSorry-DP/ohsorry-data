@@ -56,6 +56,22 @@ test('버전 미지정 또는 자산 비게시 상태는 I/O·fit 없이 skip', 
   assert.equal(calls, 0);
 });
 
+test('Textage ID가 다른 정규화 곡명 자산을 명시적 별칭으로 조인하고 모호한 별칭은 제외한다', async () => {
+  const assets = await assetLoader();
+  const renamed = chart('normalized-title', 'ANOTHER', { textage_song_id: 'tx-a' });
+  assets.charts.delete('tx-a|ANOTHER'); assets.charts.set(renamed.chartKey, renamed);
+  let rows;
+  const run = () => producePhysUser({ id:'USER', dump:baseDump(), versions, manifest, assets, io:ioOf(),
+    fitUser:async input => { rows=input.rows; return {status:'ready'}; } });
+  await run();
+  assert.equal(rows.find(r=>r.songId==='normalized-title').lampNum, 6);
+  assert.equal(rows.find(r=>r.songId==='normalized-title').features.STAIR_UP.maxQ, 2);
+  const collision = chart('other-title', 'ANOTHER', { textage_song_id:'tx-a' });
+  assets.charts.set(collision.chartKey,collision);
+  await run();
+  assert.equal(rows.some(r=>['normalized-title','other-title'].includes(r.songId)),false);
+});
+
 test('주입한 검증 자산으로 생산할 때 로더를 다시 호출하지 않는다', async () => {
   const assets = await assetLoader(), io = ioOf(); let fits = 0;
   const result = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, assets,

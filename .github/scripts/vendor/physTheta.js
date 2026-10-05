@@ -133,7 +133,7 @@ function profileCell({ fitted, userId, axis, rows, pool, rules }) {
   return { ...common, estimate_kind: kind, theta: kind === 'point_estimate' ? profileTheta : null,
     lower: kind === 'unidentified' ? null : lower, upper: kind === 'point_estimate' ? upper : null,
     interval_status: kind === 'point_estimate' ? 'bounded' : kind === 'lower_bound' ? 'one_sided' : 'unavailable',
-    unobserved: false, pool_ceiling: poolCeiling, support_ceiling: supportCeiling, prior_driven: !bounded,
+    unobserved: false, pool_ceiling: poolCeiling, support_ceiling: supportCeiling, prior_driven: kind === 'unidentified',
     priorOnlyLower, width: lower != null && upper != null ? upper - lower : null,
     profile: { lower, upper, lowerBoundary: first === 0, upperPlateau: last === grid.length - 1,
       minimumNll: best.objective, profileTheta, minimumConverged: best.converged, lowerConverged, upperConverged,
@@ -145,7 +145,7 @@ function profileCell({ fitted, userId, axis, rows, pool, rules }) {
 }
 
 const RULES = Object.freeze({ minSongs: 20, minSide: 5, lrCutoff: 3.84 });
-const IMPLEMENTATION = 'phys-theta-local/1';
+const IMPLEMENTATION = 'phys-theta-local/2';
 
 // 표준화와 모집단만 사용하며 ★와 점수는 읽지 않는다.
 function predict(fit, row) {
@@ -176,7 +176,10 @@ function validateModel(model) {
     const stat = model.covariateStats?.[key];
     if (!Number.isFinite(stat?.mean) || !Number.isFinite(stat?.sd) || stat.sd <= 0) throw new TypeError('표준화 오류');
   }
-  for (const axis of AXES) if (!Number.isFinite(model.pool?.[axis]) || model.pool[axis] < 0) throw new TypeError('풀 천장 오류');
+  for (const axis of AXES) {
+    if (!Number.isFinite(model.pool?.[axis]) || model.pool[axis] < 0) throw new TypeError('풀 천장 오류');
+    if (model.initialTheta != null && (!Number.isFinite(model.initialTheta[axis]) || model.initialTheta[axis] <= 0)) throw new TypeError('모집단 초기 좌표 오류');
+  }
   return model;
 }
 
@@ -200,7 +203,8 @@ function prepareUser({ model, userId, rows, initial = null }) {
   });
   const theta = {}, logTheta = {};
   for (const axis of AXES) {
-    const value = initial?.theta?.[axis] ?? Math.max(.1, model.pool[axis]);
+    // 모집단 중심에서 병목을 활성화한다. 초기값일 뿐 목적함수에 사전항을 넣지 않는다.
+    const value = initial?.theta?.[axis] ?? model.initialTheta?.[axis] ?? Math.max(.1, model.pool[axis] / 2);
     if (!Number.isFinite(value) || value <= 0) throw new TypeError('초기 좌표 오류');
     theta[axis] = { [userId]: value }; logTheta[axis] = { [userId]: Math.log(value) };
   }

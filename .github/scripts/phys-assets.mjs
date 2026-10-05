@@ -162,6 +162,7 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
     const { parsed: chart } = parseAsset(raw, `chart ${chartKey} (${entry.key})`);
     validateHash(chart, raw, entry, `chart ${chartKey}`);
     if (chart.schema_version !== CHART_SCHEMA) throw new Error(`chart schema mismatch: ${chartKey}`);
+    if (chart.textage_song_id != null && (typeof chart.textage_song_id !== 'string' || !chart.textage_song_id)) throw new Error(`chart Textage identity invalid: ${chartKey}`);
     if (chart.chartKey !== chartKey || entry.content_hash !== chart.content_hash) throw new Error(`chart declaration mismatch: ${chartKey}`);
     for (const field of VERSION_FIELDS) {
       if (chart[field] !== versions[field]) throw new Error(`chart ${field} mismatch: ${chartKey}`);
