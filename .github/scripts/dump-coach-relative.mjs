@@ -309,9 +309,9 @@ export async function produceInputs({ usersListFile, selectedIds, limit, resumeD
   }
   const report = { generatedAt: now, totalMembers: members.length, requested: targets.length, succeeded: users.length,
     failed: failures, completePopulation: completeTargetSet && users.length === members.length && Object.keys(state.failures).length === 0,
-    dryRun: !!dryRun, registry, users, population: null,
+    dryRun: !!dryRun, registry, featureVersion, users, population: null, // featureVersion 은 publishSnapshot 의 모집단 버전 재계산에 필요
     populationVersion: completeTargetSet && users.length === members.length && !Object.keys(state.failures).length
-      ? sha256({ membership: users.map(user => user.iidxId).sort(), source_revisions: users.map(user => [user.iidxId, user.sourceRevision]).sort(([a], [b]) => a.localeCompare(b)),
+      ? sha256({ membership: users.map(user => user.iidxId).sort((a, b) => a.localeCompare(b)), // publishSnapshot 과 같은 정렬 source_revisions: users.map(user => [user.iidxId, user.sourceRevision]).sort(([a], [b]) => a.localeCompare(b)),
         feature_version: featureVersion, registry: [...registry].sort((a, b) => a.key.localeCompare(b.key)) }) : null };
   if (resumeDir) {
     await atomicJson(statePaths(resumeDir).checkpoint, state.completed);
