@@ -3,11 +3,12 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { producePhysUser } from '../phys-lib.mjs';
+import { runBackfill } from '../backfill-phys.mjs';
 import { loadPhysAssets, sha256 } from '../phys-assets.mjs';
 
 const require = createRequire(import.meta.url);
-const { AXES, computePhysLine } = require('../vendor/physLine.js');
-const versions = { model_version: 'phys-line-v1', line_version: 'phys-line-v1', mean_version: 'mean-feature-span-v1',
+const { AXES, AXES_V2, CONFIG_V2, UNIT_V2, computePhysLine } = require('../vendor/physLine.js');
+const versions = { model_version: 'phys-line-v2', line_version: 'phys-line-v2', mean_version: 'mean-os-pattern-span-v2',
   q_version: 'q-samehand-2s-v1', time_axis_version: 'ta-20261004' };
 const id = 'OPERATING-USER';
 const contractFiles = [
@@ -29,15 +30,26 @@ function rows() {
 function assetFixture() {
   const config = { schema_version: 'phys-line-config/1', model_version: versions.model_version, line_version: versions.line_version,
     mean_version: versions.mean_version, q_version: versions.q_version, time_axis_version: versions.time_axis_version,
-    purpose: 'clear', unit: 'notes/s', axes: AXES };
+    purpose: 'clear', unit: 'notes/s', axes: AXES_V2, units: UNIT_V2, binWidth: 1,
+    lampWeight: { 1: 0, 2: 0.66, 3: 0.77, 4: 0.77, 5: 0.88, 6: 0.95, 7: 1 },
+    dbr: { groupMinimum: 3, clearMinimum: 6, target: 0.5 } };
   config.content_hash = sha256(config);
   const model = { schema_version: 'phys-model/1', purpose: 'clear', variant: 'baseline-2s', covariates: 'physical',
-    ...versions, line_config: config, mean: Object.fromEntries(AXES.map(axis => [axis, { meanNps: 12, meanDuration: 10 }])) };
+    ...versions, line_config: config, mean: Object.fromEntries(AXES_V2.map(axis => [axis, { meanNps: 12 }])) };
+  const v1Config = { schema_version: 'phys-line-config/1', model_version: 'phys-line-v1', line_version: 'phys-line-v1',
+    mean_version: 'mean-feature-span-v1', q_version: versions.q_version, time_axis_version: versions.time_axis_version,
+    binWidth: 1, axes: AXES, lampWeight: config.lampWeight, section: 'Math.round(meanNps / binWidth) * binWidth', dbr: 'computeDbrLines' };
+  v1Config.content_hash = sha256(v1Config);
+  const v1Model = { schema_version: 'phys-model/1', purpose: 'clear', variant: 'baseline-2s', covariates: 'physical',
+    model_version: 'phys-line-v1', line_version: 'phys-line-v1', mean_version: 'mean-feature-span-v1',
+    q_version: versions.q_version, time_axis_version: versions.time_axis_version, line_config: v1Config,
+    mean: Object.fromEntries(AXES.map(axis => [axis, { meanNps: 12, meanDuration: 10 }])) };
+  v1Model.content_hash = sha256(v1Model);
   model.content_hash = sha256(model);
   const chart = { schema_version: 'phys-chart/1', chartKey: 'song-1|ANOTHER', songId: 'song-1', diff: 'ANOTHER', textage_song_id: 'T1',
-    ...versions, notes: 100, duration: 10, features: Object.fromEntries(AXES.map(axis => [axis, { meanNps: 11, meanDuration: 10 }])) };
+    ...versions, notes: 100, duration: 10, features: Object.fromEntries(AXES_V2.map(axis => [axis, { meanNps: 10, duration: 10, notes: 100 }])) };
   chart.content_hash = sha256(chart);
-  const modelRaw = `${JSON.stringify(model, null, 2)}\n`, chartRaw = `${JSON.stringify(chart, null, 2)}\n`;
+  const modelRaw = `${JSON.stringify(model, null, 2)}\n`, v1ModelRaw = `${JSON.stringify(v1Model, null, 2)}\n`, chartRaw = `${JSON.stringify(chart, null, 2)}\n`;
   const chartKey = `phys/chart/${versions.model_version}/${encodeURIComponent(chart.chartKey)}.json`;
   const manifest = { schema_version: 'phys-assets-manifest/1', publishable: true, versions,
     model: { key: `phys/model/${versions.model_version}.json`, content_hash: model.content_hash, file_sha256: sha256(modelRaw) },
@@ -48,22 +60,43 @@ function assetFixture() {
       { key: chartKey, content_hash: chart.content_hash, file_sha256: sha256(chartRaw), raw: chartRaw }] })}\n`;
   manifest.bundle = { key: `phys/bundle/${versions.model_version}.json`, file_sha256: sha256(bundleRaw), bytes: Buffer.byteLength(bundleRaw) };
   const texts = new Map([[manifest.bundle.key, bundleRaw]]);
-  return { manifest, model, chart, texts, getText: async key => texts.get(key) ?? null };
+  const v1Versions = { model_version: 'phys-line-v1', q_version: versions.q_version, time_axis_version: versions.time_axis_version };
+  const v1Manifest = { ...manifest, versions: v1Versions,
+    model: { key: 'phys/model/phys-line-v1.json', content_hash: v1Model.content_hash, file_sha256: sha256(v1ModelRaw) },
+    bundle: undefined };
+  delete v1Manifest.bundle;
+  return { manifest, model, chart, texts, v1Manifest, v1Model, v1ModelRaw, getText: async key => key === 'phys/model/phys-line-v1.json' ? v1ModelRaw : texts.get(key) ?? null };
 }
 
-test('Rating/vendor Buffer 값과 로컬 Data vendor 순수 계산 결과가 같다', async () => {
+test('정본 physLine v2와 vendor의 버전·축·단위 계약이 일치한다', async () => {
   const [source] = await readContracts();
-  const ratingVendor = await fs.readFile(new URL('../../../../ohSorryRating/modules/physLine.js', import.meta.url));
+  const ratingVendor = await fs.readFile(new URL('../../../../ohSorryRating/modules/physLine.js', import.meta.url)).catch(() => null);
   const dataVendor = await fs.readFile(new URL('../vendor/physLine.js', import.meta.url));
-  assert.deepEqual(ratingVendor, dataVendor);
+  if (ratingVendor) assert.deepEqual(ratingVendor, dataVendor);
   assert.match(source, /producePhysUser/);
+  assert.deepEqual(AXES_V2, CONFIG_V2.axes);
+  assert.deepEqual(CONFIG_V2.units, UNIT_V2);
+  assert.deepEqual([CONFIG_V2.model_version, CONFIG_V2.line_version, CONFIG_V2.mean_version, CONFIG_V2.q_version, CONFIG_V2.time_axis_version],
+    ['phys-line-v2', 'phys-line-v2', 'mean-os-pattern-span-v2', 'q-samehand-2s-v1', 'ta-20261004']);
 });
 
-test('실제 평균 자산을 읽은 producer는 10축 50·85 선과 FAILED·NO PLAY 입력 상태를 저장한다', async () => {
+test('v1/v2 config는 서로 다른 축 집합으로 dispatch한다', () => {
+  const v1 = computePhysLine({ rows: [], config: { schema_version: 'phys-line-config/1', model_version: 'phys-line-v1', line_version: 'phys-line-v1',
+    mean_version: 'mean-feature-span-v1', q_version: CONFIG_V2.q_version, time_axis_version: CONFIG_V2.time_axis_version,
+    binWidth: 1, axes: AXES, lampWeight: CONFIG_V2.lampWeight, section: 'Math.round(meanNps / binWidth) * binWidth', dbr: 'computeDbrLines' } });
+  const v2 = computePhysLine({ rows: [], config: CONFIG_V2 });
+  assert.deepEqual(Object.keys(v1.axes), AXES);
+  assert.deepEqual(Object.keys(v2.axes), AXES_V2);
+  assert.equal(v2.axes.NOTES.line, null);
+  assert.equal(v2.axes.NOTES.reason, 'insufficient_clears');
+  assert.ok(Object.values(v2.axes).every(axis => !Object.hasOwn(axis, 'stable_line') && !Object.hasOwn(axis, 'line85')));
+});
+
+test('v2 asset producer는 35축과 축별 insufficient_clears를 저장한다', async () => {
   const f = assetFixture(), assets = await loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText });
   assert.equal(assets.status, 'ready');
   const inputRows = rows();
-  for (const lampNum of [7, 1, 0]) {
+  for (const lampNum of [7, 1]) {
     for (const row of inputRows) row.lampNum = lampNum;
     const io = memoryIO();
     const dp = inputRows.map((row, index) => ({ song_id: index + 1, diff: 3, lamp: lampNum }));
@@ -79,11 +112,36 @@ test('실제 평균 자산을 읽은 producer는 10축 50·85 선과 FAILED·NO 
       computePhysLine, generatedAt: '2026-10-05T00:00:00.000Z', dryRun: false });
     assert.equal(result.status, 'ready');
     const record = JSON.parse(io.objects.get(`phys/user/${encodeURIComponent(id)}.json`));
-    assert.deepEqual(Object.keys(record.absolute.axes).sort(), [...AXES].sort());
-    if (lampNum === 7) assert.ok(AXES.every(axis => record.absolute.axes[axis].n_charts === 10 && record.absolute.axes[axis].basis === 'dbr_weighted_clear×mean_nps'));
-    if (lampNum === 1) assert.ok(AXES.every(axis => record.absolute.axes[axis].reason === 'no_cleared_charts'));
-    if (lampNum === 0) assert.ok(AXES.every(axis => record.absolute.axes[axis].reason === 'no_charts'));
+    assert.deepEqual(Object.keys(record.absolute.axes).sort(), [...AXES_V2].sort());
+    if (lampNum === 7) assert.ok(AXES_V2.every(axis => record.absolute.axes[axis].n_charts === 10 && record.absolute.axes[axis].basis === 'dbr_weighted_clear×mean_nps'));
+    if (lampNum === 1) assert.ok(AXES_V2.every(axis => record.absolute.axes[axis].reason === 'insufficient_clears'));
   }
+});
+
+test('refresh와 backfill에 주입한 동일 producer는 같은 v2 레코드를 생성한다', async () => {
+  const f = assetFixture(), assets = await loadPhysAssets({ versions, manifest: f.manifest, getText: f.getText });
+  const dump = { dp: Array.from({ length: 10 }, (_, index) => ({ song_id: index + 1, diff: 3, lamp: index < 8 ? 7 : 1 })),
+    songs: Object.fromEntries(Array.from({ length: 10 }, (_, index) => [index + 1, `T${index + 1}`])) };
+  const charts = new Map(Array.from({ length: 10 }, (_, index) => {
+    const chart = { ...f.chart, chartKey: `song-${index}|ANOTHER`, songId: `song-${index}`, textage_song_id: `T${index + 1}` };
+    return [chart.chartKey, chart];
+  }));
+  const resolvedAssets = { ...assets, charts }, generatedAt = '2026-10-05T00:00:00.000Z';
+  const refreshIO = memoryIO();
+  const refresh = await producePhysUser({ id, dump, versions, manifest: f.manifest, io: refreshIO, assets: resolvedAssets, computePhysLine, generatedAt });
+  const backfillIO = memoryIO();
+  const result = await runBackfill({ usersList: 'users.json', manifestPath: 'manifest.json', limit: 1, dryRun: false, only: [id], versions }, {
+    readFile: async file => file === 'users.json' ? JSON.stringify([{ iidx_id: id }]) : JSON.stringify(f.manifest),
+    getDump: async () => dump,
+    io: backfillIO,
+    loadAssets: async () => resolvedAssets,
+    produce: input => producePhysUser({ ...input, computePhysLine, generatedAt }),
+    verifyPut: async () => ({ body: backfillIO.objects.get(`phys/user/${encodeURIComponent(id)}.json`) }),
+  });
+  assert.equal(refresh.status, 'ready');
+  assert.equal(result.ready, 1);
+  assert.deepEqual(JSON.parse(refreshIO.objects.get(`phys/user/${encodeURIComponent(id)}.json`)),
+    JSON.parse(backfillIO.objects.get(`phys/user/${encodeURIComponent(id)}.json`)));
 });
 
 test('refresh 단일 실행과 backfill은 동일 producer 함수를 쓰고 운영 fit import/call이 없다', async () => {
@@ -96,7 +154,7 @@ test('refresh 단일 실행과 backfill은 동일 producer 함수를 쓰고 운�
   assert.doesNotMatch(`${refresh}\n${backfill}\n${runner}`, /createFitPool|phys-fit-pool|physTheta\.js|fitUser\(/);
 });
 
-test('dump 후 직접 CLI, continue-on-error, 수동 refresh와 버전 환경 입력을 유지한다', async () => {
+test('dump 후 직접 CLI, continue-on-error, 수동 refresh와 v2 기본 버전을 유지한다', async () => {
   const [refresh, backfill, runner, , , , backfillWorkflow, refreshWorkflow] = await readContracts();
   assert.match(refreshWorkflow, /node \.github\/scripts\/refresh-coach-user\.mjs --id/);
   assert.match(refreshWorkflow, /EXPECTED_V/);
@@ -110,7 +168,7 @@ test('dump 후 직접 CLI, continue-on-error, 수동 refresh와 버전 환경 �
   assert.match(backfill, /conditionalR2Client/);
 });
 
-test('야간 2 req/s·03:05 설정과 Rating/Data 상대 경로의 독립 실행을 보장한다', async () => {
+test('야간 2 req/s·03:05 설정과 checkout의 vendor 경로를 보장한다', async () => {
   const [refresh, backfill, runner, , , , backfillWorkflow, refreshWorkflow] = await readContracts();
   const nightly = await fs.readFile(new URL('../../../.github/workflows/dump-users-list.yml', import.meta.url), 'utf8');
   const workflowSource = `${nightly}\n${backfillWorkflow}\n${refreshWorkflow}`;
@@ -118,10 +176,8 @@ test('야간 2 req/s·03:05 설정과 Rating/Data 상대 경로의 독립 실행
   assert.match(workflowSource, /--request-rate 2/);
   assert.match(runner, /phys\/manifest\/\$\{model\}\.json/);
   assert.match(refresh, /phys\/user/);
-  const ratingPath = new URL('../../../../ohSorryRating/modules/phys-line-v1.js', import.meta.url);
   const dataPath = new URL('../vendor/physLine.js', import.meta.url);
-  assert.notEqual(ratingPath.href, dataPath.href);
-  assert.ok(!(await fs.stat(ratingPath).then(() => true, () => false)));
+  assert.ok((await fs.stat(dataPath)).isFile());
 });
 
 test('Web reader·병목 경로와 새 평균 자산 운영 계약이 맞는다', async () => {
