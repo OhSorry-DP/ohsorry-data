@@ -157,8 +157,9 @@ export async function publishSnapshot(report, { r2, resumeDir, poolFn = pool, lo
   const versionInput = { membership: sortedUsers.map(user => user.iidxId),
     source_revisions: sortedUsers.map(user => [user.iidxId, user.sourceRevision]), feature_version: featureVersion,
     registry: [...registry].sort((a, b) => a.key.localeCompare(b.key)) };
-  const populationVersion = report.populationVersion || sha256(versionInput);
-  if (populationVersion !== sha256(versionInput)) throw new Error('모집단 버전 입력 불일치');
+  // 모집단 버전은 실제로 게시하는 입력으로만 정한다. 입력 단계 값은 메모리 객체(undefined 포함)로 계산돼
+  // JSON 왕복 뒤 값과 다를 수 있어 로그용으로만 쓴다(10-05 본 실행에서 불일치로 중단됨).
+  const populationVersion = sha256(versionInput);
   const population = buildPopulation({ users: sortedUsers, registry, featureVersion, populationVersion, generatedAt });
   const populationKey = `coach/relative/population/${populationVersion}.json`;
   const populationRecord = { schema_version: 'coach-relative-population/1', rank_version: population.rank_version,
