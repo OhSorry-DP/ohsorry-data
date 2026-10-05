@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const KEY = (id) => `phys/user/${encodeURIComponent(id)}.json`;
-const IMPLEMENTATION = 'phys-user-producer/3';
+const IMPLEMENTATION = 'phys-user-producer/4';
 const DIFFS = { 1: 'NORMAL', 2: 'HYPER', 3: 'ANOTHER', 4: 'LEGGENDARIA' };
 
 export function canonical(value) {
@@ -149,7 +149,16 @@ export async function producePhysUser({ id, dump, versions, manifest, io, comput
     if (dryRun) return { status: 'planned', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };
     const compute = computePhysLine || require('./vendor/physLine.js').computePhysLine;
     const result = compute({ rows });
+    // 계산값에 리더 계약의 단위·배치 가정·검증된 자산 출처를 붙인다.
+    const axes = Object.fromEntries(Object.entries(result.axes ?? {}).map(([axis, value]) => [axis, {
+      ...value,
+      unit: value.unit ?? (axis.startsWith('HSTAIR') ? 'notes/s/both-hands' : 'notes/s/hand'),
+      arrange_assumed: value.arrange_assumed ?? (rows.length && rows.every(row => row.arrange_assumed === rows[0].arrange_assumed)
+        ? rows[0].arrange_assumed : 'unknown'),
+      provenance: value.provenance ?? { source: 'phys-assets', model_hash: modelHash, source_revision },
+    }]));
     const absolute = { ...result, status: 'ready', purpose: 'clear', unit: 'notes/s', source_revision, generated_at: generatedAt, stale: false,
+      axes,
       model_version: result.model_version || loaded.model.line_config.model_version,
       line_version: result.line_version || loaded.model.line_config.line_version, mean_version: result.mean_version || loaded.model.line_config.mean_version };
     const record = { schema_version: 'coach-skill-evidence/1', iidx_id: String(id), play_style: 'DP', absolute };

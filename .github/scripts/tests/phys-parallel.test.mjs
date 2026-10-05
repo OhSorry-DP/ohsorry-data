@@ -1,12 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createRequire } from 'node:module';
-import { createFitPool } from '../phys-fit-pool.mjs';
 import { checkpointKey, extractUserIds, parseArgs, runBackfill, shardUserIds } from '../backfill-phys.mjs';
 import { run } from '../backfill-phys-run.mjs';
-
-const require = createRequire(import.meta.url);
-const { AXES, fitUser } = require('../vendor/physTheta.js');
 
 test('shard 합집합은 전체 ID이며 중복이 없고 입력 순서·중복에 영향받지 않는다', () => {
   const list = Array.from({ length: 494 }, (_, i) => ({ iidx_id: `U${i}` }));
@@ -59,25 +54,21 @@ test('runner는 shard별 R2 checkpoint를 복원하고 저장한다', async () =
   }
 });
 
-test('재사용 워커 풀의 fit 결과는 직렬 결과와 동일하다', async () => {
-  const model = { schema_version: 'phys-model/1', purpose: 'clear', variant: 'baseline-2s', covariates: 'physical',
-    content_hash: 'a'.repeat(64), model_version: 'm', q_version: 'q', time_axis_version: 't',
-    b: { b0: 0, b1: 0, b2: 0, b3: 0 }, kappa: [-3, -2, -1, 0, 1, 2],
-    covariateStats: { notes: { mean: 0, sd: 1 }, duration: { mean: 0, sd: 1 } },
-    pool: Object.fromEntries(AXES.map(axis => [axis, 2])) };
-  const inputs = Array.from({ length: 4 }, (_, i) => ({ model, userId: `U${i}`, source_revision: 'b'.repeat(64),
-    generated_at: '2026-10-05T00:00:00.000Z', rows: Array.from({ length: 3 }, (_, j) => ({
-      userId: `U${i}`, songId: `S${j}`, chartKey: `S${j}|ANOTHER`, lampNum: 3 + j,
-      notes: 100, duration: 10, features: { STAIR_UP: { maxQ: 1 + j } },
-    })) }));
-  const serial = [];
-  for (const input of inputs) serial.push(await fitUser(input, { concurrency: 1 }));
-  const pool = createFitPool(model, 2);
-  try {
-    assert.deepEqual(await Promise.all(inputs.map(input => pool.fitUser(input))), serial);
-    await assert.rejects(pool.fitUser({ ...inputs[0], userId: null }), /유저 입력 오류/);
-    assert.deepEqual(await pool.fitUser(inputs[0]), serial[0]);
-  }
-  finally { await pool.close(); }
-  await assert.rejects(pool.fitUser(inputs[0]), /종료/);
+test('운영 병렬 경로는 fit pool 없이 순수 실력선 계산과 유저 producer를 실행한다', async () => {
+  const fs = await import('node:fs/promises');
+  const [backfill, refresh, producer, runner] = await Promise.all([
+    fs.readFile(new URL('../backfill-phys.mjs', import.meta.url), 'utf8'),
+    fs.readFile(new URL('../refresh-coach-user.mjs', import.meta.url), 'utf8'),
+    fs.readFile(new URL('../phys-lib.mjs', import.meta.url), 'utf8'),
+    fs.readFile(new URL('../backfill-phys-run.mjs', import.meta.url), 'utf8'),
+  ]);
+  assert.match(backfill, /import \{ producePhysUser \} from '\.\/phys-lib\.mjs'/);
+  assert.match(backfill, /const produce = deps\.produce \|\| producePhysUser/);
+  assert.match(backfill, /computePhysLine, assets, loadAssets: \(\) => assetsPromise/);
+  assert.match(refresh, /import \{ producePhysUser \} from '\.\/phys-lib\.mjs'/);
+  assert.match(refresh, /producePhysUser \}\s+from '\.\/phys-lib\.mjs'/);
+  assert.match(refresh, /\(deps\.producePhysUser \|\| producePhysUser\)\(/);
+  assert.match(producer, /require\('\.\/vendor\/physLine\.js'\)\.computePhysLine/);
+  assert.doesNotMatch(`${backfill}\n${refresh}\n${runner}`, /createFitPool|phys-fit-pool|physTheta\.js/);
+  assert.match(runner, /runBackfill\)\(options/);
 });
