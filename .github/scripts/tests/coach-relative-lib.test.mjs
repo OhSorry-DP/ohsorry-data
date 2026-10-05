@@ -23,6 +23,14 @@ const manifestFor = (version = 'pop-1', feature = featureVersion) => ({ schema_v
 const dumpFor = id => ({ user: { iidx_id: id, star: 12 }, dp: [], osPattern: [{ play_style: 1, TEST: 30 }] });
 const assets = { featureVersion, hashes: {}, codeHashes: {}, kernel: { countPatternScoreRecords: () => ({}) },
   featureFile: { scores: {} }, metaFile: { songs: {} } };
+test('슬림 덤프의 곡 매핑 조회 실패는 이전 결과를 보존하고 쓰지 않는다', async () => {
+  const { io, state } = fixture();
+  const dump = { ...dumpFor('TARGET'), dp: [{ song_id: 1, diff: 3, ex_score: 100 }] };
+  const output = await produceRelativeUser({ id: 'TARGET', dump, io, assets, generatedAt: 't', dryRun: true });
+  assert.equal(output.reason, 'songs_read_failed');
+  assert.ok(state.reads.includes('songs.json'));
+  assert.deepEqual(state.puts, []);
+});
 function fixture({ manifest = manifestFor(), old = null, race = null } = {}) {
   const objects = new Map([
     ['coach/relative/current.json', { body: JSON.stringify(manifest), etag: 'manifest-etag' }],
