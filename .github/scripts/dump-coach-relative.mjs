@@ -33,7 +33,7 @@ export function stripDpPrefix(value) {
   if (Array.isArray(value)) return value.map(stripDpPrefix);
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key.startsWith('dp/') ? key.slice(3) : key,
-    key === 'registry' && Array.isArray(item) ? item.filter(axis => axis.key.startsWith('dp/')).map(axis => ({ ...axis, key: axis.key.slice(3) })) : stripDpPrefix(item)]));
+    key === 'registry' && Array.isArray(item) ? item.filter(axis => !axis.key.startsWith('sp/')).map(axis => ({ ...axis, key: axis.key.startsWith('dp/') ? axis.key.slice(3) : axis.key })) : stripDpPrefix(item)]));
 }
 
 function listRows(rows) {
@@ -165,7 +165,9 @@ async function publishSnapshotImpl(report, { r2, resumeDir, poolFn, logger }) {
   if (!report?.completePopulation || !Array.isArray(report.users) || !r2?.read || !r2?.put) {
     throw new Error('완전 모집단과 조건부 R2 client가 필요합니다');
   }
-  const { users, registry, featureVersion, generatedAt } = report;
+  const { users, featureVersion, generatedAt } = report;
+  // 입력 피처와 같은 DP 키로 모집단·투영을 계산한다. 이전 체크포인트의 접두 키도 정규화한다.
+  const registry = stripDpPrefix({ registry: report.registry }).registry;
   const sortedUsers = [...users].sort((a, b) => a.iidxId.localeCompare(b.iidxId));
   if (sortedUsers.length !== report.totalMembers || new Set(sortedUsers.map(user => user.iidxId)).size !== sortedUsers.length) {
     throw new Error('불변 모집단 회원 수 또는 ID가 일치하지 않습니다');
@@ -348,10 +350,10 @@ export async function produceInputs({ usersListFile, selectedIds, limit, resumeD
   }
   const report = { generatedAt: now, totalMembers: members.length, requested: targets.length, succeeded: users.length,
     failed: failures, completePopulation: completeTargetSet && users.length === members.length && Object.keys(state.failures).length === 0,
-    dryRun: !!dryRun, registry, featureVersion, users, population: null, // featureVersion 은 publishSnapshot 의 모집단 버전 재계산에 필요
+    dryRun: !!dryRun, registry: stripDpPrefix({ registry }).registry, featureVersion, users, population: null, // featureVersion 은 publishSnapshot 의 모집단 버전 재계산에 필요
     populationVersion: completeTargetSet && users.length === members.length && !Object.keys(state.failures).length
       ? sha256({ membership: users.map(user => user.iidxId).sort((a, b) => a.localeCompare(b)), // publishSnapshot 과 같은 정렬 source_revisions: users.map(user => [user.iidxId, user.sourceRevision]).sort(([a], [b]) => a.localeCompare(b)),
-        feature_version: featureVersion, registry: [...registry].sort((a, b) => a.key.localeCompare(b.key)) }) : null };
+        feature_version: featureVersion, registry: stripDpPrefix({ registry }).registry.sort((a, b) => a.key.localeCompare(b.key)) }) : null };
   if (resumeDir) {
     await atomicJson(statePaths(resumeDir).checkpoint, state.completed);
     await atomicJson(path.join(resumeDir, 'result.json'), report);
@@ -403,6 +405,20 @@ async function selfTestInput() {
     assert.equal(cv.features['osPattern:KEIMA_L'].recordCount, 0);
     assert.equal(cv.features['osPattern:SOF-LAN'].value, 0);
     assert.equal(cv.features['radar:notes'].recordCount, 30);
+    // 실제 덤프처럼 SP·DP 집계 행과 null 확장 축이 함께 있어도 DP 값을 게시까지 보존한다.
+    const actualShape = { ...d, osPattern: [{ play_style: 0, notes: 99 },
+      { iidx_id: '001', play_style: 1, notes: 7, soflan: 0, keima_l: null }],
+      radars: [{ play_style: 0, notes: 99 }, { play_style: 1, notes: 4, soft: 0 }] };
+    const actualUser = calculateUser(actualShape, registry, { featureVersion: 'v', sourceRevision: 's' }, assets, localKernel);
+    const outputRegistry = stripDpPrefix({ registry }).registry;
+    assert.deepEqual(stripDpPrefix({ registry: outputRegistry }).registry, outputRegistry);
+    const population = buildPopulation({ users: Array.from({ length: 30 }, (_, i) => ({ ...actualUser, iidxId: String(i) })),
+      registry: outputRegistry, featureVersion: 'v', populationVersion: 'p', generatedAt: '2026-10-05T00:00:00Z' });
+    const projected = projectRelative({ user: actualUser, registry: outputRegistry, population, sourceRevision: 's', generatedAt: population.generated_at });
+    assert.equal(projected.features['osPattern:NOTES'].value, 7);
+    assert.equal(projected.features['osPattern:NOTES'].record_count, 30);
+    assert.equal(projected.features['osPattern:NOTES'].overall.percentile, 50);
+    assert.equal(projected.features['radar:soflan'].value, 0);
     const noGrid = calculateUser({ ...d, dp: undefined }, registry, { featureVersion: 'v', sourceRevision: 's' }, assets, localKernel);
     assert.equal(noGrid.features['radar:notes'].recordCount, null);
     assert.equal(sha256({ b: 2, a: 1 }), sha256({ a: 1, b: 2 }));
@@ -427,6 +443,7 @@ async function selfTestInput() {
     const fakeResult = await produceInputs({ usersListFile: listFile, limit: 50, dryRun: true, featureAssetsDir: fakeAssetsDir,
       r2: fake, poolFn: fakePool, logger: { log() {} }, now: '2026-01-01T00:00:00.000Z' });
     assert.equal(fakeResult.requested, 50); assert.equal(fakeResult.succeeded, 49); assert.equal(Object.keys(fakeResult.failed).length, 1);
+    assert.deepEqual(fakeResult.registry, outputRegistry);
     assert.ok(peak <= 8); assert.equal(calls, 50);
     const dir = path.join(temp, 'resume'); let r2Calls = 0;
     const resumableR2 = { useRest: true, async getText(key) { r2Calls++; if (key.endsWith('0001.json')) throw new Error('retry me'); return fake.getText(key); } };
@@ -548,7 +565,8 @@ async function selfTestStandalone() {
 
 async function selfTestPublish() {
   const assert = await import('node:assert/strict');
-  const registry = [{ key: 'osPattern:NOTES', valueUnit: 'feature_score', higherIsBetter: true }];
+  // 이전 야간 입력의 접두 레지스트리와 접두 없는 피처 조합을 재현한다.
+  const registry = [{ key: 'dp/osPattern:NOTES', valueUnit: 'feature_score', higherIsBetter: true }];
   const users = Array.from({ length: 30 }, (_, index) => ({ iidxId: String(index).padStart(2, '0'), star: 4,
     featureVersion: 'fv', sourceRevision: `sr-${index}`, features: { 'osPattern:NOTES': { value: index < 2 ? 50 : index, recordCount: 30 } } }));
   const makeReport = generatedAt => ({ completePopulation: true, totalMembers: 30, users, registry, featureVersion: 'fv', generatedAt });
@@ -568,6 +586,13 @@ async function selfTestPublish() {
     assert.equal(first.publication.status, 'published');
     const manifest = JSON.parse(r2.objects.get('coach/relative/current.json').body);
     assert.equal(manifest.schema_version, 'coach-relative-manifest/1'); assert.equal(Object.keys(manifest.user_hashes).length, 30);
+    const savedPopulation = JSON.parse(r2.objects.get(manifest.population_key).body);
+    assert.equal(savedPopulation.registry[0].key, 'osPattern:NOTES');
+    assert.equal(savedPopulation.calculation.features['osPattern:NOTES'].values.length, 30);
+    const publishedFeature = JSON.parse(r2.objects.get('coach/relative/user/00.json').body).relative.features['osPattern:NOTES'];
+    assert.equal(publishedFeature.value, 50);
+    assert.equal(publishedFeature.record_count, 30);
+    assert.equal(publishedFeature.overall.percentile, 96.67);
     assert.ok(r2.calls.findIndex(call => call[1].includes('/population/')) < r2.calls.findIndex(call => call[1].includes('/snapshot/')));
     assert.ok(r2.calls.findIndex(call => call[1].includes('/snapshot/')) < r2.calls.findIndex(call => call[1] === 'coach/relative/current.json' && call[0] === 'PUT'));
     assert.ok(r2.peak <= 4);
