@@ -15,7 +15,7 @@ test('기본 dry-run은 REST 원천과 코어 수를 주입하고 checkpoint를 
     return { ready: 1 };
   } });
   assert.equal(result.ready, 1);
-  assert.deepEqual(reads, ['phys/backfill/checkpoint-phys-clear-v1.json', 'users-list.json', 'phys/manifest/phys-clear-v1.json', 'user/A.json']);
+  assert.deepEqual(reads, ['phys/backfill/checkpoint-phys-line-v1.json', 'users-list.json', 'phys/manifest/phys-line-v1.json', 'user/A.json']);
   let active = 0, peak = 0;
   const parallel = await runBackfill({ usersList: 'users', manifestPath: 'manifest', limit: 50, dryRun: true,
     versions: { model_version: 'm', q_version: 'q', time_axis_version: 't' }, concurrency: 3 }, {
@@ -33,7 +33,7 @@ test('기본 dry-run은 REST 원천과 코어 수를 주입하고 checkpoint를 
 test('쓰기 회차는 checkpoint를 복원하고 조건부 저장 및 본문 검증', async () => {
   let body = '{"cursor":1}', puts = 0;
   const r2 = { read: async () => ({ body, etag: '"old"' }), put: async (key, value, etag) => {
-    assert.equal(key, 'phys/backfill/checkpoint-phys-clear-v1.json'); assert.equal(etag, '"old"'); body = value; puts++;
+    assert.equal(key, 'phys/backfill/checkpoint-phys-line-v1.json'); assert.equal(etag, '"old"'); body = value; puts++;
   } };
   await run({ DRY_RUN: 'false' }, { r2, cores: () => 2, runBackfill: async options => {
     assert.equal(await fs.readFile(options.resume, 'utf8'), body);

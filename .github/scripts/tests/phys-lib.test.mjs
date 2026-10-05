@@ -13,7 +13,7 @@ const baseDump = () => ({ dp: [
 chart_arrange: [{ song_id: 11, diff: 3, play_style: 1, arrange: 'MIRROR' },
   { song_id: 11, diff: 3, play_style: 0, arrange: 'RANDOM' }] });
 const manifest = { publishable: true };
-const assetLoader = async () => ({ status: 'ready', model: { content_hash: 'a'.repeat(64) },
+const assetLoader = async () => ({ status: 'ready', model: { content_hash: 'a'.repeat(64), line_config: { line_version: 'phys-line-v1', mean_version: 'mean-feature-span-v1', content_hash: 'b'.repeat(64) } },
   charts: new Map([chart('tx-a', 'ANOTHER'), chart('tx-b', 'ANOTHER'), chart('tx-c', 'ANOTHER'), chart('tx-d', 'ANOTHER')].map((c) => [c.chartKey, c])) });
 const ioOf = (initial = null) => {
   const state = { value: initial, reads: 0, writes: [], failRead: false, failPut: null };
@@ -29,7 +29,7 @@ const ioOf = (initial = null) => {
 test('정확한 곡 매핑·diff·DP만 join하고 숫자 lamp와 배치 provenance를 적용', async () => {
   const io = ioOf(), fitted = [];
   const result = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, loadAssets: assetLoader,
-    fitUser: async (input, options) => { fitted.push({ input, options }); return { status: 'ready', purpose: 'clear' }; } });
+    computePhysLine: input => { fitted.push({ input }); return { model_version:'phys-line-v1', line_version:'phys-line-v1', mean_version:'mean-feature-span-v1', axes:{} }; } });
   assert.equal(result.status, 'ready');
   assert.equal(fitted.length, 1);
   const rows = fitted[0].input.rows;
@@ -39,7 +39,7 @@ test('정확한 곡 매핑·diff·DP만 join하고 숫자 lamp와 배치 provena
   assert.equal(rows[1].arrange_assumed, 'unknown');
   assert.equal(result.counts.song_mapping_missing, 0);
   assert.equal(result.counts.invalid_lamp, 1);
-  assert.equal(fitted[0].options.concurrency, 1);
+  assert.equal(fitted[0].input.rows[0].meanNps, null);
 });
 
 test('버전 미지정 또는 자산 비게시 상태는 I/O·fit 없이 skip', async () => {
@@ -48,7 +48,7 @@ test('버전 미지정 또는 자산 비게시 상태는 I/O·fit 없이 skip', 
     { versions: { ...versions, q_version: null }, manifest },
     { versions, manifest: { publishable: false } },
   ]) {
-    const result = await producePhysUser({ id: 'USER', dump: baseDump(), io, fitUser: async () => { calls++; }, ...args });
+    const result = await producePhysUser({ id: 'USER', dump: baseDump(), io, computePhysLine: () => { calls++; }, ...args });
     assert.equal(result.status, 'skipped');
   }
   assert.equal(io.state.reads, 0);
@@ -62,7 +62,7 @@ test('Textage ID가 다른 정규화 곡명 자산을 명시적 별칭으로 조
   assets.charts.delete('tx-a|ANOTHER'); assets.charts.set(renamed.chartKey, renamed);
   let rows;
   const run = () => producePhysUser({ id:'USER', dump:baseDump(), versions, manifest, assets, io:ioOf(),
-    fitUser:async input => { rows=input.rows; return {status:'ready'}; } });
+    computePhysLine: input => { rows=input.rows; return {status:'ready'}; } });
   await run();
   assert.equal(rows.find(r=>r.songId==='normalized-title').lampNum, 6);
   assert.equal(rows.find(r=>r.songId==='normalized-title').features.STAIR_UP.maxQ, 2);
@@ -76,7 +76,7 @@ test('주입한 검증 자산으로 생산할 때 로더를 다시 호출하지 
   const assets = await assetLoader(), io = ioOf(); let fits = 0;
   const result = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, assets,
     loadAssets: async () => { throw new Error('unexpected asset load'); },
-    fitUser: async input => { fits++; assert.equal(input.model, assets.model); return { status: 'ready' }; },
+    computePhysLine: input => { fits++; assert.ok(input.rows); return { status: 'ready' }; },
   });
   assert.equal(result.status, 'ready'); assert.equal(fits, 1);
   assert.equal(io.state.reads, 1); assert.equal(io.state.writes.length, 1);
@@ -84,18 +84,21 @@ test('주입한 검증 자산으로 생산할 때 로더를 다시 호출하지 
 
 test('동일 revision은 no-op, 배치 변경은 revision을 바꿔 한 번 fit한다', async () => {
   const io = ioOf(), fitted = [];
-  const fitUser = async (input) => { fitted.push(input); return { status: 'ready' }; };
-  const first = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, loadAssets: assetLoader, fitUser });
+  const computePhysLine = input => { const revision = 'r' + fitted.length; fitted.push({ ...input, source_revision: revision }); return { model_version:'phys-line-v1', line_version:'phys-line-v1', mean_version:'mean-feature-span-v1', axes:{} }; };
+  const first = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, loadAssets: assetLoader, computePhysLine });
   const saved = JSON.parse(io.state.value.body);
   saved.absolute.source_revision = first.source_revision;
   Object.assign(saved.absolute, versions);
+  saved.absolute.model_version = 'phys-line-v1';
+  saved.absolute.line_version = 'phys-line-v1';
+  saved.absolute.mean_version = 'mean-feature-span-v1';
   io.state.value = { body: JSON.stringify(saved), etag: 'etag-next' };
-  const same = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, loadAssets: assetLoader, fitUser });
+  const same = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, loadAssets: assetLoader, computePhysLine });
   assert.equal(same.changed, false);
   assert.equal(fitted.length, 1);
   const changed = baseDump();
   changed.chart_arrange[0].arrange = 'RANDOM';
-  await producePhysUser({ id: 'USER', dump: changed, versions, manifest, io, loadAssets: assetLoader, fitUser });
+  await producePhysUser({ id: 'USER', dump: changed, versions, manifest, io, loadAssets: assetLoader, computePhysLine });
   assert.equal(fitted.length, 2);
   assert.notEqual(fitted[0].source_revision, fitted[1].source_revision);
 });
@@ -103,8 +106,8 @@ test('동일 revision은 no-op, 배치 변경은 revision을 바꿔 한 번 fit�
 test('fit 1회 결과는 clear-only 공통 envelope로 조건부 저장', async () => {
   const io = ioOf(); let calls = 0;
   const result = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io, loadAssets: assetLoader,
-    fitUser: async (input) => { calls++; assert.equal(input.rows.every((r) => !Object.hasOwn(r, 'scoreRate')), true);
-      return { status: 'ready', purpose: 'clear', source_revision: input.source_revision, generated_at: input.generated_at, axes: {} }; } });
+    computePhysLine: input => { calls++; assert.equal(input.rows.every((r) => !Object.hasOwn(r, 'scoreRate')), true);
+      return { model_version:'phys-line-v1', line_version:'phys-line-v1', mean_version:'mean-feature-span-v1', axes: {} }; } });
   assert.equal(calls, 1);
   assert.equal(result.status, 'ready');
   assert.equal(io.state.writes[0].etag, null);
@@ -139,7 +142,7 @@ test('412 conflict 및 이전 GET 실패는 기록을 덮지 않음', async () =
   assert.equal(conflict.status, 'conflict');
   const failedIo = ioOf(); failedIo.state.failRead = true;
   const failed = await producePhysUser({ id: 'USER', dump: baseDump(), versions, manifest, io: failedIo,
-    loadAssets: assetLoader, fitUser: async () => ({}) });
+    loadAssets: assetLoader, computePhysLine: () => ({}) });
   assert.equal(failed.reason, 'previous_read_failed');
   assert.equal(failedIo.state.writes.length, 0);
 });

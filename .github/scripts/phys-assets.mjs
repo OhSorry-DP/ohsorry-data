@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
 const VERSION_FIELDS = ['model_version', 'q_version', 'time_axis_version'];
+const LINE_VERSIONS = { model_version: 'phys-line-v1', line_version: 'phys-line-v1', mean_version: 'mean-feature-span-v1' };
+const LINE_AXES = ['STAIR_UP', 'STAIR_DN', 'DOUBLE_STAIR', 'KEIMA', 'SPIRAL_UP', 'SPIRAL_DN', 'JUMP_WIDE', 'HSTAIR_SYM', 'HSTAIR_ASYM', 'CN'];
 const MODEL_FIELDS = {
   schema_version: 'phys-model/1', purpose: 'clear', variant: 'baseline-2s', covariates: 'physical',
 };
@@ -54,6 +56,20 @@ function validateHash(asset, raw, entry, label) {
     throw new Error(`${label}: content_hash missing or invalid`);
   }
   if (contentHash(asset) !== asset.content_hash) throw new Error(`${label}: content_hash mismatch`);
+}
+
+function validateLineModel(model, label) {
+  const config = model.line_config;
+  if (!config || config.schema_version !== 'phys-line-config/1') throw new Error(`${label}: line config mismatch`);
+  for (const [field, expected] of Object.entries(LINE_VERSIONS)) if (config[field] !== expected) throw new Error(`${label}: ${field} mismatch`);
+  if (config.purpose !== 'clear' || config.unit !== 'notes/s' || !Array.isArray(config.axes) || !sameValue(config.axes, LINE_AXES)) throw new Error(`${label}: immutable line config mismatch`);
+  for (const field of ['q_version', 'time_axis_version']) if (config[field] !== model[field]) throw new Error(`${label}: ${field} mismatch`);
+  if (typeof config.content_hash !== 'string' || !/^[a-f0-9]{64}$/.test(config.content_hash) || contentHash(config) !== config.content_hash) throw new Error(`${label}: line config content_hash mismatch`);
+  if (!model.mean || typeof model.mean !== 'object') throw new Error(`${label}: mean assets missing`);
+  for (const axis of LINE_AXES) {
+    const mean = model.mean[axis];
+    if (!mean || !['meanNps', 'meanDuration'].every(field => mean[field] === null || (typeof mean[field] === 'number' && Number.isFinite(mean[field]) && mean[field] >= 0))) throw new Error(`${label}: invalid mean ${axis}`);
+  }
 }
 
 function chartEntries(manifest, modelVersion) {
@@ -151,6 +167,7 @@ export async function loadPhysAssets({ versions, manifest, getText } = {}) {
   for (const field of VERSION_FIELDS) {
     if (model[field] !== versions[field]) throw new Error(`model ${field} mismatch`);
   }
+  validateLineModel(model, `model ${modelKey}`);
   const modelEntry = manifest.model;
   if (!modelEntry || modelEntry.key !== modelKey || modelEntry.content_hash !== model.content_hash) {
     throw new Error('manifest model declaration mismatch');

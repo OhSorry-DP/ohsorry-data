@@ -8,7 +8,7 @@ import { extractUserIds, parseArgs, runBackfill } from '../backfill-phys.mjs';
 const versions = { model_version: 'm1', q_version: 'q1', time_axis_version: 't1' };
 const options = (overrides = {}) => ({ usersList: 'users.json', manifestPath: 'manifest.json', versions, limit: 50, dryRun: true, only: null, resume: null, ...overrides });
 const fixture = async ids => ({ readFile: async file => file === 'users.json' ? JSON.stringify(ids.map(iidx_id => ({ iidx_id }))) : JSON.stringify({ publishable: true }),
-  getDump: async id => JSON.stringify({ id, dp: [{ song_id: 1 }] }), loadAssets: async () => ({ status: 'ready' }), fitUser: async () => ({ status: 'ready' }) });
+  getDump: async id => JSON.stringify({ id, dp: [{ song_id: 1 }] }), loadAssets: async () => ({ status: 'ready' }), computePhysLine: () => ({ status: 'ready' }) });
 
 test('N명 병렬 백필은 로더를 한 번 호출하고 같은 자산을 주입한다', async () => {
   const f = await fixture(['A', 'B', 'C']);

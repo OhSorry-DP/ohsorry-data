@@ -2,7 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadPhysAssets, sha256 } from '../phys-assets.mjs';
 
-const versions = { model_version: 'm 1', q_version: 'q1', time_axis_version: 't1' };
+const versions = { model_version: 'phys-line-v1', q_version: 'q1', time_axis_version: 't1' };
+const axes = ['STAIR_UP', 'STAIR_DN', 'DOUBLE_STAIR', 'KEIMA', 'SPIRAL_UP', 'SPIRAL_DN', 'JUMP_WIDE', 'HSTAIR_SYM', 'HSTAIR_ASYM', 'CN'];
+function lineModel() {
+  const config = { schema_version: 'phys-line-config/1', model_version: 'phys-line-v1', line_version: 'phys-line-v1', mean_version: 'mean-feature-span-v1',
+    purpose: 'clear', unit: 'notes/s', axes, ...versions };
+  config.content_hash = sha256(config);
+  return { line_config: config, mean: Object.fromEntries(axes.map(axis => [axis, { meanNps: 0, meanDuration: null }])) };
+}
 
 function hashed(value) {
   const content_hash = sha256(value);
@@ -24,7 +31,7 @@ function fixture() {
   const chartKey = 'song/a|ANOTHER';
   const model = hashed({ schema_version: 'phys-model/1', purpose: 'clear', variant: 'baseline-2s', covariates: 'physical',
     ...versions, source_revision: 'local', generated_at: '2026-10-05T00:00:00Z', b: { b0: 1, b1: 0, b2: 1, b3: 1 },
-    kappa: [1, 2, 3, 4, 5, 6], covariateStats: { notes: { mean: 100, sd: 10 }, duration: { mean: 10, sd: 1 } }, pool: {} });
+    ...lineModel(), kappa: [1, 2, 3, 4, 5, 6], covariateStats: { notes: { mean: 100, sd: 10 }, duration: { mean: 10, sd: 1 } }, pool: {} });
   const chart = hashed({ schema_version: 'phys-chart/1', chartKey, ...versions, songId: 'song/a', diff: 'ANOTHER', notes: 100,
     duration: 10, features: { STAIR_UP: { maxQ: 2 } }, arrange: 'MIRROR', worstWindows: { STAIR_UP: [{ start: 1 }] } });
   const chartAsset = { chartKey, key: `phys/chart/${versions.model_version}/${encodeURIComponent(chartKey)}.json`,

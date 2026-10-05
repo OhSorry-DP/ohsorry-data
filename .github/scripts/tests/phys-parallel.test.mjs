@@ -43,7 +43,7 @@ test('shard 전체 회차는 50명 상한을 넘어 완료하며 only는 분할 
 
 test('runner는 shard별 R2 checkpoint를 복원하고 저장한다', async () => {
   for (const shard of [0, 1]) {
-    const key = checkpointKey('phys-clear-v1', shard, 8), reads = [];
+    const key = checkpointKey('phys-line-v1', shard, 8), reads = [];
     let stored = null;
     const fs = await import('node:fs/promises');
     await run({ SHARD: String(shard), SHARDS: '8', DRY_RUN: 'false' }, {

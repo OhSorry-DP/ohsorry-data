@@ -5,7 +5,6 @@ import { createHash } from 'node:crypto';
 import { conditionalR2Client } from './r2-client.mjs';
 import { producePhysUser } from './phys-lib.mjs';
 import os from 'node:os';
-import { createFitPool } from './phys-fit-pool.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const VALID_ID = /^[A-Za-z0-9_-]+$/;
@@ -132,11 +131,7 @@ export async function runBackfill(options, deps = {}) {
       const value = await client.read(key); return value == null ? null : (typeof value === 'string' ? value : value.body);
     } });
   });
-  let pool;
-  const fitUser = deps.fitUser || (async input => {
-    pool ||= createFitPool(input.model, options.concurrency ?? os.availableParallelism());
-    return pool.fitUser(input);
-  });
+  const computePhysLine = deps.computePhysLine;
   const max = limit;
   const startIndex = index;
   while (index < ids.length && visited < max) {
@@ -155,10 +150,10 @@ export async function runBackfill(options, deps = {}) {
     summary.skipped = attempts.length; summary.next_cursor = index;
     for (const { id } of attempts) summary.failures.push({ id, reason: !versions.model_version || !versions.q_version || !versions.time_axis_version ? 'versions_unset' : 'assets_unpublished' });
   } else {
-    const concurrency = options.concurrency ?? (deps.produce || deps.fitUser ? 1 : os.availableParallelism());
+    const concurrency = options.concurrency ?? os.availableParallelism();
     if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('유저 병렬 수는 양의 정수여야 합니다');
     let attemptIndex = 0;
-    try { await Promise.all(Array.from({ length: Math.min(concurrency, attempts.length) }, async () => {
+    await Promise.all(Array.from({ length: Math.min(concurrency, attempts.length) }, async () => {
     while (attemptIndex < attempts.length) {
       const { id } = attempts[attemptIndex++];
       summary.attempted++;
@@ -188,7 +183,7 @@ export async function runBackfill(options, deps = {}) {
         // 병렬 유저도 같은 로딩 Promise를 공유하며 실패해도 회차 내에서 재조회하지 않는다.
         assetsPromise ||= Promise.resolve().then(() => loader(versions, manifest, io));
         const assets = await assetsPromise;
-        const result = await produce({ id, dump, versions, manifest, io, fitUser, assets, loadAssets: () => assetsPromise, dryRun: options.dryRun });
+        const result = await produce({ id, dump, versions, manifest, io, computePhysLine, assets, loadAssets: () => assetsPromise, dryRun: options.dryRun });
         if (['ready', 'planned'].includes(result.status)) {
           summary.ready++;
           if (!options.dryRun && result.status === 'ready' && result.changed) {
@@ -209,7 +204,7 @@ export async function runBackfill(options, deps = {}) {
         summary.failures.push({ id, reason, error_message });
       }
     }
-    })); } finally { await pool?.close(); }
+    }));
   }
   summary.next_cursor = index >= ids.length ? 0 : index;
   checkpoint.cursor = summary.next_cursor;

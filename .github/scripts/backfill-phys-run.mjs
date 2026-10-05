@@ -6,7 +6,7 @@ import { parseArgs, runBackfill, checkpointKey } from './backfill-phys.mjs';
 import { conditionalR2Client } from './r2-client.mjs';
 
 export async function run(env = process.env, deps = {}) {
-  const model = env.MODEL_VERSION || 'phys-clear-v1';
+  const model = env.MODEL_VERSION || 'phys-line-v1';
   const q = env.Q_VERSION || 'q-samehand-2s-v1';
   const timeAxis = env.TIME_AXIS_VERSION || 'ta-20261004';
   if (![model, q, timeAxis].every(v => /^[A-Za-z0-9_-]+$/.test(v))) throw new Error('버전 형식 오류');

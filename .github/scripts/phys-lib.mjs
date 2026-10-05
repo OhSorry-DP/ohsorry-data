@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const KEY = (id) => `phys/user/${encodeURIComponent(id)}.json`;
-const IMPLEMENTATION = 'phys-user-producer/2';
+const IMPLEMENTATION = 'phys-user-producer/3';
 const DIFFS = { 1: 'NORMAL', 2: 'HYPER', 3: 'ANOTHER', 4: 'LEGGENDARIA' };
 
 export function canonical(value) {
@@ -71,8 +71,11 @@ function makeRows(id, dump, charts, counts) {
     const lampNum = typeof row.lamp === 'number' ? row.lamp : 0;
     if (!Number.isInteger(lampNum) || lampNum < 1 || lampNum > 7) { counts.invalid_lamp++; continue; }
     const arrange = arrangeMap.get(`${row.song_id}|${row.diff}`) ?? chart.arrange ?? chart.arrange_assumed ?? null;
+    const meanFeatures = Object.fromEntries(Object.entries(chart.features || {}).map(([axis, value]) => [axis,
+      { meanNps: value?.meanNps ?? null, meanDuration: value?.meanDuration ?? null }]));
     const out = { userId: String(id), songId: String(chart.songId), chartKey, lampNum,
       notes: chart.notes, duration: chart.duration, features: chart.features,
+      meanNps: chart.meanNps ?? chart.mean_nps ?? null, meanDuration: chart.meanDuration ?? chart.mean_duration ?? chart.duration ?? null, meanFeatures,
       ...(arrange != null ? { arrange, arrange_assumed: arrange } : { arrangeAssumed: true, arrange_assumed: 'unknown' }),
       ...(chart.provenance ? { chartProvenance: chart.provenance } : {}),
       ...(chart.excludedHands ? { excludedHands: chart.excludedHands } : {}) };
@@ -86,7 +89,8 @@ function isReadyFor(previous, id, versions, revision) {
   const absolute = previous?.absolute;
   return previous?.schema_version === 'coach-skill-evidence/1' && previous?.iidx_id === id && previous?.play_style === 'DP' &&
     absolute?.status === 'ready' && absolute.source_revision === revision &&
-    ['model_version', 'q_version', 'time_axis_version'].every((k) => absolute[k] === versions[k]);
+    absolute.model_version === 'phys-line-v1' && absolute.line_version === 'phys-line-v1' && absolute.mean_version === 'mean-feature-span-v1' &&
+    ['q_version', 'time_axis_version'].every((k) => absolute[k] === versions[k]);
 }
 
 function staleRecord(previous, id, generatedAt) {
@@ -96,7 +100,7 @@ function staleRecord(previous, id, generatedAt) {
   }
   return { schema_version: 'coach-skill-evidence/1', iidx_id: id, play_style: 'DP',
     absolute: { status: 'missing', reason: 'not_generated', purpose: 'clear', unit: 'notes/s',
-      model_version: null, q_version: null, time_axis_version: null, source_revision: null,
+      model_version: null, line_version: null, mean_version: null, q_version: null, time_axis_version: null, source_revision: null,
       generated_at: generatedAt, stale: false, axes: {} } };
 }
 
@@ -116,7 +120,7 @@ async function loadAssets(versions, manifest, io) {
   } });
 }
 
-export async function producePhysUser({ id, dump, versions, manifest, io, fitUser, assets, loadAssets: loadAssetsFn, generatedAt = new Date().toISOString(), dryRun = false }) {
+export async function producePhysUser({ id, dump, versions, manifest, io, computePhysLine, assets, loadAssets: loadAssetsFn, generatedAt = new Date().toISOString(), dryRun = false }) {
   const key = KEY(String(id));
   const counts = { input_dp: Array.isArray(dump?.dp) ? dump.dp.length : 0, included: 0, invalid_row: 0,
     unsupported_diff: 0, song_mapping_missing: 0, chart_missing: 0, invalid_lamp: 0 };
@@ -137,12 +141,17 @@ export async function producePhysUser({ id, dump, versions, manifest, io, fitUse
     counts.included = rows.length;
     const modelHash = loaded.model.content_hash;
     const source_revision = sha256({ rows, versions, assets: [...loaded.charts].filter(([chartKey]) => rows.some((r) => r.chartKey === chartKey))
-      .map(([chartKey, chart]) => [chartKey, chart.content_hash]), modelHash, implementation: 'phys-theta-local/2', producer: IMPLEMENTATION });
+      .map(([chartKey, chart]) => [chartKey, chart.content_hash]), modelHash, configHash: loaded.model.line_config?.content_hash,
+      line_version: loaded.model.line_config?.line_version, mean_version: loaded.model.line_config?.mean_version,
+      implementation: 'phys-line-v1', producer: IMPLEMENTATION });
     if (isReadyFor(previous, String(id), versions, source_revision)) return { status: 'ready', reason: null, key, source_revision,
       generated_at: previous.absolute.generated_at, changed: false, counts };
     if (dryRun) return { status: 'planned', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };
-    if (typeof fitUser !== 'function') throw new TypeError('fitUser 함수 필요');
-    const absolute = await fitUser({ model: loaded.model, userId: String(id), rows, source_revision, generated_at: generatedAt }, { concurrency: 1 });
+    const compute = computePhysLine || require('./vendor/physLine.js').computePhysLine;
+    const result = compute({ rows });
+    const absolute = { ...result, status: 'ready', purpose: 'clear', unit: 'notes/s', source_revision, generated_at: generatedAt, stale: false,
+      model_version: result.model_version || loaded.model.line_config.model_version,
+      line_version: result.line_version || loaded.model.line_config.line_version, mean_version: result.mean_version || loaded.model.line_config.mean_version };
     const record = { schema_version: 'coach-skill-evidence/1', iidx_id: String(id), play_style: 'DP', absolute };
     await client.put(key, JSON.stringify(record), etag);
     return { status: 'ready', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };
