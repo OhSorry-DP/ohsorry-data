@@ -1,0 +1,37 @@
+name: backfill-phys
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        type: number
+        default: 50
+      dry_run:
+        type: boolean
+        default: true
+      model_version:
+        type: string
+        default: phys-clear-v1
+      q_version:
+        type: string
+        default: q-samehand-2s-v1
+      time_axis_version:
+        type: string
+        default: ta-20261004
+concurrency: { group: backfill-phys, cancel-in-progress: false }
+permissions: { contents: read }
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+      LIMIT: ${{ inputs.limit }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      MODEL_VERSION: ${{ inputs.model_version }}
+      Q_VERSION: ${{ inputs.q_version }}
+      TIME_AXIS_VERSION: ${{ inputs.time_axis_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: node .github/scripts/backfill-phys-run.mjs

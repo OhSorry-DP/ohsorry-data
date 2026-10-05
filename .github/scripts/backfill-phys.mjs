@@ -43,8 +43,8 @@ export function parseArgs(args) {
     options.limit = n;
   }
   options.resume = values.get('--resume') || null;
-  if (values.has('--write') && values.has('--dry-run')) throw new Error('--write와 --dry-run은 함께 쓸 수 없습니다');
-  options.dryRun = !values.has('--write');
+  if (values.has('write') && values.has('dryRun')) throw new Error('--write와 --dry-run은 함께 쓸 수 없습니다');
+  options.dryRun = !values.has('write');
   return options;
 }
 
@@ -125,7 +125,12 @@ export async function runBackfill(options, deps = {}) {
     summary.skipped = attempts.length; summary.next_cursor = index;
     for (const { id } of attempts) summary.failures.push({ id, reason: !versions.model_version || !versions.q_version || !versions.time_axis_version ? 'versions_unset' : 'assets_unpublished' });
   } else {
-    for (const { id } of attempts) {
+    const concurrency = options.concurrency ?? 1;
+    if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('유저 병렬 수는 양의 정수여야 합니다');
+    let attemptIndex = 0;
+    await Promise.all(Array.from({ length: Math.min(concurrency, attempts.length) }, async () => {
+    while (attemptIndex < attempts.length) {
+      const { id } = attempts[attemptIndex++];
       summary.attempted++;
       try {
         const dumpText = await (deps.getDump ? deps.getDump(id) : readFile(path.resolve(options.userDir || '.', 'user', `${id}.json`)));
@@ -161,6 +166,7 @@ export async function runBackfill(options, deps = {}) {
         summary.failures.push({ id, reason });
       }
     }
+    }));
   }
   summary.next_cursor = index >= ids.length ? 0 : index;
   checkpoint.cursor = summary.next_cursor;
