@@ -16,3 +16,6 @@ songs.json
 users-list.json
 version.json
 uslice-out/
+
+# ohSorryAdmin publishChartGraphs.js 의 로컬 게시 상태(증분 판정용). 커밋 대상 아님.
+raw/
