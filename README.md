@@ -88,6 +88,10 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-06 — data Worker `chart-graph/` 공개
+
+- 곡 상세 노트 그래프(`chart-graph/<textage id>.json`)와 DP 패턴 구간(`chart-graph/<id>.dp_<nor|hyp|ano|leg|beg>.runs.json`)을 공개 GET/HEAD 로 허용. 열거 제한 미적용, 그 밖의 경로·확장자·점 경로 탈출은 R2 조회 전 404.
+
 ### 2026-10-05 — 폐기된 물리 시그모이드 서비스 경로 제거
 
 - 미사용 피팅 pool·vendor·전용 재현 테스트 제거, 실력선 v1/v2 생산·백필·공용 자산 계약 유지.
