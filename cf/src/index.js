@@ -33,6 +33,7 @@ const PENDING_RE = /^pending\/[A-Za-z0-9]+\.json$/; // 업로드 직후 덤프 �
 //   `..` 는 위 keyOf 가 먼저 막으므로 여기서 `.` 을 허용해도 traversal 이 되지 않는다.
 const LIB_RE = /^lib\/[A-Za-z0-9._+-]+\.(js|css)$/;
 const DATA_RE = /^data\/[A-Za-z0-9._+-]+\.json$/;
+const CHART_GRAPH_RE = /^chart-graph\/[a-z0-9_]+\.json$/;
 
 // 확장자별 content-type. 종전엔 전부 application/json 으로 내보냈는데, JSON 만 서빙할 때는
 //   맞았지만 lib/ 의 JS·CSS 까지 그렇게 내보내면 `<link rel=stylesheet>` 같은 소비처가 깨진다.
@@ -139,6 +140,7 @@ function keyOf(pathname) {
   if (DIST_RE.test(key)) return key;
   if (LIB_RE.test(key)) return key;
   if (DATA_RE.test(key)) return key;
+  if (CHART_GRAPH_RE.test(key) && key !== 'chart-graph/manifest.json') return key;
   return null;
 }
 
