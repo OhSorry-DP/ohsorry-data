@@ -28,6 +28,41 @@
   생성: ohSorryAdmin `node scripts/buildPersonaPop.js`. 유저가 크게 늘거나 피처 정의가 바뀔 때만 재실행.
   ⚠️ 웹은 이 파일을 읽지 않는다(덤프 시점 전용) — R2 업로드 대상 아님.
 
+### 코드 배치 경계
+
+생태계 책임과 개념 정본은 [통합 구조 지도](../docs/README.md#구조-지도)를 참고한다.
+
+| 폴더 | 넣는 것 | 넣지 않는 것 |
+|---|---|---|
+| .github/workflows/ | cron·dispatch·생산 단계 연결 | 계산식 본체 |
+| .github/scripts/ | 덤프·slice·이력 계약·R2 게시·복구 | UI·공용 엔진 재구현 |
+| .github/scripts/vendor/ | 출처와 검사가 명시된 계산 사본 | 독립 계산 정본 |
+| .github/scripts/tests/ | 생산·물리 자산·vendor 계약 검사 | 생산 산출물 |
+| cf/ | 허용키·캐시·서빙 Worker | 난이도 학습 |
+| cf/test/ | Worker 계약 검사 | 생산 코드 |
+
+- DBR history 정본은 `.github/scripts/dbr-history.mjs`다. Web 대응 구현은 Web `tests/dbr-history-parity.test.mjs`로 대조한다.
+- 물리 실력선 계산 정본은 Rating `modules/physLine.js`, 생산 사본은 `.github/scripts/vendor/physLine.js`다. `.github/scripts/tests/phys-vendor.test.mjs`가 대조하며 자동 복사 장치는 확인되지 않았다.
+- 유저 벡터 slice는 `.github/scripts/uvec-lib.mjs`의 `collectGraph`로 `https://iidx.in/v3/services/uvec-slice.js`와 상대 import 폐쇄를 내려받아 실행한다. Web v3 원본 모듈은 Pages 공개를 유지하며 배포 허용 목록은 Web `build/deploy-pages.js`에서 관리한다. 계산식을 별도 작성하지 않는다.
+- 정리 완료: 소비 참조가 없던 `.github/scripts/vendor/patternScoreKernel.js` 사본을 삭제했다.
+- 정리 예정: 스크립트 인접 테스트와 `tests/`의 배치 기준, 은퇴한 `backfill-personas.mjs`의 보존 경계. `backfill-personas.mjs`와 관련 기록은 유지한다.
+- 새 생산 기능은 기존 생산자·계약·워크플로를 확장하고, 엔진 사본이 필요하면 출처·차이·동기 방법·검사를 명시한다.
+
+### 로컬 검사
+
+PowerShell에서 레포 루트를 기준으로 실행한다.
+
+```powershell
+node --test .github/scripts/*.test.mjs .github/scripts/tests/*.test.mjs cf/test/*.test.mjs
+```
+
+이는 스크립트 인접·별도 tests·Worker 테스트를 모두 포함하는 명령이다.
+물리 vendor만 확인하려면 다음을 실행한다.
+
+```powershell
+node --test .github/scripts/tests/phys-vendor.test.mjs
+```
+
 ## 생성/갱신
 - 전체: ohSorryAdmin `node scripts/dump-data-repo.js` (전체 재덤프 + `version.json` 갱신)
 - 증분(수동): ohSorryAdmin `node scripts/dump-data-repo.js <iidx_id> ...`
@@ -88,6 +123,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-08 — 미사용 vendor 삭제·코드 배치 안내
+
+- 소비 참조가 없는 `.github/scripts/vendor/patternScoreKernel.js` 사본을 삭제하고 물리 계산 vendor 설명을 `physLine.js`로 명확히 했다.
+- 생산/서빙/vendor/테스트 경계와 DBR history·물리 실력선·유저 벡터 정본 관계, dump-uvec 의 Web v3 원본 모듈 소비(Pages 공개 유지 조건)를 안내하고 별도 tests 폴더까지 포함하는 로컬 검사 명령을 추가했다.
+
 ### 2026-10-06 — data Worker `chart-graph/` 공개
 
 - 곡 상세 노트 그래프(`chart-graph/<textage id>.json`)와 DP 패턴 구간(`chart-graph/<id>.dp_<nor|hyp|ano|leg|beg>.runs.json`)을 공개 GET/HEAD 로 허용. 열거 제한 미적용, 그 밖의 경로·확장자·점 경로 탈출은 R2 조회 전 404.
@@ -116,7 +156,7 @@ https://data.iidx.in/version.json
 - 생산 순서는 업로드 → `dump-user` 가 덤프를 R2 에 저장 → 별도 `refresh-coach-user` 계산 → 유저 결과를 R2 에 저장 → ohSorryWeb 이 읽기다. `dump-user` 는 계산하지 않는다. dump 성공과 후속 계산은 별도 job 이며, 계산 실패는 덤프 성공을 되돌리지 않는다.
 - 업로드마다 `refresh-coach-user`가 `phys/user/<ID>.json` 물리 실력선을 갱신한다. 기존 유저 백필은 `backfill-phys.yml`이 담당한다.
 - 실패 시 직전 성공 산출물은 stale 상태로 남고, 성공본이 한 번도 없으면 missing 이다. 산출 상태는 워크플로 실행 상태와 별도로 판정한다. ohSorryWeb profile·analysis 는 `skill_evidence` 와 `getSong?iidxId=` 병목 결과를 소비한다. Knowledge 는 v4 다.
-- 관련 구현: `phys-lib.mjs`·`phys-assets.mjs`·`backfill-phys.mjs`. Rating 비공개라 물리 계산은 `vendor/` 사본을 사용한다.
+- 관련 구현: `phys-lib.mjs`·`phys-assets.mjs`·`backfill-phys.mjs`. Rating 비공개라 물리 계산은 `vendor/physLine.js` 사본을 사용한다.
 
 ### 2026-10-04 — persona popmean 갱신 (디코더 시간축 수정 반영)
 
