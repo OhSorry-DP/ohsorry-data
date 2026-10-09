@@ -103,7 +103,8 @@ export async function dumpUser(id, personaRes, opts = {}) {
   let dpCharts = null;
   try {
     dpCharts = chartsFromGridRows(attachArrange(dp, dpArrange), personaRes.textageMeta);
-    if (!opts.deferPersona) persona = personaFor(dpCharts, personaRes, user[0]);
+    // 미룸은 이전 덤프 상태를 알 때만 — 모르면(R2 조회 실패) 보존할 값이 없으니 예전처럼 여기서 계산한다.
+    if (!opts.deferPersona || !prevOk) persona = personaFor(dpCharts, personaRes, user[0]);
   } catch (e) {
     personaError = e;
   }
@@ -113,7 +114,8 @@ export async function dumpUser(id, personaRes, opts = {}) {
       console.error('::error::persona 산출 실패 및 이전 덤프 상태 모름(' + id + '): ' + reason);
       throw new Error('persona 보존 불가(' + id + ')');
     }
-    console.warn('::warning::persona 산출 실패, 이전 값 유지(' + id + '): ' + reason);
+    if (opts.deferPersona && !personaError) console.log('persona 는 persona job 에서 갱신 — 이전 값 유지(' + id + ')');
+    else console.warn('::warning::persona 산출 실패, 이전 값 유지(' + id + '): ' + reason);
     persona = (prev && prev.persona) || null;
   }
 
@@ -152,7 +154,7 @@ export async function dumpUser(id, personaRes, opts = {}) {
     sp = spResult.rows.map(slimRow);
     let spPersonaError = null;
     try {
-      if (!opts.deferPersona) spPersona = spPersonaFor(spChartsFromGridRows(spResult.rows, personaRes.textageMeta), personaRes);
+      if (!opts.deferPersona || !prevOk) spPersona = spPersonaFor(spChartsFromGridRows(spResult.rows, personaRes.textageMeta), personaRes);
     } catch (e) {
       spPersonaError = e;
     }
@@ -162,7 +164,8 @@ export async function dumpUser(id, personaRes, opts = {}) {
         console.error('::error::spPersona 산출 실패 및 이전 덤프 상태 모름(' + id + '): ' + reason);
         throw new Error('spPersona 보존 불가(' + id + ')');
       }
-      console.warn('::warning::spPersona 산출 실패, 이전 값 유지(' + id + '): ' + reason);
+      if (opts.deferPersona && !spPersonaError) console.log('spPersona 는 persona job 에서 갱신 — 이전 값 유지(' + id + ')');
+      else console.warn('::warning::spPersona 산출 실패, 이전 값 유지(' + id + '): ' + reason);
       spPersona = (prev && prev.spPersona) || null;
     }
   }
