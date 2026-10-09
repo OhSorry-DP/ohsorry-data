@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { attachArrange, chartsFromGridRows, personaFor, reachNpsFor } from './persona-lib.mjs';
+import { attachArrange, chartsFromGridRows, personaFor, reachNpsFor, spPersonaFor } from './persona-lib.mjs';
 
 function fixture() {
   const rows = Array.from({ length: 30 }, (_, i) => Object.freeze({
@@ -143,7 +143,7 @@ test('랜덤 제외는 weakness의 entries에 맡기고 nCharts·MAX- 통계는 
   assert.equal(calls.profiles[0].nCharts, 30);
   assert.deepEqual(calls.profiles[0].maxMinusStats, { share: 1 / 3, tot: 30 });
   assert.equal(calls.profiles[0].overallResid, 0.5);
-  assert.deepEqual(Object.keys(result), ['head', 'oneLiner', 'prose', 'report', 'tags', 'nCharts', '_v', 'i18n']);
+  assert.deepEqual(Object.keys(result), ['head', 'oneLiner', 'prose', 'report', 'tags', 'rel', 'nCharts', '_v', 'i18n']);
 });
 
 test('reachNps는 배치 유무와 랜덤값에 무관하게 전체 차트를 전달한다', () => {
@@ -165,4 +165,58 @@ test('reachNps는 배치 유무와 랜덤값에 무관하게 전체 차트를 �
   assert.equal(calls[0].length, rows.length);
   assert.equal(JSON.stringify(calls[0]), JSON.stringify(calls[1]));
   assert.equal(JSON.stringify(baseline), JSON.stringify(arranged));
+});
+
+function relResources(rel) {
+  const calls = [];
+  const { R } = resources();
+  R.personaLib.richReportOf = (profile, lang = 'ko') => {
+    calls.push(profile);
+    return { head: lang, report: 'report', persona: {
+      oneLiner: 'summary', prose: 'prose', tags: [], rel,
+    } };
+  };
+  return { R, calls };
+}
+
+test('DP rel is copied from the rich persona with canonical keys and finite values only', () => {
+  const { rows, meta } = fixture();
+  const rel = { NOTES: -1.9, CHORD: 2.4, PEAK: 0, 'SOF-LAN': 1.1, EXTRA: 7,
+    CHARGE: NaN, SCRATCH: Infinity, PHRASE: '2', JACK: undefined };
+  const { R, calls } = relResources(rel);
+  const result = personaFor(chartsFromGridRows(rows, meta), R);
+  assert.deepEqual(result.rel, {
+    NOTES: -1.9, CHORD: 2.4, PEAK: 0, CHARGE: null, SCRATCH: null,
+    'SOF-LAN': 1.1, PHRASE: null, JACK: null, TRILL: null, RAND: null,
+  });
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((profile) => profile === calls[0]));
+});
+
+test('SP rel is copied from the rich persona and keeps the 30 chart gate', () => {
+  const rel = { NOTES: -1.9, CHORD: 2.4, PEAK: 0, 'SOF-LAN': 1 };
+  const { R, calls } = relResources(rel);
+  const ownSp = Array.from({ length: 30 }, (_, i) => ({ title: `song${i}`, diff: 'ANOTHER', exScore: 100 }));
+  const noteByKey = new Map(), scoresByKey = new Map(), bpmByNorm = new Map(), offByKey = new Map();
+  for (const chart of ownSp) {
+    const key = `${chart.title}|${chart.diff}`;
+    noteByKey.set(key, 100);
+    scoresByKey.set(key, { SARA_RHYTHM: {}, KEY_RHYTHM: {} });
+  }
+  R.spKeymaps = { noteByKey, scoresByKey, bpmByNorm, offByKey };
+  R.spRateRef = null;
+  assert.equal(spPersonaFor(ownSp.slice(0, 29), R), null);
+  const result = spPersonaFor(ownSp, R);
+  assert.deepEqual(result.rel, {
+    NOTES: -1.9, CHORD: 2.4, PEAK: 0, CHARGE: null, SCRATCH: null,
+    'SOF-LAN': 1, PHRASE: null, JACK: null, TRILL: null, RAND: null,
+  });
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((profile) => profile === calls[0]));
+});
+
+test('DP persona remains null below 30 charts', () => {
+  const { rows, meta } = fixture();
+  const { R } = relResources({ NOTES: 1 });
+  assert.equal(personaFor(chartsFromGridRows(rows.slice(0, 29), meta), R), null);
 });

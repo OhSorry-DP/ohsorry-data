@@ -30,6 +30,7 @@ function recBaseStar(user) {
 
 // ── SP 상수 (ohSorryRating scripts/analyze/sp/dump-sp-user-personas.js 와 동일 유지) ──
 const SP_FEATS = ['NOTES', 'CHORD', 'PEAK', 'CHARGE', 'SCRATCH', 'SOF-LAN', 'PHRASE', 'JACK', 'TRILL', 'RAND'];
+const REL_KEYS = SP_FEATS;
 const SP_DIFF_TO_KEY = { NORMAL: 'SP_NOR', HYPER: 'SP_HYP', ANOTHER: 'SP_ANO', LEGGENDARIA: 'SP_LEG' };
 const SP_TKEY = { NORMAL: 'SN', HYPER: 'SH', ANOTHER: 'SA', LEGGENDARIA: 'SX' };
 const SEC_TIER = { s_lo: '저속', s8: '저속', s11: '저속', s14: '중속', s18: '중속', s22: '고속', s27: '고속', s33: '초고속', s40: '초고속' };
@@ -503,6 +504,15 @@ function spLampStats(ownSp) {
   return tot >= 10 ? { fcShare: fc / tot, exhShare: exh / tot, tot } : null;
 }
 
+function personaRelOf(persona) {
+  const rel = {};
+  for (const key of REL_KEYS) {
+    const value = persona?.rel?.[key];
+    rel[key] = typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+  return rel;
+}
+
 export function spPersonaFor(ownSp, R) {
   // 게이트는 "친 SP 곡 30곡"(ownSp) 하나뿐 — DP(personaFor)와 대칭.
   //   과거엔 resid(= SP feature score 매칭 + exScore>0, 사실상 SP12 중심) 에도 30 하한이 있어, SP 를
@@ -544,7 +554,7 @@ export function spPersonaFor(ownSp, R) {
   for (const lang of ['ja', 'en']) { const r = R.personaLib.richReportOf(profile, lang); i18n[lang] = { head: r.head, report: r.report }; }
   return {
     head: rich.head, oneLiner: P.oneLiner, prose: P.prose, report: rich.report,
-    tags: P.tags, nCharts: ownSp.length, _v: new Date().toISOString(), i18n,
+    tags: P.tags, rel: personaRelOf(P), nCharts: ownSp.length, _v: new Date().toISOString(), i18n,
   };
 }
 
@@ -663,6 +673,6 @@ export function personaFor(allCharts, R, userRow = null) {
   for (const lang of ['ja', 'en']) { const r = R.personaLib.richReportOf(profile, lang); i18n[lang] = { head: r.head, report: r.report }; }
   return {
     head: rich.head, oneLiner: P.oneLiner, prose: P.prose, report: rich.report,
-    tags: P.tags, nCharts: allCharts.length, _v: new Date().toISOString(), i18n,
+    tags: P.tags, rel: personaRelOf(P), nCharts: allCharts.length, _v: new Date().toISOString(), i18n,
   };
 }

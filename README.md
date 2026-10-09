@@ -123,6 +123,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-09 — persona·spPersona 에 축별 성향 수치 `rel` 추가
+
+- 덤프 `persona.rel`·`spPersona.rel` = persona 엔진이 문장을 만들 때 쓴 최종 10축 수치(NOTES·CHORD·PEAK·CHARGE·SCRATCH·SOF-LAN·PHRASE·JACK·TRILL·RAND). 본인 평균 대비 중심값(_relScale 포함, 무차원), 결측은 null. 웹 v3 Analysis 막대가 문장과 같은 값·같은 시점으로 그리기 위함이다. 새 산식 없음 — 같은 `rich.persona` 에서 복사만 한다.
+- 기존 유저는 `repersona-r2` 로 백필한다.
+
 ### 2026-10-09 — data Worker 유저 물리 실력선 공개 경로
 
 - `phys/user/{ID}.json`(ID = AC 8자리·INF 대문자 1자+12자리)을 기존 공개 자산과 같은 ETag·캐시·CORS 경로로 서빙한다. 웹 v3 추천의 물리 판정이 코치 `/api/{ID}/profile` 을 거치지 않고 유저 실력선을 직접 읽기 위함이다. 다른 `phys/` 하위 경로는 계속 막는다.
