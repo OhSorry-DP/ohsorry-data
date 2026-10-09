@@ -54,14 +54,18 @@ export function createNetwork(fetchImpl = fetch, sleep = (ms) => new Promise((r)
   };
 }
 
-export async function collectGraph(webBase, network) {
+export async function collectGraph(webBase, network, options = {}) {
   const base = /^https?:\/\//.test(webBase) ? new URL(webBase.endsWith('/') ? webBase : webBase + '/') : pathToFileURL(path.resolve(webBase) + path.sep);
+  const coach = options.mode === 'coach' || options.entry === 'functions/api/[iidxId]/[resource].js';
+  const entryPath = options.entry || (coach ? 'functions/api/[iidxId]/[resource].js' : 'v3/services/uvec-slice.js');
+  if (coach && base.protocol !== 'file:') throw new Error('coach 그래프는 로컬 checkout만 허용');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'uvec-'));
-  const modules = {}, destinations = new Map();
+  const modules = {}, sources = {}, destinations = new Map();
   const visit = async (url) => {
     if (destinations.has(url.href)) return;
     if (!url.href.startsWith(base.href) || url.search || url.hash) throw new Error(`웹 루트 밖 import: ${url.href}`);
-    const relative = decodeURIComponent(url.href.slice(base.href.length));
+    const relative = decodeURIComponent(url.href.slice(base.href.length)).replaceAll(path.sep, '/');
+    if (coach && path.isAbsolute(relative)) throw new Error(`웹 루트 밖 import: ${url.href}`);
     const destination = path.join(dir, relative);
     destinations.set(url.href, destination);
     let source, tag;
@@ -72,14 +76,21 @@ export async function collectGraph(webBase, network) {
       source = await r.text(); tag = etag(r.headers.get('etag')) || digest(source);
     }
     modules[url.href] = tag;
+    if (coach) sources[relative] = source.replace(/\r\n?/g, '\n');
     await fs.mkdir(path.dirname(destination), { recursive: true });
-    await fs.writeFile(destination, source);
+    if (coach && /\bmodule\.exports\s*=/.test(source) && !/^\s*(?:import|export)\b/m.test(source)) {
+      await fs.writeFile(destination + '.cjs', source);
+      await fs.writeFile(destination, `export { default } from './${path.basename(destination)}.cjs';\n`);
+    } else await fs.writeFile(destination, source);
     for (const ref of imports(source)) await visit(new URL(ref, url));
   };
   try {
     await fs.writeFile(path.join(dir, 'package.json'), '{"type":"module"}');
-    await visit(new URL('v3/services/uvec-slice.js', base));
-    return { modules, entry: pathToFileURL(destinations.get(new URL('v3/services/uvec-slice.js', base).href)).href,
+    const sourceEntry = new URL(entryPath, base);
+    await visit(sourceEntry);
+    const coachSources = coach ? Object.fromEntries(Object.entries(sources).sort(([a], [b]) => a.localeCompare(b)).map(([name, source]) => [name, digest(source)])) : undefined;
+    const coachFingerprint = coach ? digest(JSON.stringify(coachSources)) : undefined;
+    return { modules, ...(coach ? { coachSources, coachFingerprint } : {}), entry: pathToFileURL(destinations.get(sourceEntry.href)).href,
       cleanup: () => fs.rm(dir, { recursive: true, force: true }) };
   } catch (error) { await fs.rm(dir, { recursive: true, force: true }); throw error; }
 }
