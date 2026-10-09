@@ -103,12 +103,12 @@ export async function dumpUser(id, personaRes, opts = {}) {
   let dpCharts = null;
   try {
     dpCharts = chartsFromGridRows(attachArrange(dp, dpArrange), personaRes.textageMeta);
-    persona = personaFor(dpCharts, personaRes, user[0]);
+    if (!opts.deferPersona) persona = personaFor(dpCharts, personaRes, user[0]);
   } catch (e) {
     personaError = e;
   }
   if (persona === null) {
-    const reason = personaError ? personaError.message : '산출값 null';
+    const reason = opts.deferPersona ? 'deferred to persona job' : personaError ? personaError.message : '산출값 null';
     if (!prevOk) {
       console.error('::error::persona 산출 실패 및 이전 덤프 상태 모름(' + id + '): ' + reason);
       throw new Error('persona 보존 불가(' + id + ')');
@@ -152,12 +152,12 @@ export async function dumpUser(id, personaRes, opts = {}) {
     sp = spResult.rows.map(slimRow);
     let spPersonaError = null;
     try {
-      spPersona = spPersonaFor(spChartsFromGridRows(spResult.rows, personaRes.textageMeta), personaRes);
+      if (!opts.deferPersona) spPersona = spPersonaFor(spChartsFromGridRows(spResult.rows, personaRes.textageMeta), personaRes);
     } catch (e) {
       spPersonaError = e;
     }
     if (spPersona === null) {
-      const reason = spPersonaError ? spPersonaError.message : '산출값 null';
+      const reason = opts.deferPersona ? 'deferred to persona job' : spPersonaError ? spPersonaError.message : '산출값 null';
       if (!prevOk) {
         console.error('::error::spPersona 산출 실패 및 이전 덤프 상태 모름(' + id + '): ' + reason);
         throw new Error('spPersona 보존 불가(' + id + ')');
@@ -262,7 +262,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   for (const id of ids) {
     if (!/^[A-Za-z0-9]+$/.test(id)) { console.error('잘못된 iidx_id 형식:', id); process.exit(1); }
     let dirtyCharts = [];
-    const data = await dumpUser(id, personaRes, { onDirty: (charts) => { dirtyCharts = charts; } });
+    const data = await dumpUser(id, personaRes, { deferPersona: true, onDirty: (charts) => { dirtyCharts = charts; } });
     if (!data.user) { console.error('유저 없음(삭제됨?):', id); continue; }
     if (dirtyCharts.length) {
       fs.mkdirSync('ranking-state/dirty', { recursive: true });

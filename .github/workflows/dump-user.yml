@@ -29,9 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - name: Verify runner Node 20+
+        run: |
+          node --version
+          node -e 'if (Number(process.versions.node.split(".")[0]) < 20) process.exit(1)'
+
 
       # persona/spPersona 산출 실패 시 기존값 보존에 쓸 현재 유저 덤프.
       - name: R2 user 현재본 받기
@@ -108,7 +110,51 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
         run: node .github/scripts/dump-user.mjs "$IIDX_ID"
 
-      # 신곡 누락 시에만 공통 생성기로 갱신. 실패해도 병합·유저/이력 업로드를 계속한다.
+      - name: Upload to R2 (data.iidx.in)
+        # 서빙 = R2(cf/ Worker → data.iidx.in). **§4 이후 R2 가 유일본이다**(git 데이터 커밋 중단).
+        #   종전 jsdelivr purge 를 대체 — `@main` 별칭 해석 캐시(12h)를 purge API 로는 못 풀어
+        #   push 직후 purge 가 구본을 12h 고착시키는 사고가 두 번 났다(2026-07-17 / 2026-08-04).
+        #   R2 는 별칭 개념이 없어 PUT 즉시 반영이고, 캐시 정책도 Worker 가 쥔다.
+        #
+        # 본인 user/·hist/를 목록 병합보다 먼저 반영한다. persona는 이전값을 싣고 후속 job에서 갱신한다.
+        if: ${{ !cancelled() && steps.dump.outcome == 'success' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — R2 업로드 skip"; exit 0
+          fi
+          # 한쪽이 실패해도 다른 쪽은 반드시 시도한 뒤, 하나라도 실패했으면 스텝을 실패로 끝낸다.
+          #   (종전 `... || { echo warning; return 1; }` 은 기본 셸 `bash -e` 의 errexit 에 걸려
+          #    첫 실패에서 스텝이 죽고 users-list.json PUT 이 아예 실행되지 않았다.)
+          rc=0
+          R2_URL="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/ohsorry-data/objects"
+          put() {
+            local status
+            if status=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+                 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                 -H "Content-Type: application/json; charset=utf-8" --data-binary "@$1" "$R2_URL/$1") \
+               && [[ "$status" == 2?? ]]; then
+              echo "R2 OK: $1"
+            else
+              echo "::error::R2 업로드 실패: $1"; rc=1
+            fi
+          }
+          # dirty 마커를 먼저 PUT해야 취소된 실행에서도 다음 비교 기준이 새 값으로 덮이지 않는다.
+          # 마커 PUT 실패는 rc=1로 기록하되 user PUT은 계속 — 일일 대조가 복구한다.
+          for f in ranking-state/dirty/*.json; do [ -f "$f" ] && put "$f"; done
+          put "user/$IIDX_ID.json"
+          # users-list.json 은 여기서 PUT 하지 않는다 — 후속 merge 스크립트가 GET→PUT→검증까지
+          #   담당한다(레이스 창 최소화, 2026-08-14). 여기서 또 올리면 검증을 통과한 최신본을
+          #   이 잡의 낡은 로컬 사본으로 되돌려버린다.
+          # hist 도 R2 PUT 이 유일한 보관 경로다. 변경이 없어 재생성을 건너뛴 회차도 그대로 다시
+          #   올린다(내용 동일 · ingress 무료 · Class A 는 월 100만 중 하루 70여 회).
+          if [ -f "hist/$IIDX_ID.json" ]; then put "hist/$IIDX_ID.json"; else echo "::warning::hist 파일 없음 — PUT skip"; fi
+          exit $rc
+
+
+      # 신곡 누락 시에만 공통 생성기로 갱신. 본인 덤프는 이미 반영됐고 실패해도 병합을 계속한다.
       - name: 누락 신곡 확인 및 songs.json 갱신
         if: ${{ !cancelled() && steps.dump.outcome == 'success' }}
         continue-on-error: true
@@ -139,7 +185,7 @@ jobs:
         #
         # ⚠️ 취득/검증 실패 시 **중단한다.** 빈·깨진 베이스로 PUT 하면 전 유저 목록이 통째로 날아간다.
         #   중단해도 서빙은 멀쩡하다 — R2 의 기존 users-list.json 이 그대로 남고, 이 유저의 user/·hist/ 는
-        #   다음 스텝이 올린다. 목록 반영만 1일 1회 전체 재생성으로 밀린다.
+        #   이미 반영됐다. 목록 반영만 1일 1회 전체 재생성으로 밀린다.
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
@@ -148,51 +194,6 @@ jobs:
             echo "::error::CLOUDFLARE_API_TOKEN 미설정 — users-list 병합 불가"; exit 1
           fi
           node .github/scripts/merge-user-into-list.mjs "user/$IIDX_ID.json"
-
-      - name: Upload to R2 (data.iidx.in)
-        # 서빙 = R2(cf/ Worker → data.iidx.in). **§4 이후 R2 가 유일본이다**(git 데이터 커밋 중단).
-        #   종전 jsdelivr purge 를 대체 — `@main` 별칭 해석 캐시(12h)를 purge API 로는 못 풀어
-        #   push 직후 purge 가 구본을 12h 고착시키는 사고가 두 번 났다(2026-07-17 / 2026-08-04).
-        #   R2 는 별칭 개념이 없어 PUT 즉시 반영이고, 캐시 정책도 Worker 가 쥔다.
-        #
-        # ⚠️ 조건이 "덤프 성공"뿐인 것은 의도다 — 앞 스텝(users-list 병합)이 실패해도 이 유저의
-        #   user/·hist/ 는 올라가야 한다. 목록 반영만 늦어지고 카드 자체는 최신이 된다.
-        #   (users-list.json 은 병합이 중단되면 파일이 없을 수 있어 아래에서 존재 확인 후 PUT 한다.)
-        if: ${{ !cancelled() && steps.dump.outcome == 'success' }}
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
-        run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — R2 업로드 skip"; exit 0
-          fi
-          # 한쪽이 실패해도 다른 쪽은 반드시 시도한 뒤, 하나라도 실패했으면 스텝을 실패로 끝낸다.
-          #   (종전 `... || { echo warning; return 1; }` 은 기본 셸 `bash -e` 의 errexit 에 걸려
-          #    첫 실패에서 스텝이 죽고 users-list.json PUT 이 아예 실행되지 않았다.)
-          rc=0
-          R2_URL="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/ohsorry-data/objects"
-          put() {
-            local status
-            if status=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
-                 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                 -H "Content-Type: application/json; charset=utf-8" --data-binary "@$1" "$R2_URL/$1") \
-               && [[ "$status" == 2?? ]]; then
-              echo "R2 OK: $1"
-            else
-              echo "::error::R2 업로드 실패: $1"; rc=1
-            fi
-          }
-          # dirty 마커를 먼저 PUT해야 취소된 실행에서도 다음 비교 기준이 새 값으로 덮이지 않는다.
-          # 마커 PUT 실패는 rc=1로 기록하되 user PUT은 계속 — 일일 대조가 복구한다.
-          for f in ranking-state/dirty/*.json; do [ -f "$f" ] && put "$f"; done
-          put "user/$IIDX_ID.json"
-          # users-list.json 은 여기서 PUT 하지 않는다 — 앞 스텝의 merge 스크립트가 GET→PUT→검증까지
-          #   담당한다(레이스 창 최소화, 2026-08-14). 여기서 또 올리면 검증을 통과한 최신본을
-          #   이 잡의 낡은 로컬 사본으로 되돌려버린다.
-          # hist 도 R2 PUT 이 유일한 보관 경로다. 변경이 없어 재생성을 건너뛴 회차도 그대로 다시
-          #   올린다(내용 동일 · ingress 무료 · Class A 는 월 100만 중 하루 70여 회).
-          if [ -f "hist/$IIDX_ID.json" ]; then put "hist/$IIDX_ID.json"; else echo "::warning::hist 파일 없음 — PUT skip"; fi
-          exit $rc
 
       # 본체 PUT을 먼저 끝낸다. slice 실패는 경고·실패 outcome으로 남기고 본 덤프와 격리한다.
       - name: uslice 증분 PUT 및 빈 shard DELETE
@@ -207,9 +208,31 @@ jobs:
           fi
           node .github/scripts/user-slice.mjs "$IIDX_ID"
 
-  dispatch-coach-user:
+  persona:
     needs: dump
     if: ${{ !cancelled() && needs.dump.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      IIDX_ID: ${{ github.event.client_payload.iidx_id }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify runner Node 20+
+        run: |
+          node --version
+          node -e 'if (Number(process.versions.node.split(".")[0]) < 20) process.exit(1)'
+      - name: Update persona with conditional R2 PUT
+        run: node .github/scripts/r2-repersona.mjs --single="$IIDX_ID"
+
+  dispatch-coach-user:
+    needs: [dump, persona]
+    # persona 실패는 물리 근거·사전계산을 막지 않는다(분리 전에도 persona 실패와 무관하게 돌았다). 순서만 persona 뒤.
+    if: ${{ !cancelled() && needs.dump.result == 'success' && needs.persona.result != 'cancelled' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     env:

@@ -114,6 +114,7 @@ https://data.iidx.in/version.json
   허용 키만 통과(임의 객체 열람·path traversal 차단), ETag 키로 엣지는 무기한 캐싱하고 업로드 후 30초가 지난 뒤 다음 요청부터 반영하며 브라우저는 60초 캐시한다.
 - **현재 유저·이력 데이터 정본은 R2이며 복구용 백업은 R2 스냅샷이다.** git 데이터 커밋은 중단했고 과거 git 이력만 보존한다. R2 는 객체 버저닝이 없어 현재 데이터의 롤백은 스냅샷을 사용한다.
 - `dump-user`·`dump-users-list` Action은 git commit/push 없이 **R2 REST PUT**으로 올린다. 대용량 스냅샷 tar.gz 업로드는 wrangler를 사용한다. R2 원본은 PUT 후 갱신되지만 공개 응답은 위 ETag 메모 갱신과 브라우저 캐시를 따른다(purge 불필요).
+  `dump-user`는 이전 DP·SP persona를 보존한 유저 덤프부터 업로드하고 신곡 확인·users-list·uslice를 처리한다. 이후 `persona` job이 `r2-repersona.mjs --single=ID`로 R2 현재본의 persona·spPersona만 ETag 조건부 PUT한다(경합 시 최신본으로 한 번 재시도, 재경합은 다음 덤프로 이월). `dispatch-coach-user`는 dump와 persona 성공 뒤에 실행한다. dump·persona는 러너 기본 Node를 사용하며 Node 20 이상을 시작 단계에서 확인한다. 데이터 git 커밋 경로는 없고 새 단일 유저 경로도 git 본을 R2로 올리지 않는다.
   `CLOUDFLARE_API_TOKEN` secret 필요(R2 Object Read & Write). `dump-user`의 users-list 병합은 미설정 시 실패하고 본체 업로드 단계는 warning 후 skip.
 
 > ⚠️ 종전 jsdelivr(`@main`) 는 2026-08-04 폐기. 브랜치 별칭은 "main=어느 커밋" 해석 결과를

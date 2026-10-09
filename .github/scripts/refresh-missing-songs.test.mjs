@@ -117,8 +117,12 @@ test('workflow는 갱신 실패를 격리하고 병합·업로드 단계를 유�
   assert.match(step, /SUPABASE_SERVICE_ROLE_KEY:/);
   assert.match(step, /CLOUDFLARE_API_TOKEN:/);
   assert.match(workflow.slice(end), /node .github\/scripts\/merge-user-into-list.mjs/);
-  assert.match(workflow.slice(end), /put "user\/\$IIDX_ID.json"/);
-  assert.match(workflow.slice(end), /put "hist\/\$IIDX_ID.json"/);
+  const uploadStart = workflow.indexOf("      - name: Upload to R2");
+  assert.ok(uploadStart < start);
+  const upload = workflow.slice(uploadStart, start);
+  assert.match(upload, /!cancelled\(\) && steps.dump.outcome == 'success'/);
+  assert.match(upload, /put "user\/\$IIDX_ID.json"/);
+  assert.match(upload, /put "hist\/\$IIDX_ID.json"/);
 });
 
 test('공통 생성기는 기존 select·정렬·페이지·바이트 형식을 유지한다', async () => {

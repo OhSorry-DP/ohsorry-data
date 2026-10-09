@@ -60,7 +60,70 @@ export async function runCoachOnly({ ids, options, producer = './coach-precomput
   return results;
 }
 
+// Single-user mode never seeds R2 from git; retry a stale ETag once with fresh rows.
+export async function updateSinglePersona(id, { client, calculate } = {}) {
+  if (!validId(id)) throw new Error('Invalid single-user id');
+  const key = `user/${id}.json`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const source = await client.read(key);
+    if (!source) throw new Error(`R2 user missing: ${id}`);
+    const data = JSON.parse(source.body);
+    if (String(data.user?.iidx_id) !== id) throw new Error('R2 user identity mismatch');
+    const before = JSON.stringify([data.persona, data.spPersona]);
+    const fields = await calculate(data);
+    // Null/failed calculations preserve the previous persona, as dumpUser does.
+    if (fields.persona != null) data.persona = fields.persona;
+    if (fields.spPersona != null) data.spPersona = fields.spPersona;
+    if (JSON.stringify([data.persona, data.spPersona]) === before) return { unchanged: true };
+    try {
+      await client.put(key, JSON.stringify(data), source.etag);
+      return { updated: true };
+    } catch (error) {
+      if (!/HTTP 412\b/.test(error.message)) throw error;
+      if (attempt === 1) {
+        console.warn(`::warning::persona contention: ${id}; deferred to next dump`);
+        return { conflicted: true };
+      }
+    }
+  }
+}
+
+export function personaFields(data, R, songById, arrange, engine, dpCharts) {
+  const rowsOf = (rows) => (rows || []).map(row => {
+    const song = songById.get(row.song_id);
+    return song ? { ...row, title: song.title, textage_song_id: song.textage_song_id } : null;
+  }).filter(Boolean);
+  dpCharts ??= engine.chartsFromGridRows(engine.attachArrange(rowsOf(data.dp), arrange), R.textageMeta);
+  return {
+    persona: engine.personaFor(dpCharts, R, data.user),
+    spPersona: engine.spPersonaFor(engine.spChartsFromGridRows(rowsOf(data.sp), R.textageMeta), R),
+  };
+}
+
+async function runSingle(id) {
+  if (!validId(id)) throw new Error('Invalid single-user id');
+  const engine = await import('./persona-lib.mjs');
+  const { fetchDpArrange } = await import('./dp-arrange.mjs');
+  const { conditionalR2Client } = await import('./r2-client.mjs');
+  const client = conditionalR2Client({ account: process.env.CLOUDFLARE_ACCOUNT_ID,
+    token: process.env.CLOUDFLARE_API_TOKEN });
+  const [R, songs, arrange] = await Promise.all([
+    engine.loadPersonaResources(), client.read('songs.json'), fetchDpArrange(id),
+  ]);
+  if (!songs) throw new Error('R2 songs.json missing');
+  const songById = new Map(JSON.parse(songs.body).map(song => [song.song_id, song]));
+  let attempt = 0;
+  return updateSinglePersona(id, { client,
+    calculate: async data => personaFields(data, R, songById,
+      attempt++ === 0 ? arrange : await fetchDpArrange(id), engine) });
+}
+
 export async function main(args = process.argv.slice(2), deps = {}) {
+  const single = args.find(arg => arg.startsWith('--single='));
+  if (single) {
+    if (args.length !== 1) throw new Error('--single requires exactly one argument');
+    return runSingle(single.slice(9));
+  }
   if (args.includes('--coach-only')) {
     const options = parseArgs(args);
     const { createClient } = await import('./coach-precompute.mjs');
@@ -223,11 +286,13 @@ export async function main(args = process.argv.slice(2), deps = {}) {
     const before = snap();
     try {
       const dpCharts = chartsFromGridRows(attachArrange(rowsOf(data.dp), arrangeByUser.get(String(id)) || []), R.textageMeta);
-      data.persona = personaFor(dpCharts, R, data.user);
+      const fields = personaFields(data, R, songById, arrangeByUser.get(String(id)) || [],
+        { attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor }, dpCharts);
+      data.persona = fields.persona;
       if (data.persona) dpOk++;
       // 도달 NPS — dump-user 와 같은 helper·같은 차트 배열로 재산출해 값을 일치시킨다(nps-reach.md §8.1).
       data.reachNps = reachNpsFor(dpCharts, R);
-      data.spPersona = spPersonaFor(spChartsFromGridRows(rowsOf(data.sp), R.textageMeta), R);
+      data.spPersona = fields.spPersona;
       if (data.spPersona) spOk++;
     } catch (e) { fail++; console.error('persona 실패', id, e.message); return; }
     if (snap() === before) { same++; return; }   // 변화 없으면 PUT 생략
