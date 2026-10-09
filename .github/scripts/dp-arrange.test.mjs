@@ -156,7 +156,9 @@ test('R2 재계산 진입점도 자격 누락 시 외부 접근 전에 중단한
   const result = spawnSync(process.execPath, ['--input-type=module', '-e',
     `delete process.env.SUPABASE_URL; delete process.env.SUPABASE_SERVICE_ROLE_KEY;
      globalThis.fetch = () => { throw new Error('외부 접근 시도'); };
-     await import(${JSON.stringify(entry)});`], { encoding: 'utf8' });
+     // 진입점은 직접 실행일 때만 main() 을 돈다 — 같은 경로를 main([]) 로 태운다.
+     const m = await import(${JSON.stringify(entry)});
+     await m.main([]).catch((e) => { console.error(e.message); process.exit(1); });`], { encoding: 'utf8' });
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /SUPABASE_URL \/ SUPABASE_SERVICE_ROLE_KEY 없음/);
   assert.doesNotMatch(result.stderr, /외부 접근 시도/);

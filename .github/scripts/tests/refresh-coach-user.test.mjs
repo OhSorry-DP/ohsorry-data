@@ -154,7 +154,7 @@ test('CLI requires and validates the directly supplied source tuple', () => {
   assert.throws(() => parseArgs(['--id', ID, '--expected-v', V, '--expected-sha256', 'bad']), /invalid --expected-sha256/);
 });
 
-test('workflow structure refreshes directly after dump and keeps manual workflow dispatch only', () => {
+test('workflow refreshes directly after dump and accepts the chart arrange dispatch with isolated precompute', () => {
   const dumpWorkflow = fs.readFileSync(new URL('../../workflows/dump-user.yml', import.meta.url), 'utf8');
   const manualWorkflow = fs.readFileSync(new URL('../../workflows/refresh-coach-user.yml', import.meta.url), 'utf8');
   const dispatchJob = dumpWorkflow.slice(dumpWorkflow.indexOf('  dispatch-coach-user:'));
@@ -167,5 +167,16 @@ test('workflow structure refreshes directly after dump and keeps manual workflow
   assert.match(dispatchJob, /PHYS_TIME_AXIS_VERSION: \$\{\{ vars\.PHYS_TIME_AXIS_VERSION \}\}/);
   assert.match(dispatchJob, /PHYS_ASSETS_MANIFEST_KEY: \$\{\{ vars\.PHYS_ASSETS_MANIFEST_KEY \}\}/);
   assert.match(manualWorkflow, /workflow_dispatch:/);
-  assert.doesNotMatch(manualWorkflow, /repository_dispatch|client_payload/);
+  assert.match(manualWorkflow, /repository_dispatch:\s+types: \[refresh-coach-user\]/);
+  assert.match(manualWorkflow, /IIDX_ID: \$\{\{ inputs\.iidx_id \|\| github\.event\.client_payload\.iidx_id \}\}/);
+  for (const workflow of [dispatchJob, manualWorkflow]) {
+    assert.ok(workflow.indexOf('refresh-coach-user.mjs') < workflow.indexOf('Precompute coach recommendations'));
+    const precompute = workflow.slice(workflow.indexOf('Precompute coach recommendations'));
+    assert.equal((precompute.match(/continue-on-error: true/g) || []).length, 1);
+    assert.match(precompute, /if: \$\{\{ success\(\) \}\}/);
+    assert.match(precompute, /CLOUDFLARE_API_TOKEN/);
+    assert.match(precompute, /coach-precompute\.mjs --only/);
+    assert.doesNotMatch(workflow, /COACH_WEB_READ_TOKEN|COACH_WEB_REF|coach-web|--web-root/);
+    assert.doesNotMatch(workflow, /Verify pinned|immutable 40-character|repository variables are required/);
+  }
 });

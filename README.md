@@ -123,6 +123,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-09 — 코치 추천 사전계산 producer
+
+- `coach-precompute.mjs`: R2 `engine/coach-recs/current.json` 이 가리키는 웹 코치 엔진 묶음(지문 재검증)으로 기본 32칸을 계산해 `uslice/{ID}-coach-recs-{generation}-{cell}.json` + index `uslice/{ID}-coach-recs.json` 게시. 원본 변경 감지 시 index 미게시, 실패 시 이전 index 보존.
+- dump-user·refresh-coach-user 는 기존 단계 뒤에 사전계산 step(continue-on-error — 기존 덤프·persona·물리 갱신에 영향 없음). repersona-r2 에 `coach_only` 입력(전체 백필).
+
 ### 2026-10-09 — persona·spPersona 에 축별 성향 수치 `rel` 추가
 
 - 덤프 `persona.rel`·`spPersona.rel` = persona 엔진이 문장을 만들 때 쓴 최종 10축 수치(NOTES·CHORD·PEAK·CHARGE·SCRATCH·SOF-LAN·PHRASE·JACK·TRILL·RAND). 본인 평균 대비 중심값(_relScale 포함, 무차원), 결측은 null. 웹 v3 Analysis 막대가 문장과 같은 값·같은 시점으로 그리기 위함이다. 새 산식 없음 — 같은 `rich.persona` 에서 복사만 한다.

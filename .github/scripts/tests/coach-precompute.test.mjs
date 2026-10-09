@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { produceUser, createClient, parseArgs } from '../coach-precompute.mjs';
+import { produceUser, createClient, parseArgs, main } from '../coach-precompute.mjs';
 import { collectGraph, digest } from '../uvec-lib.mjs';
 import { CELLS, validateIndex } from '../../../../ohSorryWeb/functions/_shared/coach-precompute-contract.js';
 
@@ -108,7 +108,8 @@ test('dry 32칸 계산·PUT 0 및 CLI 옵션 검증', async t => {
   assert.equal(result.ok, true, result.reason); assert.equal(result.cells.length, 32);
   assert.equal(result.puts, 0); assert.equal(f.puts.length, 0);
   assert.equal(parseArgs(['--web-root', webRoot, '--only', id, '--dry']).concurrency, 4);
-  for (const args of [[], ['--web-root', webRoot, '--concurrency', '0'], ['--web-root'], ['--unknown']]) assert.throws(() => parseArgs(args));
+  assert.deepEqual(parseArgs([]), { dry: false, concurrency: 4 });
+  for (const args of [['--web-root', webRoot, '--concurrency', '0'], ['--web-root'], ['--unknown']]) assert.throws(() => parseArgs(args));
   console.log(JSON.stringify({ fixture: 'synthetic gzip bucket', ...result }));
   const objects = new Map(Object.entries({
     'user/12345678.json': { user: { iidx_id: id, star: 10, native_star: 10 }, scores: [], _v: '2026-10-09T00:00:00.000Z' },
@@ -127,7 +128,10 @@ test('지문은 collectGraph와 동일·expected mismatch/누락은 게시 금�
   const f = await fixture(t);
   assert.equal((await f.run()).engine_sha256, f.fingerprint);
   assert.equal((await f.run({ env: { COACH_RECS_ENGINE_SHA256: '0'.repeat(64) } })).reason, 'engine_mismatch');
-  assert.equal((await f.run({ env: {} })).reason, 'expected_engine_missing');
+  const optional = await f.run({ env: {} });
+  assert.equal(optional.ok, true, optional.reason);
+  assert.equal(optional.engine_sha256, f.fingerprint);
+  assert.equal(JSON.parse(f.objects.get(`uslice/${id}-coach-recs.json`)).engine_sha256, f.fingerprint);
 });
 
 test('같은 입력 재실행 generation 동일·immutable body 재PUT 없음·쓰기 경로 제한', async t => {
@@ -135,4 +139,53 @@ test('같은 입력 재실행 generation 동일·immutable body 재PUT 없음·�
   assert.equal(second.ok, true, second.reason); assert.equal(first.generation, second.generation);
   assert.equal(second.puts, 1);
   assert.ok(f.puts.every(key => key.startsWith(`uslice/${id}-coach-recs`)));
+});
+
+
+async function engineFixture(t) {
+  const f = await fixture(t);
+  const files = {};
+  const graph = await collectGraph(f.root, fetch, { mode: 'coach' });
+  try {
+    for (const name of Object.keys(graph.coachSources)) files[name] = (await fs.readFile(path.join(f.root, name), 'utf8')).replace(/\r\n?/g, '\n');
+  } finally { await graph.cleanup(); }
+  const bundle = { schema: 'coach-recs-engine/1', engine_sha256: f.fingerprint, files };
+  f.objects.set('engine/coach-recs/current.json', Buffer.from(JSON.stringify({ schema: bundle.schema, engine_sha256: f.fingerprint })));
+  f.objects.set(`engine/coach-recs/${f.fingerprint}.json`, Buffer.from(JSON.stringify(bundle)));
+  return { ...f, bundle };
+}
+
+test('R2 engine fingerprint recomputation matches and publishes all cells', async t => {
+  const f = await engineFixture(t);
+  const result = await produceUser({ id, client: f.client, env: {} });
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.engine_sha256, f.fingerprint);
+  assert.equal(result.puts, 33);
+  assert.equal(f.puts.length, 33);
+});
+
+test('R2 engine source or object fingerprint mismatch forbids any publication', async t => {
+  const f = await engineFixture(t);
+  for (const change of [b => { b.files['functions/_shared/coach-recs-phys.js'] += '\n// tampered'; }, b => { b.engine_sha256 = '0'.repeat(64); }]) {
+    const bundle = structuredClone(f.bundle); change(bundle);
+    f.objects.set(`engine/coach-recs/${f.fingerprint}.json`, Buffer.from(JSON.stringify(bundle)));
+    const result = await produceUser({ id, client: f.client, env: {} });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /engine_mismatch|engine_bundle_invalid/);
+    assert.equal(f.puts.length, 0);
+  }
+});
+
+test('missing current pointer warns and skips before user reads or publication', async () => {
+  const reads = [], warnings = [];
+  const saved = console.warn;
+  console.warn = value => warnings.push(value);
+  try {
+    const client = { read: async key => { reads.push(key); return null; }, put: async () => assert.fail('publication forbidden') };
+    assert.deepEqual(await main([], { client }), []);
+    const result = await produceUser({ id, client, env: {} });
+    assert.equal(result.ok, true); assert.equal(result.skipped, true); assert.equal(result.puts, 0);
+    assert.deepEqual(reads, ['engine/coach-recs/current.json', 'engine/coach-recs/current.json']);
+    assert.equal(warnings.length, 2); assert.match(warnings[0], /::warning::.*current.json missing/);
+  } finally { console.warn = saved; }
 });

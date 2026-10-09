@@ -291,3 +291,15 @@ jobs:
             process.exit(0);
           }
           JS
+
+      - name: Precompute coach recommendations
+        if: ${{ success() }}
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+          COACH_RECS_ENGINE_SHA256: ${{ vars.COACH_RECS_ENGINE_SHA256 }}
+          COACH_RECS_PHYS_ENABLED: ${{ vars.COACH_RECS_PHYS_ENABLED }}
+        shell: bash
+        run: |
+          node .github/scripts/coach-precompute.mjs --only "$IIDX_ID" --concurrency 4

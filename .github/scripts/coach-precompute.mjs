@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { fork } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { performance } from 'node:perf_hooks';
@@ -39,7 +39,7 @@ export function parseArgs(args) {
       if (key === '--concurrency') options.concurrency = Number(value);
     } else throw new Error(`알 수 없는 옵션: ${key}`);
   }
-  if (!options.webRoot || !Number.isSafeInteger(options.concurrency) || options.concurrency < 1) throw new Error('--web-root 및 양의 concurrency 필요');
+  if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1) throw new Error('양의 concurrency 필요');
   return options;
 }
 
@@ -55,7 +55,8 @@ export async function produceUser({ webRoot, id, client, dry = false, env = proc
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       result.attempts++;
-      const graph = await collectGraph(webRoot, originalFetch, { mode: 'coach' });
+      const graph = await collectGraph(webRoot, originalFetch, { mode: 'coach', client });
+      if (!graph) { console.warn('::warning::engine/coach-recs/current.json missing; coach precompute skipped'); result.ok = true; result.skipped = true; return result; }
       try {
         const graphRoot = new URL('../../../', graph.entry);
         const contract = await import(new URL('functions/_shared/coach-precompute-contract.js', graphRoot));
@@ -66,7 +67,6 @@ export async function produceUser({ webRoot, id, client, dry = false, env = proc
         if (!indexKey) throw new Error('invalid_id');
         result.engine_sha256 = graph.coachFingerprint;
         if (env.COACH_RECS_ENGINE_SHA256 && env.COACH_RECS_ENGINE_SHA256 !== graph.coachFingerprint) throw new Error('engine_mismatch');
-        if (!dry && !env.COACH_RECS_ENGINE_SHA256) throw new Error('expected_engine_missing');
         const previous = await client.read(indexKey);
         const snapshot = new Map(), failures = [];
         const read = async (key) => {
@@ -158,10 +158,14 @@ export async function produceUser({ webRoot, id, client, dry = false, env = proc
   finally { globalThis.fetch = originalFetch; result.wall_ms = performance.now() - wall; result.cpu_ms = cpuMs(cpu); }
 }
 
-export async function main(args = process.argv.slice(2)) {
+export async function main(args = process.argv.slice(2), deps = {}) {
   const options = parseArgs(args);
-  const client = createClient();
-  const contract = await import(pathToFileURL(path.join(options.webRoot, 'functions/_shared/coach-precompute-contract.js')));
+  const client = deps.client || createClient();
+  const graph = await collectGraph(options.webRoot, fetch, { mode: 'coach', client });
+  if (!graph) { console.warn('::warning::engine/coach-recs/current.json missing; coach precompute skipped'); return []; }
+  let contract;
+  try { contract = await import(new URL('../../_shared/coach-precompute-contract.js', graph.entry)); }
+  finally { await graph.cleanup(); }
   const ids = [...new Set(options.only || (await client.listEntries('user/')).map(({ key }) => /^user\/([^/]+)\.json$/.exec(key)?.[1]).filter(Boolean))]
     .map(id => id.replaceAll('-', '').trim().toUpperCase()).sort();
   if (ids.some(id => !contract.indexPath(id))) throw new Error('invalid_id');

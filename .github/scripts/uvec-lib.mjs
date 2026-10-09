@@ -55,6 +55,8 @@ export function createNetwork(fetchImpl = fetch, sleep = (ms) => new Promise((r)
 }
 
 export async function collectGraph(webBase, network, options = {}) {
+  if (!webBase && options.mode === 'coach') return collectR2CoachGraph(options.client);
+
   const base = /^https?:\/\//.test(webBase) ? new URL(webBase.endsWith('/') ? webBase : webBase + '/') : pathToFileURL(path.resolve(webBase) + path.sep);
   const coach = options.mode === 'coach' || options.entry === 'functions/api/[iidxId]/[resource].js';
   const entryPath = options.entry || (coach ? 'functions/api/[iidxId]/[resource].js' : 'v3/services/uvec-slice.js');
@@ -180,4 +182,38 @@ export function selectTargets(users, arrangements, state, key) {
     if (!old || old.userEtag !== userEtag || old.arrangeEtag !== arrangeEtag || old.inputKey !== key) targets.push(id);
   }
   return targets.sort();
+}
+
+// Verify all bundle sources before importing, then verify the route closure.
+export async function collectR2CoachGraph(client) {
+  const pointer = await client.read('engine/coach-recs/current.json');
+  if (!pointer) return null;
+  const current = JSON.parse(pointer.body ?? Buffer.from(pointer.bytes).toString('utf8'));
+  const hash = current.engine_sha256;
+  if (current.schema !== 'coach-recs-engine/1' || !/^[a-f0-9]{64}$/.test(hash)) throw new Error('engine_pointer_invalid');
+  const object = await client.read(`engine/coach-recs/${hash}.json`);
+  if (!object) throw new Error('engine_bundle_missing');
+  const bundle = JSON.parse(object.body ?? Buffer.from(object.bytes).toString('utf8'));
+  if (bundle.schema !== 'coach-recs-engine/1' || bundle.engine_sha256 !== hash || !bundle.files || Array.isArray(bundle.files)) throw new Error('engine_bundle_invalid');
+  const entries = Object.entries(bundle.files).map(([name, source]) => {
+    if (!name || name.includes('\\') || name.includes(':') || name.split('/').some(part => !part || part.startsWith('.')) || typeof source !== 'string'
+      || /coach-precompute-engine(?:\.generated)?\.js$/.test(name)) throw new Error('engine_bundle_path_invalid');
+    return [name, digest(source.replace(/\r\n?/g, '\n'))];
+  }).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  // graphCanonical root-relative path/hash ordering; do not execute unverified sources.
+  if (digest(JSON.stringify(entries)) !== hash) throw new Error('engine_mismatch');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'coach-engine-'));
+  let graph;
+  try {
+    await fs.writeFile(path.join(root, 'package.json'), '{"type":"module"}');
+    for (const [name, source] of Object.entries(bundle.files)) {
+      const target = path.join(root, name);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, source.replace(/\r\n?/g, '\n'), 'utf8');
+    }
+    graph = await collectGraph(root, fetch, { mode: 'coach' });
+    if (graph.coachFingerprint !== hash || JSON.stringify(Object.entries(graph.coachSources).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) !== JSON.stringify(entries)) throw new Error('engine_mismatch');
+    return graph;
+  } catch (error) { await graph?.cleanup(); throw error; }
+  finally { await fs.rm(root, { recursive: true, force: true }); }
 }

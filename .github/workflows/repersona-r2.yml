@@ -22,6 +22,10 @@ on:
         description: 'true 면 PUT 하지 않고 건수만 집계'
         required: false
         default: 'false'
+      coach_only:
+        description: 'true 면 persona 대신 coach recommendation 만 생성'
+        required: false
+        default: 'false'
       concurrency:
         description: '동시 처리 수 (비우면 REST 4 / wrangler 폴백 1). Cloudflare API rate limit 조심'
         required: false
@@ -43,6 +47,7 @@ jobs:
           node-version: 20
 
       - name: Repersona on R2
+        if: ${{ inputs.coach_only != 'true' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
@@ -58,4 +63,25 @@ jobs:
           [ -n "${{ inputs.only }}" ] && ARGS="$ARGS --only=${{ inputs.only }}"
           [ "${{ inputs.dry }}" = "true" ] && ARGS="$ARGS --dry"
           [ -n "${{ inputs.concurrency }}" ] && ARGS="$ARGS --concurrency=${{ inputs.concurrency }}"
+          node .github/scripts/r2-repersona.mjs $ARGS
+
+      - name: Precompute coach recommendations
+        if: ${{ success() && inputs.coach_only == 'true' }}
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+          COACH_RECS_ENGINE_SHA256: ${{ vars.COACH_RECS_ENGINE_SHA256 }}
+          COACH_RECS_PHYS_ENABLED: ${{ vars.COACH_RECS_PHYS_ENABLED }}
+          PHYS_MODEL_VERSION: ${{ vars.PHYS_MODEL_VERSION || 'phys-line-v2' }}
+          PHYS_Q_VERSION: ${{ vars.PHYS_Q_VERSION }}
+          PHYS_TIME_AXIS_VERSION: ${{ vars.PHYS_TIME_AXIS_VERSION }}
+          PHYS_ASSETS_MANIFEST_KEY: ${{ vars.PHYS_ASSETS_MANIFEST_KEY }}
+        shell: bash
+        run: |
+          ARGS="--coach-only"
+          [ -n "${{ inputs.limit }}" ] && ARGS="$ARGS --limit=${{ inputs.limit }}"
+          [ -n "${{ inputs.only }}" ] && ARGS="$ARGS --only=${{ inputs.only }}"
+          [ "${{ inputs.dry }}" = "true" ] && ARGS="$ARGS --dry"
+          ARGS="$ARGS --concurrency=${{ inputs.concurrency || '4' }}"
           node .github/scripts/r2-repersona.mjs $ARGS
