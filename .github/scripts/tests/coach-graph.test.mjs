@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { collectGraph, digest } from '../uvec-lib.mjs';
 
 async function checkout(t, source = 'export const value = 1;') {
@@ -12,6 +13,8 @@ async function checkout(t, source = 'export const value = 1;') {
   await fs.mkdir(path.join(root, 'functions/_shared'), { recursive: true });
   await fs.writeFile(path.join(root, 'functions/api/[iidxId]/[resource].js'), "export { value } from '../../_shared/contract.js';\n");
   await fs.writeFile(path.join(root, 'functions/_shared/contract.js'), source);
+  await fs.writeFile(path.join(root, 'package.json'), '{"type":"module"}');
+  await fs.copyFile(new URL('../../../../ohSorryWeb/functions/_shared/coach-precompute-contract.js', import.meta.url), path.join(root, 'functions/_shared/coach-precompute-contract.js'));
   return root;
 }
 
@@ -36,7 +39,7 @@ test('coach entry를 로컬 ESM으로 import하고 루트 상대 LF 해시를 �
       'functions/_shared/contract.js': digest('export const value = 1;\n'),
       'functions/api/[iidxId]/[resource].js': digest("export { value } from '../../_shared/contract.js';\n"),
     });
-    assert.equal(graph.coachFingerprint, digest(JSON.stringify(graph.coachSources)));
+    assert.equal(graph.coachFingerprint, digest((await import(pathToFileURL(path.join(root, 'functions/_shared/coach-precompute-contract.js')).href)).graphCanonical(Object.entries(graph.coachSources))));
   } finally { await graph.cleanup(); }
 });
 
@@ -84,4 +87,34 @@ test('성공 및 실패 모두 임시 ESM 그래프를 정리', async (t) => {
   await assert.rejects(collectGraph(root, fetch, { mode: 'coach' }));
   const leftovers = (await fs.readdir(os.tmpdir())).filter((name) => name.startsWith('uvec-'));
   assert.deepEqual(leftovers.filter((name) => !before.has(name)), []);
+});
+
+
+test('same checkout has identical web build and data fingerprints including generated bridge exclusion', async (t) => {
+  const webRoot = fileURLToPath(new URL('../../../../ohSorryWeb/', import.meta.url));
+  try { await fs.access(webRoot); }
+  catch { console.error('\uad50\ucc28 \ub808\ud3ec \uc5c6\uc74c: fingerprint verification incomplete'); throw new Error('Cross-repo verification unavailable'); }
+  const { default: build } = await import(pathToFileURL(path.join(webRoot, 'build/deploy-pages.js')).href);
+  const web = await build.collectCoachGraph(webRoot);
+  const data = await collectGraph(webRoot, fetch, { mode: 'coach' });
+  try {
+    assert.equal(data.coachFingerprint, web.engine_sha256);
+    assert.deepEqual(Object.entries(data.coachSources).sort(), [...web.entries].sort());
+    assert.equal(Object.keys(data.coachSources).some(name => /coach-precompute-engine(?:\.generated)?\.js$/.test(name)), false);
+    console.log(`web engine_sha256=${web.engine_sha256} data coachFingerprint=${data.coachFingerprint}`);
+  } finally { await data.cleanup(); }
+
+  const root = await checkout(t);
+  await fs.appendFile(path.join(root, 'functions/api/[iidxId]/[resource].js'), "export { COACH_RECS_ENGINE_SHA256 } from '../../_shared/coach-precompute-engine.js';\n");
+  await fs.writeFile(path.join(root, 'functions/_shared/coach-precompute-engine.js'), "export { COACH_RECS_ENGINE_SHA256 } from './coach-precompute-engine.generated.js';\n");
+  await fs.writeFile(path.join(root, 'functions/_shared/coach-precompute-engine.generated.js'), "export const COACH_RECS_ENGINE_SHA256 = 'first';\n");
+  const first = await collectGraph(root, fetch, { mode: 'coach' });
+  try {
+    assert.equal(first.coachFingerprint, (await build.collectCoachGraph(root)).engine_sha256);
+    assert.equal((await import(first.entry)).value, 1);
+    await fs.writeFile(path.join(root, 'functions/_shared/coach-precompute-engine.generated.js'), "export const COACH_RECS_ENGINE_SHA256 = 'second';\n");
+    const second = await collectGraph(root, fetch, { mode: 'coach' });
+    try { assert.equal(second.coachFingerprint, first.coachFingerprint); }
+    finally { await second.cleanup(); }
+  } finally { await first.cleanup(); }
 });

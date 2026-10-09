@@ -68,6 +68,19 @@ export async function collectGraph(webBase, network, options = {}) {
     if (coach && path.isAbsolute(relative)) throw new Error(`웹 루트 밖 import: ${url.href}`);
     const destination = path.join(dir, relative);
     destinations.set(url.href, destination);
+    const generated = coach && ['functions/_shared/coach-precompute-engine.js', 'functions/_shared/coach-precompute-engine.generated.js'].includes(relative);
+    if (generated) {
+      // Exclude generated bindings and their imports just like the web build.
+      // The temporary calculation graph deliberately uses onRequestCalculated.
+      await fs.mkdir(path.dirname(destination), { recursive: true });
+      await fs.writeFile(destination, 'export const COACH_RECS_ENGINE_SHA256 = null;\n');
+      return;
+    }
+    if (coach) {
+      const realRoot = await fs.realpath(fileURLToPath(base));
+      const realSource = await fs.realpath(fileURLToPath(url));
+      if (!realSource.startsWith(realRoot + path.sep)) throw new Error(`Coach import escapes root: ${relative}`);
+    }
     let source, tag;
     if (url.protocol === 'file:') { source = await fs.readFile(fileURLToPath(url), 'utf8'); tag = digest(source); }
     else {
@@ -89,7 +102,8 @@ export async function collectGraph(webBase, network, options = {}) {
     const sourceEntry = new URL(entryPath, base);
     await visit(sourceEntry);
     const coachSources = coach ? Object.fromEntries(Object.entries(sources).sort(([a], [b]) => a.localeCompare(b)).map(([name, source]) => [name, digest(source)])) : undefined;
-    const coachFingerprint = coach ? digest(JSON.stringify(coachSources)) : undefined;
+    const canonical = coach ? (await import(new URL('functions/_shared/coach-precompute-contract.js', base).href)).graphCanonical : null;
+    const coachFingerprint = coach ? digest(canonical(Object.entries(coachSources))) : undefined;
     return { modules, ...(coach ? { coachSources, coachFingerprint } : {}), entry: pathToFileURL(destinations.get(sourceEntry.href)).href,
       cleanup: () => fs.rm(dir, { recursive: true, force: true }) };
   } catch (error) { await fs.rm(dir, { recursive: true, force: true }); throw error; }
