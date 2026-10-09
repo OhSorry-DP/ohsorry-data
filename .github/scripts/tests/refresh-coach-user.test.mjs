@@ -158,7 +158,7 @@ test('workflow refreshes directly after dump and accepts the chart arrange dispa
   const dumpWorkflow = fs.readFileSync(new URL('../../workflows/dump-user.yml', import.meta.url), 'utf8');
   const manualWorkflow = fs.readFileSync(new URL('../../workflows/refresh-coach-user.yml', import.meta.url), 'utf8');
   const dispatchJob = dumpWorkflow.slice(dumpWorkflow.indexOf('  dispatch-coach-user:'));
-  assert.match(dispatchJob, /needs: \[dump, persona\][\s\S]*if: \$\{\{ !cancelled\(\) && needs\.dump\.result == 'success' && needs\.persona\.result == 'success' \}\}/);
+  assert.match(dispatchJob, /needs: \[dump, persona\][\s\S]*if: \$\{\{ !cancelled\(\) && needs\.dump\.result == 'success' && needs\.persona\.result != 'cancelled' \}\}/);
   assert.match(dispatchJob, /continue-on-error: true/);
   assert.match(dispatchJob, /refresh-coach-user\.mjs/);
   assert.doesNotMatch(dispatchJob, /repository_dispatch|\/dispatches|GITHUB_TOKEN|contents: write/);
