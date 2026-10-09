@@ -123,6 +123,10 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-09 — data Worker 유저 물리 실력선 공개 경로
+
+- `phys/user/{ID}.json`(ID = AC 8자리·INF 대문자 1자+12자리)을 기존 공개 자산과 같은 ETag·캐시·CORS 경로로 서빙한다. 웹 v3 추천의 물리 판정이 코치 `/api/{ID}/profile` 을 거치지 않고 유저 실력선을 직접 읽기 위함이다. 다른 `phys/` 하위 경로는 계속 막는다.
+
 ### 2026-10-08 — 미사용 vendor 삭제·코드 배치 안내
 
 - 소비 참조가 없는 `.github/scripts/vendor/patternScoreKernel.js` 사본을 삭제하고 물리 계산 vendor 설명을 `physLine.js`로 명확히 했다.

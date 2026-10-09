@@ -80,3 +80,33 @@ test('vec-dp 허용·fresh 우회·열거 한도·HEAD와 비계약 vec 거부',
     assert.equal((await d.fetch(invalid)).status, 404, invalid);
   }
 });
+
+
+test('물리 유저 파일만 공개하고 기존 ETag·캐시·CORS 정책을 적용한다', async () => {
+  const d = fixture();
+  for (const key of ['phys/user/12345678.json', 'phys/user/C200074777849.json']) {
+    const res = await d.fetch(key);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('etag'), '"new"');
+    assert.equal(res.headers.get('cache-control'), 'public, max-age=60, s-maxage=31536000');
+    assert.equal(res.headers.get('access-control-allow-origin'), '*');
+    assert.equal(res.headers.get('content-type'), 'application/json; charset=utf-8');
+    assert.equal((await d.fetch(key)).headers.get('x-ohs-cache'), 'HIT');
+    assert.equal((await d.fetch(key, { headers: { 'if-none-match': '"new"' } })).status, 304);
+    assert.equal((await d.fetch(key, { method: 'HEAD' })).status, 200);
+  }
+  assert.deepEqual(d.calls.get, ['phys/user/12345678.json', 'phys/user/C200074777849.json']);
+});
+
+test('물리 비공개 경로·잘못된 ID는 R2 접근 없이 거부한다', async () => {
+  const d = fixture();
+  for (const key of ['phys/user/1234567.json', 'phys/user/123456789.json', 'phys/user/c200074777849.json',
+    'phys/user/C20007477784.json', 'phys/user/1234-5678.json', 'phys/user/ABC123.json',
+    'phys/user/C200074777849.json/extra', 'phys/user/C200074777849.txt', 'phys/user//12345678.json',
+    'phys/user/12345678%2Fextra.json', 'phys/user/%2e%2e%2Fsecret.json', 'phys/manifest.json',
+    'phys/song/12345678.json', 'phys/12345678.json', 'phys/user/manifest.json']) {
+    assert.equal((await d.fetch(key)).status, 404, key);
+  }
+  assert.equal(d.calls.head.length, 0);
+  assert.equal(d.calls.get.length, 0);
+});

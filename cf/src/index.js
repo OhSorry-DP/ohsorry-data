@@ -20,6 +20,8 @@ const USER_RE = /^user\/[A-Za-z0-9]+\.json$/;
 //   user/ 슬림 덤프로는 불가능한 supabase 복원의 원본이다.
 //   user/ 와 분리한 이유: 카드 첫 로딩에 딸려오면 응답이 느려지는데, 정작 필요한 건 모달을 열 때뿐이다.
 const HIST_RE = /^hist\/[A-Za-z0-9]+\.json$/;
+// 코치 auth.js의 validIidxId와 같은 AC 8자리·INF 대문자 1자+12자리 검사다.
+const PHYS_USER_RE = /^phys\/user\/(\d{8}|[A-Z]\d{12})\.json$/;
 // 곡 기록·이력 조각 및 요약 — 계약의 키 정규식을 그대로 사용한다.
 const USLICE_RE = /^uslice\/[A-Za-z0-9]+(-[rh]-(dp|sp)-\d{2}|-vec-dp)?\.json$/;
 const ARRANGE_RE = /^arrange\/[A-Za-z0-9]+\.json$/;
@@ -132,6 +134,7 @@ function keyOf(pathname) {
   if (key.includes('..') || key.includes('//')) return null;
   if (ALLOWED_ROOT.has(key)) return key;
   if (USER_RE.test(key)) return key;
+  if (PHYS_USER_RE.test(key)) return key;
   if (HIST_RE.test(key)) return key;
   if (USLICE_RE.test(key)) return key;
   if (ARRANGE_RE.test(key)) return key;
