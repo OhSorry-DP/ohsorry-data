@@ -25,12 +25,15 @@ export function parseArgs(args) {
     else if (arg === '--coach-only') options.coachOnly = true;
     else if (arg.startsWith('--only=')) options.only = new Set(arg.slice(7).split(',').filter(Boolean));
     else if (arg.startsWith('--limit=')) options.limit = Number(arg.slice(8));
+    else if (arg.startsWith('--requests-per-second=')) options.requestsPerSecond = Number(arg.slice(22));
     else if (arg.startsWith('--concurrency=')) options.concurrency = Number(arg.slice(14));
     else if (arg.startsWith('--web-root=')) options.webRoot = path.resolve(arg.slice(11));
     else throw new Error(`알 수 없는 옵션: ${arg}`);
   }
   if ((!Number.isSafeInteger(options.limit) && options.limit !== Infinity) || options.limit < 0) throw new Error('--limit은 0 이상의 정수여야 한다');
   if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1) throw new Error('--concurrency는 양의 정수여야 한다');
+  if (options.coachOnly && !args.some(arg => arg.startsWith('--concurrency='))) options.concurrency = 2;
+  if (options.requestsPerSecond !== undefined && (!Number.isFinite(options.requestsPerSecond) || options.requestsPerSecond <= 0)) throw new Error('양의 requests-per-second 필요');
   return options;
 }
 
@@ -40,18 +43,18 @@ export function selectIds(list, { only, limit = Infinity } = {}) {
   return ids.filter(id => !only || only.has(id)).slice(0, limit);
 }
 
-export async function runCoachOnly({ ids, options, producer = './coach-precompute.mjs', producerMain }) {
+export async function runCoachOnly({ ids, options, producer = './coach-precompute.mjs', producerMain, client }) {
   if (!ids.length) { console.log('coach-only 대상 0명 — 종료'); return []; }
   const invoke = producerMain || (await import(pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)), producer)))).main;
-  const args = [...(options.webRoot ? ['--web-root', options.webRoot] : []), '--only', ids.join(','), '--concurrency', String(options.concurrency), ...(options.dry ? ['--dry'] : [])];
+  const args = [...(options.webRoot ? ['--web-root', options.webRoot] : []), '--only', ids.join(','), '--concurrency', String(options.concurrency), '--requests-per-second', String(options.requestsPerSecond ?? 3), ...(options.dry ? ['--dry'] : [])];
   const started = performance.now();
-  const results = await invoke(args);
+  const results = await invoke(args, { client });
   const wallMs = performance.now() - started;
-  const successes = results.filter(result => result.ok).length;
+  const successes = results.filter(result => result.ok && !result.skipped).length;
   const failures = results.filter(result => !result.ok);
   const childCpuMs = results.reduce((sum, result) => sum + Number(result.cpu_ms || 0), 0);
   const puts = results.reduce((sum, result) => sum + Number(result.puts || 0), 0);
-  console.log(`coach-only 완료: 성공 ${successes}/${results.length} / 실패 ${failures.length} / PUT ${puts} / child CPU ${childCpuMs.toFixed(1)}ms / 부모 batch wall ${wallMs.toFixed(1)}ms`);
+  console.log(`coach-only 완료: 성공 ${successes}/${results.length} / skipped ${results.filter(result => result.skipped).length} / 실패 ${failures.length} / PUT ${puts} / child CPU ${childCpuMs.toFixed(1)}ms / 부모 batch wall ${wallMs.toFixed(1)}ms`);
   for (const result of failures) console.error(`coach-only 실패 ${result.id}: ${result.reason || 'unknown'} (engine ${result.engine_sha256 || '없음'})`);
   if (failures.length) process.exitCode = 1;
   return results;
@@ -61,10 +64,11 @@ export async function main(args = process.argv.slice(2), deps = {}) {
   if (args.includes('--coach-only')) {
     const options = parseArgs(args);
     const { createClient } = await import('./coach-precompute.mjs');
-    const client = createClient();
+    const { createRequestGate } = await import('./r2-client.mjs');
+    const client = createClient(process.env, fetch, { requestGate: createRequestGate({ recheckDefer: true, intervalMs: 1000 / (options.requestsPerSecond ?? 3) }) });
     const source = await client.read('users-list.json');
     const ids = selectIds(source ? JSON.parse(source.bytes.toString('utf8')) : null, options);
-    return runCoachOnly({ ids, options, producer: deps.producer, producerMain: deps.producerMain });
+    return runCoachOnly({ ids, options, producer: deps.producer, producerMain: deps.producerMain, client });
   }
   const { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } = await import('./persona-lib.mjs');
   const { fetchDpArrangeByUser } = await import('./dp-arrange.mjs');

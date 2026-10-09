@@ -27,9 +27,14 @@ on:
         required: false
         default: 'false'
       concurrency:
-        description: '동시 처리 수 (비우면 REST 4 / wrangler 폴백 1). Cloudflare API rate limit 조심'
+        description: '동시 처리 수 (비우면 coach 2 / REST 4 / wrangler 폴백 1). Cloudflare API rate limit 조심'
         required: false
         default: ''
+
+      requests_per_second:
+        description: 'coach REST 요청 속도 (기본 3 req/s, 모든 child 합산)'
+        required: false
+        default: '3'
 
 # 동시에 두 번 돌면 같은 오브젝트를 서로 덮어쓴다 — 직렬화.
 concurrency:
@@ -86,5 +91,5 @@ jobs:
           [ -n "${{ inputs.limit }}" ] && ARGS="$ARGS --limit=${{ inputs.limit }}"
           [ -n "${{ inputs.only }}" ] && ARGS="$ARGS --only=${{ inputs.only }}"
           [ "${{ inputs.dry }}" = "true" ] && ARGS="$ARGS --dry"
-          ARGS="$ARGS --concurrency=${{ inputs.concurrency || '4' }}"
+          ARGS="$ARGS --concurrency=${{ inputs.concurrency || '2' }} --requests-per-second=${{ inputs.requests_per_second || '3' }}"
           node .github/scripts/r2-repersona.mjs $ARGS

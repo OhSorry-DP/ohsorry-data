@@ -63,7 +63,7 @@ function wrangler(args) {
 
 const RETRY_AFTER_MAX_MS = 60_000;
 
-export function createRequestGate({ intervalMs = 500, now = Date.now, sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+export function createRequestGate({ intervalMs = 500, recheckDefer = false, now = Date.now, sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   if (!Number.isFinite(intervalMs) || intervalMs < 0) throw new Error('request gate intervalMs must be non-negative');
   let tail = Promise.resolve();
   let nextAt = 0;
@@ -75,9 +75,14 @@ export function createRequestGate({ intervalMs = 500, now = Date.now, sleep = (m
       tail = new Promise(resolve => { release = resolve; });
       await previous;
       try {
-        const startAt = Math.max(nextAt, blockedUntil, now());
+        let startAt = Math.max(nextAt, blockedUntil, now());
         const delay = startAt - now();
         if (delay > 0) await sleep(delay);
+        // opt-in: 대기 중 도착한 429도 다음 요청 시작 전에 반영한다.
+        while (recheckDefer && blockedUntil > now()) {
+          startAt = Math.max(startAt, blockedUntil);
+          await sleep(blockedUntil - now());
+        }
         const startedAt = now();
         nextAt = Math.max(startAt, startedAt) + intervalMs;
         return startRequest();
@@ -95,18 +100,35 @@ async function restFetch(key, init, tries = 4, base = REST_BASE, options = {}) {
       ...init,
       headers: { Authorization: `Bearer ${options.token || TOKEN}`, ...(init.headers || {}) },
     });
-    const r = await (options.requestGate ? options.requestGate.run(startRequest) : startRequest());
+    let r;
+    try {
+      r = await (options.requestGate ? options.requestGate.run(startRequest) : startRequest());
+      // 재시도 옵션에서는 body 전송 도중의 네트워크 오류도 같은 정책으로 처리한다.
+      if (options.retry) r = new Response([204, 205, 304].includes(r.status) ? null : await r.arrayBuffer(), { status: r.status, statusText: r.statusText, headers: r.headers });
+    }
+    catch (error) {
+      if (!options.retry || i === tries - 1) throw error;
+      const waitMs = Math.min(30_000, 1000 * 2 ** i);
+      if (options.requestGate) options.requestGate.defer(waitMs);
+      else await (options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms))))(waitMs);
+      continue;
+    }
     if (r.status === 429 || r.status >= 500) {
-      if (i === tries - 1) return r;
       // 429 에 Retry-After 가 있으면 따르되 60초로 자른다 — 이 헬퍼는 users-list 병합(GET→PUT→검증)도 쓰므로
       //   몇 분씩 기다리면 read-modify-write 레이스 창이 그만큼 벌어진다. 지시가 없으면 종전 백오프.
       const retryAfter = r.headers.get('retry-after');
       const retryMs = retryAfter === null ? NaN : (/^\d+(\.\d+)?$/.test(retryAfter)
         ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now());
-      const waitMs = r.status === 429 && Number.isFinite(retryMs) && retryMs >= 0
+      const waitMs = options.retry
+        ? Math.max(Math.min(30_000, 1000 * 2 ** i), Number.isFinite(retryMs) && retryMs >= 0 ? retryMs : 0)
+        : r.status === 429 && Number.isFinite(retryMs) && retryMs >= 0
         ? Math.min(retryMs, RETRY_AFTER_MAX_MS)
         : 500 * (i + 1) * (i + 1);
-      if (r.status === 429 && options.requestGate) options.requestGate.defer(waitMs);
+      if (i === tries - 1) {
+        if (options.retry && options.requestGate) options.requestGate.defer(waitMs);
+        return r;
+      }
+      if ((options.retry || r.status === 429) && options.requestGate) options.requestGate.defer(waitMs);
       else await (options.sleep || ((ms) => new Promise((s) => setTimeout(s, ms))))(waitMs);
       continue;
     }
@@ -160,10 +182,10 @@ export async function listEntries(prefix, options = {}) {
 
 // 조건부 갱신은 REST만 사용한다. GET 본문의 ETag로 잠그고 새 객체는 생성만 허용한다.
 // fetch를 주입하면 자격증명이나 네트워크 없이 실제 REST 요청을 검증할 수 있다.
-export function conditionalR2Client({ account, token, fetchImpl = fetch, requestGate } = {}) {
+export function conditionalR2Client({ account, token, fetchImpl = fetch, requestGate, retry = false, sleep, rawBytes = false } = {}) {
   if (!account || !token) throw new Error('R2 REST account / token 없음');
   const base = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${BUCKET}/objects`;
-  const options = { base, token, fetchImpl, requestGate };
+  const options = { base, token, fetchImpl, requestGate, retry, sleep };
   const objectKey = (key) => key.split('/').map(encodeURIComponent).join('/');
   const strongEtag = (etag) => typeof etag === 'string' && /^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag);
   // 목록 ETag는 단일 파트 MD5만 허용하며 조건부 헤더에는 따옴표를 붙인다.
@@ -188,18 +210,22 @@ export function conditionalR2Client({ account, token, fetchImpl = fetch, request
       const etag = r.headers.get('etag');
       const bytes = Buffer.from(await r.arrayBuffer());
       const body = new TextDecoder().decode(bytes);
-      if (strongEtag(etag)) return { body, etag };
+      if (strongEtag(etag)) return { body, etag, ...(rawBytes || retry ? { bytes } : {}) };
       const digest = listMd5(listedEtag === undefined ? await currentEtag(key) : listedEtag);
       if (!digest) throw new Error(`R2 GET ${key}: strong ETag 없음 (목록 MD5 ETag도 없음)`);
       if (digest !== md5(bytes)) throw new Error(`R2 GET ${key}: 목록 ETag와 본문 MD5 불일치`);
-      return { body, etag: `"${digest}"` };
+      return { body, etag: `"${digest}"`, ...(rawBytes || retry ? { bytes } : {}) };
     },
     async put(key, body, etag) {
       if (etag !== null && !strongEtag(etag)) throw new Error('조건부 PUT ETag 없음');
       const headers = { 'Content-Type': contentTypeOf(key),
         ...(etag === null ? { 'If-None-Match': '*' } : { 'If-Match': etag }) };
-      // 조건부 PUT은 응답 유실 뒤 재시도하면 412가 될 수 있으므로 자동 재시도하지 않는다.
-      const r = await restFetch('/' + objectKey(key), { method: 'PUT', body, headers }, 1, base, options);
+      // 기본은 재시도 금지. opt-in은 412 때 원본 bytes를 비교하여 응답 유실만 복구한다.
+      const r = await restFetch('/' + objectKey(key), { method: 'PUT', body, headers }, retry ? 6 : 1, base, options);
+      if (retry && r.status === 412) {
+        const existing = await this.read(key);
+        if (existing && Buffer.from(existing.bytes ?? existing.body).equals(Buffer.from(body))) return;
+      }
       if (!r.ok) throw new Error(`R2 PUT ${key} HTTP ${r.status}`);
       // 최초 목록을 재사용하지 않고 PUT 직후 해당 키를 다시 확인한다.
       const digest = listMd5(await currentEtag(key));

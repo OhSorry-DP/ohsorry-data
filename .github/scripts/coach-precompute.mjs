@@ -1,45 +1,36 @@
 import path from 'node:path';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { fork } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { performance } from 'node:perf_hooks';
 import { collectGraph, digest } from './uvec-lib.mjs';
-import { conditionalR2Client, pool } from './r2-client.mjs';
+import { conditionalR2Client, pool, createRequestGate } from './r2-client.mjs';
 
 // 조건부 클라이언트의 ETag 검증을 유지하면서 디코딩 전 원본도 보존한다.
-export function createClient(env = process.env, fetchImpl = fetch) {
-  const raw = new Map();
-  const client = conditionalR2Client({ account: env.CLOUDFLARE_ACCOUNT_ID,
+export function createClient(env = process.env, fetchImpl = fetch, { requestGate = createRequestGate({ recheckDefer: true, intervalMs: 1000 / 3 }) } = {}) {
+  return conditionalR2Client({ account: env.CLOUDFLARE_ACCOUNT_ID,
     token: env.CLOUDFLARE_R2_TOKEN || env.CLOUDFLARE_API_TOKEN,
-    fetchImpl: async (url, init) => {
-      const response = await fetchImpl(url, init);
-      if (init.method === 'GET' && response.ok && !String(url).includes('?')) {
-        const key = decodeURIComponent(new URL(url).pathname.split('/objects/')[1]);
-        raw.set(key, Buffer.from(await response.clone().arrayBuffer()));
-      }
-      return response;
-    } });
-  return { ...client, async read(key) {
-    raw.delete(key);
-    const object = await client.read(key);
-    return object && { ...object, bytes: raw.get(key) };
-  } };
+    fetchImpl, requestGate, retry: true, rawBytes: true });
 }
 
 export function parseArgs(args) {
-  const options = { dry: false, concurrency: 4 };
+  const options = { dry: false, concurrency: 2, requestsPerSecond: 3 };
   for (let i = 0; i < args.length; i++) {
     const key = args[i];
     if (key === '--dry') options.dry = true;
-    else if (['--web-root', '--only', '--concurrency'].includes(key)) {
+    else if (['--web-root', '--only', '--concurrency', '--requests-per-second'].includes(key)) {
       const value = args[++i];
       if (!value || value.startsWith('--')) throw new Error(`${key}: 값 없음`);
       if (key === '--web-root') options.webRoot = path.resolve(value);
       if (key === '--only') options.only = value.split(',');
+      if (key === '--requests-per-second') options.requestsPerSecond = Number(value);
       if (key === '--concurrency') options.concurrency = Number(value);
     } else throw new Error(`알 수 없는 옵션: ${key}`);
   }
   if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1) throw new Error('양의 concurrency 필요');
+  if (!Number.isFinite(options.requestsPerSecond) || options.requestsPerSecond <= 0) throw new Error('양의 requests-per-second 필요');
   return options;
 }
 
@@ -100,6 +91,7 @@ export async function produceUser({ webRoot, id, client, dry = false, env = proc
           } catch (error) { failures.push(error); throw error; }
         };
         const bodies = new Map(), cells = {};
+        let offset = 0;
         result.cells = [];
         for (const cell of CELLS) {
           const [group, layout, explain] = cell.split('.');
@@ -113,13 +105,18 @@ export async function produceUser({ webRoot, id, client, dry = false, env = proc
           const bytes = Buffer.from(await response.arrayBuffer());
           result.cells.push({ cell, wall_ms: performance.now() - start, cpu_ms: cpuMs(cellCpu), bytes: bytes.length });
           if (failures.length) throw failures[0];
-          if (response.status !== 200 || response.headers.get('content-type')?.split(';')[0] !== 'application/json') throw new Error(`cell_response: ${cell} HTTP ${response.status}`);
+          if (response.headers.get('content-type')?.split(';')[0] !== 'application/json') throw new Error(`cell_response: ${cell} HTTP ${response.status}`);
           if (bytes.length > MAX_BODY_BYTES) throw new Error(`body_too_large: ${cell}`);
           const parsed = JSON.parse(bytes.toString('utf8'));
           // 점수 축 입력 부재는 엔진의 결정적인 200 응답이며 원래 bytes를 저장한다.
+          if ([200, 404].includes(response.status) && ['no_star', 'not_found'].includes(parsed.error)) {
+            result.ok = true; result.skipped = true; result.reason = parsed.error; return result;
+          }
+          if (response.status !== 200) throw new Error(`cell_response: ${cell} HTTP ${response.status}`);
           if (parsed.error && parsed.error !== 'no_r_star') throw new Error(`cell_error: ${cell} ${parsed.error}`);
           bodies.set(cell, bytes);
-          cells[cell] = { status: 'ready', content_type: 'application/json', byte_length: bytes.length, body_sha256: digest(bytes) };
+          cells[cell] = { offset, length: bytes.length, status: 'ready', content_type: 'application/json', byte_length: bytes.length, body_sha256: digest(bytes) };
+          offset += bytes.length;
         }
         globalThis.fetch = originalFetch;
         const sources = await Promise.all([...snapshot].map(async ([key, promise]) => {
@@ -129,12 +126,15 @@ export async function produceUser({ webRoot, id, client, dry = false, env = proc
         sources.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
         const policy = normalizePhysicalPolicy(env);
         const generation = digest(JSON.stringify([graph.coachFingerprint, EXPECTED_CONTRACT, policy, sources, CELLS.map(cell => [cell, cells[cell].body_sha256])]));
-        const index = { schema: 'coach-recs-precompute/1', id, engine_sha256: graph.coachFingerprint,
+        const index = { schema: 'coach-recs-precompute/2', id, engine_sha256: graph.coachFingerprint,
           physical_contract: EXPECTED_CONTRACT, physical_policy: policy, generation, cells };
         if (!validateIndex(index, { id, engine_sha256: graph.coachFingerprint })) throw new Error('invalid_index');
         result.generation = generation;
-        if (!dry) for (const [cell, bytes] of bodies) {
-          const key = bodyPath(id, generation, cell);
+        let oldIndex;
+        try { oldIndex = JSON.parse(previous?.body ?? previous?.bytes?.toString('utf8')); } catch { /* absent or v1 */ }
+        const unchanged = validateIndex(oldIndex, { id, engine_sha256: graph.coachFingerprint }) && oldIndex.generation === generation;
+        if (!dry && !unchanged) {
+          const key = bodyPath(id, generation), bytes = Buffer.concat([...bodies.values()]);
           const existing = await client.read(key);
           if (existing) {
             if (!bytesOf(existing).equals(bytes)) throw new Error(`immutable_conflict: ${key}`);
@@ -149,6 +149,7 @@ export async function produceUser({ webRoot, id, client, dry = false, env = proc
           if (attempt === 0) continue;
           throw new Error('source_changed');
         }
+        if (unchanged) { result.ok = true; result.unchanged = true; return result; }
         if (!dry) { await client.put(indexKey, JSON.stringify(index), previous?.etag ?? null); result.puts++; }
         result.ok = true;
         return result;
@@ -158,36 +159,101 @@ export async function produceUser({ webRoot, id, client, dry = false, env = proc
   finally { globalThis.fetch = originalFetch; result.wall_ms = performance.now() - wall; result.cpu_ms = cpuMs(cpu); }
 }
 
+// 실행별 캐시: 공용 키의 원본 bytes와 ETag/부재를 보존하고 동시 GET도 합친다.
+export function createDiskCache(client, directory) {
+  const pending = new Map();
+  const isCommon = key => !/^(user|arrange|uslice)\//.test(key) && !/^phys\/user\//.test(key);
+  return { ...client, async read(key) {
+    if (!isCommon(key)) return client.read(key);
+    if (!pending.has(key)) pending.set(key, (async () => {
+      const object = await client.read(key);
+      if (!object) return null;
+      const file = path.join(directory, digest(key));
+      const bytes = bytesOf(object);
+      await fs.writeFile(file, bytes);
+      return { file, etag: object.etag };
+    })());
+    const metadata = await pending.get(key);
+    if (!metadata) return null;
+    const bytes = await fs.readFile(metadata.file);
+    return { ...metadata, bytes, body: bytes.toString('utf8') };
+  } };
+}
+
 export async function main(args = process.argv.slice(2), deps = {}) {
   const options = parseArgs(args);
-  const client = deps.client || createClient();
-  const graph = await collectGraph(options.webRoot, fetch, { mode: 'coach', client });
-  if (!graph) { console.warn('::warning::engine/coach-recs/current.json missing; coach precompute skipped'); return []; }
-  let contract;
-  try { contract = await import(new URL('../../_shared/coach-precompute-contract.js', graph.entry)); }
-  finally { await graph.cleanup(); }
-  const ids = [...new Set(options.only || (await client.listEntries('user/')).map(({ key }) => /^user\/([^/]+)\.json$/.exec(key)?.[1]).filter(Boolean))]
-    .map(id => id.replaceAll('-', '').trim().toUpperCase()).sort();
-  if (ids.some(id => !contract.indexPath(id))) throw new Error('invalid_id');
-  const results = [];
-  await pool(ids, options.concurrency, async (id) => {
-    const result = await new Promise((resolve) => {
-      const child = fork(fileURLToPath(import.meta.url), [], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'], env: process.env });
-      let output;
-      child.on('message', value => { output = value; });
-      child.on('error', error => resolve({ id, ok: false, reason: error.message }));
-      child.on('exit', code => resolve(output || { id, ok: false, reason: `child_exit: ${code}` }));
-      child.send({ ...options, id });
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'coach-assets-'));
+  const client = createDiskCache(deps.client || createClient(process.env, fetch, {
+    requestGate: createRequestGate({ recheckDefer: true, intervalMs: 1000 / options.requestsPerSecond }),
+  }), directory);
+  let graph;
+  try {
+    graph = await collectGraph(options.webRoot, fetch, { mode: 'coach', client });
+    if (!graph) { console.warn('::warning::engine/coach-recs/current.json missing; coach precompute skipped'); return []; }
+    const contract = await import(new URL('../../_shared/coach-precompute-contract.js', graph.entry));
+    const ids = [...new Set(options.only || (await client.listEntries('user/')).map(({ key }) => /^user\/([^/]+)\.json$/.exec(key)?.[1]).filter(Boolean))]
+      .map(id => id.replaceAll('-', '').trim().toUpperCase()).sort();
+    if (ids.some(id => !contract.indexPath(id))) throw new Error('invalid_id');
+    // 부모가 검증한 엔진 파일도 실행 동안 유지하여 child 별 R2 engine GET을 없앤다.
+    const webRoot = fileURLToPath(new URL('../../../', graph.entry));
+    const results = [];
+    await pool(ids, options.concurrency, async (id) => {
+      const result = await new Promise((resolve) => {
+        const child = fork(fileURLToPath(import.meta.url), [], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'], env: process.env });
+        let output;
+        child.on('message', async message => {
+          if (!message.rpc) { output = message; return; }
+          try {
+            let value;
+            if (message.method === 'read') {
+              const object = await client.read(message.key);
+              value = object && { etag: object.etag, ...(object.file ? { file: object.file } : { base64: bytesOf(object).toString('base64') }) };
+            } else if (message.method === 'put') {
+              await client.put(message.key, Buffer.from(message.base64, 'base64'), message.etag);
+            } else throw new Error('invalid_rpc');
+            if (child.connected) child.send({ rpc: message.rpc, value });
+          } catch (error) { if (child.connected) child.send({ rpc: message.rpc, error: error.message }); }
+        });
+        child.on('error', error => resolve({ id, ok: false, reason: error.message }));
+        child.on('exit', code => resolve(output || { id, ok: false, reason: `child_exit: ${code}` }));
+        child.send({ ...options, webRoot, id });
+      });
+      results.push(result);
+      console.log(JSON.stringify(result));
     });
-    results.push(result);
-    console.log(JSON.stringify(result));
-  });
-  if (results.some(result => !result.ok)) process.exitCode = 1;
-  return results;
+    if (results.some(result => !result.ok)) process.exitCode = 1;
+    return results;
+  } finally {
+    await graph?.cleanup();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 }
 
 if (process.send) process.once('message', async options => {
-  const result = await produceUser({ ...options, client: createClient() });
+  let sequence = 0;
+  const pending = new Map();
+  process.on('message', message => {
+    const waiter = pending.get(message.rpc);
+    if (!waiter) return;
+    pending.delete(message.rpc);
+    if (message.error) waiter.reject(new Error(message.error)); else waiter.resolve(message.value);
+  });
+  const rpc = message => new Promise((resolve, reject) => {
+    const id = ++sequence; pending.set(id, { resolve, reject });
+    process.send({ ...message, rpc: id }, error => {
+      if (error) { pending.delete(id); reject(error); }
+    });
+  });
+  const client = {
+    async read(key) {
+      const object = await rpc({ method: 'read', key });
+      if (!object) return null;
+      const bytes = object.file ? await fs.readFile(object.file) : Buffer.from(object.base64, 'base64');
+      return { bytes, body: bytes.toString('utf8'), etag: object.etag };
+    },
+    put: (key, bytes, etag) => rpc({ method: 'put', key, base64: Buffer.from(bytes).toString('base64'), etag }),
+  };
+  const result = await produceUser({ ...options, client });
   process.send(result, () => process.disconnect());
 });
 else if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
