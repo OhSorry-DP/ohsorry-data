@@ -74,6 +74,9 @@ jobs:
           COACH_RECS_ENGINE_SHA256: ${{ vars.COACH_RECS_ENGINE_SHA256 }}
           COACH_RECS_PHYS_ENABLED: ${{ vars.COACH_RECS_PHYS_ENABLED }}
           PHYS_MODEL_VERSION: ${{ vars.PHYS_MODEL_VERSION || 'phys-line-v2' }}
+          # 코치 사전계산이 Pages 와 같은 물리 버전으로 계산하도록(정책 지문에 들어간다).
+          PHYS_LINE_VERSION: ${{ vars.PHYS_LINE_VERSION || 'phys-line-v2' }}
+          PHYS_MEAN_VERSION: ${{ vars.PHYS_MEAN_VERSION || 'mean-os-pattern-span-v2' }}
           PHYS_Q_VERSION: ${{ vars.PHYS_Q_VERSION }}
           PHYS_TIME_AXIS_VERSION: ${{ vars.PHYS_TIME_AXIS_VERSION }}
           PHYS_ASSETS_MANIFEST_KEY: ${{ vars.PHYS_ASSETS_MANIFEST_KEY }}
