@@ -146,10 +146,15 @@ test('같은 입력 재실행 generation 동일·immutable body 재PUT 없음·�
 });
 
 
-async function engineFixture(t) {
+async function engineFixture(t, umd = false) {
   const f = await fixture(t);
+  if (umd) {
+    await fs.writeFile(path.join(f.root, 'functions/_shared/recommend.js'), '(function () { module.exports = { value: 7 }; })();\n');
+    await fs.appendFile(path.join(f.root, 'functions/api/[iidxId]/[resource].js'), "\nimport recommend from '../../_shared/recommend.js';\nif (recommend.value !== 7) throw new Error('UMD import failed');\n");
+  }
   const files = {};
   const graph = await collectGraph(f.root, fetch, { mode: 'coach' });
+  f.fingerprint = graph.coachFingerprint;
   try {
     for (const name of Object.keys(graph.coachSources)) files[name] = (await fs.readFile(path.join(f.root, name), 'utf8')).replace(/\r\n?/g, '\n');
   } finally { await graph.cleanup(); }
@@ -158,6 +163,36 @@ async function engineFixture(t) {
   f.objects.set(`engine/coach-recs/${f.fingerprint}.json`, Buffer.from(JSON.stringify(bundle)));
   return { ...f, bundle };
 }
+
+test('parent passes original R2 UMD sources to strict-module child with original fingerprint', async t => {
+  const f = await engineFixture(t, true);
+  const graph = await collectGraph(undefined, fetch, { mode: 'coach', client: f.client });
+  try {
+    assert.equal(await fs.readFile(path.join(graph.sourceRoot, 'functions/_shared/recommend.js'), 'utf8'), f.bundle.files['functions/_shared/recommend.js']);
+    await assert.rejects(fs.access(path.join(graph.sourceRoot, 'functions/_shared/recommend.js.cjs')), { code: 'ENOENT' });
+  } finally { await graph.cleanup(); }
+  await assert.rejects(fs.access(graph.sourceRoot), { code: 'ENOENT' });
+  const results = await main(['--only', id], { client: f.client, childExecArgv: ['--no-experimental-detect-module'] });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].ok, true, results[0].reason);
+  assert.equal(results[0].engine_sha256, f.fingerprint);
+  assert.equal(results[0].cells.length, 32);
+  assert.equal(results[0].puts, 2);
+  assert.equal(JSON.parse(f.objects.get(`uslice/${id}-coach-recs.json`)).engine_sha256, f.fingerprint);
+});
+
+test('child rejects parent fingerprint mismatch before reads or publication', async t => {
+  const f = await engineFixture(t, true);
+  const reads = [], read = f.client.read.bind(f.client);
+  f.client.read = async key => { reads.push(key); return read(key); };
+  const result = await produceUser({ webRoot: f.root, id, client: f.client, env: {}, expectedEngineSha256: '0'.repeat(64) });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'engine_mismatch');
+  assert.equal(result.engine_sha256, f.fingerprint);
+  assert.equal(result.puts, 0);
+  assert.equal(f.puts.length, 0);
+  assert.deepEqual(reads, []);
+});
 
 test('R2 engine fingerprint recomputation matches and publishes all cells', async t => {
   const f = await engineFixture(t);

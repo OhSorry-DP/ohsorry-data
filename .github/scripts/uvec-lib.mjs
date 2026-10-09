@@ -93,7 +93,7 @@ export async function collectGraph(webBase, network, options = {}) {
     modules[url.href] = tag;
     if (coach) sources[relative] = source.replace(/\r\n?/g, '\n');
     await fs.mkdir(path.dirname(destination), { recursive: true });
-    if (coach && /\bmodule\.exports\s*=/.test(source) && !/^\s*(?:import|export)\b/m.test(source)) {
+    if (coach && !relative.endsWith('.cjs') && /\bmodule\.exports\s*=/.test(source) && !/^\s*(?:import|export)\b/m.test(source)) {
       await fs.writeFile(destination + '.cjs', source);
       await fs.writeFile(destination, `export { default } from './${path.basename(destination)}.cjs';\n`);
     } else await fs.writeFile(destination, source);
@@ -106,7 +106,7 @@ export async function collectGraph(webBase, network, options = {}) {
     const coachSources = coach ? Object.fromEntries(Object.entries(sources).sort(([a], [b]) => a.localeCompare(b)).map(([name, source]) => [name, digest(source)])) : undefined;
     const canonical = coach ? (await import(new URL('functions/_shared/coach-precompute-contract.js', base).href)).graphCanonical : null;
     const coachFingerprint = coach ? digest(canonical(Object.entries(coachSources))) : undefined;
-    return { modules, ...(coach ? { coachSources, coachFingerprint } : {}), entry: pathToFileURL(destinations.get(sourceEntry.href)).href,
+    return { modules, ...(coach ? { coachSources, coachFingerprint, sourceRoot: fileURLToPath(base) } : {}), entry: pathToFileURL(destinations.get(sourceEntry.href)).href,
       cleanup: () => fs.rm(dir, { recursive: true, force: true }) };
   } catch (error) { await fs.rm(dir, { recursive: true, force: true }); throw error; }
 }
@@ -213,7 +213,14 @@ export async function collectR2CoachGraph(client) {
     }
     graph = await collectGraph(root, fetch, { mode: 'coach' });
     if (graph.coachFingerprint !== hash || JSON.stringify(Object.entries(graph.coachSources).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) !== JSON.stringify(entries)) throw new Error('engine_mismatch');
-    return graph;
-  } catch (error) { await graph?.cleanup(); throw error; }
-  finally { await fs.rm(root, { recursive: true, force: true }); }
+    const cleanupGraph = graph.cleanup;
+    return { ...graph, cleanup: async () => {
+      try { await cleanupGraph(); }
+      finally { await fs.rm(root, { recursive: true, force: true }); }
+    } };
+  } catch (error) {
+    try { await graph?.cleanup(); }
+    finally { await fs.rm(root, { recursive: true, force: true }); }
+    throw error;
+  }
 }

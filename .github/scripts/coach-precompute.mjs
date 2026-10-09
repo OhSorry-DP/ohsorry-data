@@ -38,7 +38,7 @@ const bytesOf = (object) => Buffer.from(object.bytes ?? object.body);
 const decoded = (bytes) => (bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes).toString('utf8');
 const cpuMs = (start) => { const cpu = process.cpuUsage(start); return (cpu.user + cpu.system) / 1000; };
 
-export async function produceUser({ webRoot, id, client, dry = false, env = process.env }) {
+export async function produceUser({ webRoot, id, client, dry = false, env = process.env, expectedEngineSha256 }) {
   id = String(id).replaceAll('-', '').trim().toUpperCase();
   const wall = performance.now(), cpu = process.cpuUsage();
   const result = { id, dry, puts: 0, cells: [], attempts: 0 };
@@ -49,6 +49,9 @@ export async function produceUser({ webRoot, id, client, dry = false, env = proc
       const graph = await collectGraph(webRoot, originalFetch, { mode: 'coach', client });
       if (!graph) { console.warn('::warning::engine/coach-recs/current.json missing; coach precompute skipped'); result.ok = true; result.skipped = true; return result; }
       try {
+        result.engine_sha256 = graph.coachFingerprint;
+        if (expectedEngineSha256 !== undefined && expectedEngineSha256 !== graph.coachFingerprint) throw new Error('engine_mismatch');
+        if (env.COACH_RECS_ENGINE_SHA256 && env.COACH_RECS_ENGINE_SHA256 !== graph.coachFingerprint) throw new Error('engine_mismatch');
         const graphRoot = new URL('../../../', graph.entry);
         const contract = await import(new URL('functions/_shared/coach-precompute-contract.js', graphRoot));
         const { EXPECTED_CONTRACT } = await import(new URL('functions/_shared/coach-recs-phys.js', graphRoot));
@@ -56,8 +59,6 @@ export async function produceUser({ webRoot, id, client, dry = false, env = proc
         const { CELLS, normalizeCellQuery, normalizePhysicalPolicy, indexPath, bodyPath, validateIndex, MAX_BODY_BYTES } = contract;
         const indexKey = indexPath(id);
         if (!indexKey) throw new Error('invalid_id');
-        result.engine_sha256 = graph.coachFingerprint;
-        if (env.COACH_RECS_ENGINE_SHA256 && env.COACH_RECS_ENGINE_SHA256 !== graph.coachFingerprint) throw new Error('engine_mismatch');
         const previous = await client.read(indexKey);
         const snapshot = new Map(), failures = [];
         const read = async (key) => {
@@ -195,11 +196,12 @@ export async function main(args = process.argv.slice(2), deps = {}) {
       .map(id => id.replaceAll('-', '').trim().toUpperCase()).sort();
     if (ids.some(id => !contract.indexPath(id))) throw new Error('invalid_id');
     // 부모가 검증한 엔진 파일도 실행 동안 유지하여 child 별 R2 engine GET을 없앤다.
-    const webRoot = fileURLToPath(new URL('../../../', graph.entry));
+    const webRoot = graph.sourceRoot;
     const results = [];
     await pool(ids, options.concurrency, async (id) => {
       const result = await new Promise((resolve) => {
-        const child = fork(fileURLToPath(import.meta.url), [], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'], env: process.env });
+        const child = fork(fileURLToPath(import.meta.url), [], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'], env: process.env,
+          execArgv: deps.childExecArgv ?? process.execArgv });
         let output;
         child.on('message', async message => {
           if (!message.rpc) { output = message; return; }
@@ -216,7 +218,7 @@ export async function main(args = process.argv.slice(2), deps = {}) {
         });
         child.on('error', error => resolve({ id, ok: false, reason: error.message }));
         child.on('exit', code => resolve(output || { id, ok: false, reason: `child_exit: ${code}` }));
-        child.send({ ...options, webRoot, id });
+        child.send({ ...options, webRoot, id, expectedEngineSha256: graph.coachFingerprint });
       });
       results.push(result);
       console.log(JSON.stringify(result));

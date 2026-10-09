@@ -18,6 +18,20 @@ async function checkout(t, source = 'export const value = 1;') {
   return root;
 }
 
+test('coach copies existing CommonJS files without generating export wrappers', async t => {
+  const root = await checkout(t);
+  const source = 'module.exports = { value: 9 };\n';
+  await fs.writeFile(path.join(root, 'functions/_shared/recommend.cjs'), source);
+  await fs.writeFile(path.join(root, 'functions/api/[iidxId]/[resource].js'), "export { default as value } from '../../_shared/recommend.cjs';\n");
+  const graph = await collectGraph(root, fetch, { mode: 'coach' });
+  try {
+    assert.equal((await import(graph.entry)).value.value, 9);
+    const copied = new URL('../../_shared/recommend.cjs', graph.entry);
+    assert.equal(await fs.readFile(copied, 'utf8'), source);
+    await assert.rejects(fs.access(fileURLToPath(copied) + '.cjs'), { code: 'ENOENT' });
+  } finally { await graph.cleanup(); }
+});
+
 test('기본 entry와 modules 계약은 기존 uvec-slice로 유지', async (t) => {
   const root = await checkout(t);
   await fs.mkdir(path.join(root, 'v3/services'), { recursive: true });
