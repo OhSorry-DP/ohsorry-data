@@ -10,6 +10,10 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const VALID_ID = /^[A-Za-z0-9_-]+$/;
 const CHECKPOINT_SCHEMA = 'phys-backfill-checkpoint/2';
 const RETRY_LIMIT = 10;
+const SP_MODEL = 'phys-line-sp-v1';
+const SP_MEAN = 'mean-os-pattern-span-sp-v1';
+const SP_Q = 'q-samehand-2s-v1';
+const SP_TIME = 'ta-20261004';
 
 export function parseArgs(args) {
   const options = { limit: 50, dryRun: true, only: null };
@@ -34,9 +38,10 @@ export function parseArgs(args) {
   options.usersList = values.get('--users-list'); options.manifestPath = values.get('--manifest');
   const modelVersion = values.get('--model-version') || null;
   const v2 = modelVersion === 'phys-line-v2';
+  const sp = modelVersion === SP_MODEL;
   options.versions = { model_version: modelVersion,
-    ...(v2 ? { line_version: modelVersion, mean_version: 'mean-os-pattern-span-v2' } : {}),
-    q_version: values.get('--q-version') || null, time_axis_version: values.get('--time-axis-version') || null };
+    ...(v2 ? { line_version: modelVersion, mean_version: 'mean-os-pattern-span-v2' } : sp ? { line_version: SP_MODEL, mean_version: SP_MEAN } : {}),
+    q_version: sp ? SP_Q : values.get('--q-version') || null, time_axis_version: sp ? SP_TIME : values.get('--time-axis-version') || null };
   if (values.has('--only')) options.only = [...new Set(values.get('--only').split(',').filter(Boolean))];
   if (options.only?.some(id => !VALID_ID.test(id))) throw new Error('--only에 유효하지 않은 ID가 있습니다');
   if (values.has('--shard') || values.has('--shards')) {
@@ -163,14 +168,18 @@ export async function runBackfill(options, deps = {}) {
       const { id } = attempts[attemptIndex++];
       summary.attempted++;
       try {
-        const dumpText = await (deps.getDump ? deps.getDump(id) : readFile(path.resolve(options.userDir || '.', 'user', `${id}.json`)));
+        const sourceKey = versions.model_version === SP_MODEL ? `phys/user-sp/${encodeURIComponent(id)}.json` : `phys/user/${encodeURIComponent(id)}.json`;
+        const dumpText = await (deps.getDump ? deps.getDump(id) : versions.model_version === SP_MODEL && io?.readSource
+          ? io.readSource(id)
+          : readFile(path.resolve(options.userDir || '.', 'user', `${id}.json`)));
         if (dumpText == null) throw Object.assign(new Error('source_missing'), { reason: 'source_missing' });
         const dump = typeof dumpText === 'string' ? JSON.parse(dumpText) : dumpText;
-        if (!dump || typeof dump !== 'object' || !Array.isArray(dump.dp)) throw Object.assign(new Error('source_invalid'), { reason: 'source_invalid' });
+        const playStyle = versions.model_version === SP_MODEL ? 'SP' : 'DP';
+        if (!dump || typeof dump !== 'object' || !Array.isArray(dump[playStyle === 'SP' ? 'sp' : 'dp'])) throw Object.assign(new Error('source_invalid'), { reason: 'source_invalid' });
         const sourceRevision = sha256(typeof dumpText === 'string' ? dumpText : JSON.stringify(dumpText));
         const prior = checkpoint.success?.[id];
         const currentRemote = deps.readRemoteRevision ? await deps.readRemoteRevision(id) : (io?.read ? await (async () => {
-          const value = await io.read(`phys/user/${encodeURIComponent(id)}.json`);
+          const value = await io.read(sourceKey);
           if (value == null) return null;
           const body = typeof value === 'string' ? value : value.body;
           return JSON.parse(body)?.absolute?.source_revision ?? null;
@@ -188,14 +197,14 @@ export async function runBackfill(options, deps = {}) {
         // 병렬 유저도 같은 로딩 Promise를 공유하며 실패해도 회차 내에서 재조회하지 않는다.
         assetsPromise ||= Promise.resolve().then(() => loader(versions, manifest, io));
         const assets = await assetsPromise;
-        const result = await produce({ id, dump, versions, manifest, io, computePhysLine, assets, loadAssets: () => assetsPromise, dryRun: options.dryRun });
+        const result = await produce({ id, dump, versions, manifest, io, computePhysLine, assets, loadAssets: () => assetsPromise, dryRun: options.dryRun, playStyle });
         if (['ready', 'planned'].includes(result.status)) {
           summary.ready++;
           if (!options.dryRun && result.status === 'ready' && result.changed) {
             const verify = deps.verifyPut ? await deps.verifyPut(id, result) : await io.read(result.key);
             const body = typeof verify === 'string' ? verify : verify?.body;
             const record = body ? JSON.parse(body) : null;
-            if (record?.absolute?.source_revision !== result.source_revision || record?.absolute?.status !== 'ready') throw Object.assign(new Error('put_verification_failed'), { reason: 'put_verification_failed' });
+            if (record?.absolute?.source_revision !== result.source_revision || record?.absolute?.status !== 'ready' || (playStyle === 'SP' && record?.play_style !== 'SP')) throw Object.assign(new Error('put_verification_failed'), { reason: 'put_verification_failed' });
           }
           if (!options.dryRun && result.status === 'ready') checkpoint.success[id] = { source_revision: sourceRevision, remote_revision: result.source_revision };
           delete checkpoint.failures[id];
