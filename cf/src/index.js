@@ -22,6 +22,8 @@ const USER_RE = /^user\/[A-Za-z0-9]+\.json$/;
 const HIST_RE = /^hist\/[A-Za-z0-9]+\.json$/;
 // 코치 auth.js의 validIidxId와 같은 AC 8자리·INF 대문자 1자+12자리 검사다.
 const PHYS_USER_RE = /^phys\/user\/(\d{8}|[A-Z]\d{12})\.json$/;
+// SP 코치 공개 자산은 DP 물리 유저 자산과 같은 ID 검사를 사용하되 별도 경로로 한정한다.
+const PHYS_USER_SP_RE = /^phys\/user-sp\/(\d{8}|[A-Z]\d{12})\.json$/;
 // 곡 기록·이력 조각 및 요약 — 계약의 키 정규식을 그대로 사용한다.
 const USLICE_RE = /^uslice\/[A-Za-z0-9]+(-[rh]-(dp|sp)-\d{2}|-vec-dp)?\.json$/;
 const ARRANGE_RE = /^arrange\/[A-Za-z0-9]+\.json$/;
@@ -135,6 +137,7 @@ function keyOf(pathname) {
   if (ALLOWED_ROOT.has(key)) return key;
   if (USER_RE.test(key)) return key;
   if (PHYS_USER_RE.test(key)) return key;
+  if (PHYS_USER_SP_RE.test(key)) return key;
   if (HIST_RE.test(key)) return key;
   if (USLICE_RE.test(key)) return key;
   if (ARRANGE_RE.test(key)) return key;
