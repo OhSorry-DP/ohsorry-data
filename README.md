@@ -124,6 +124,14 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-12 — SP 물리 실력선(phys-line-sp-v1) 생산·백필 경로
+
+- `phys-lib`: SP 유저 evidence 를 `phys/user-sp/{ID}.json` 에 생산(dump.sp, 19축·notes/s/side, SP 기록과 정배 자산 비교 가정). DP `phys/user/` 경로 불변.
+- `phys-assets`·vendor `physLine`: phys-line-sp-v1 자산 읽기·검증과 계산 계약 동기화.
+- `refresh-coach-user`: DP 뒤 독립 SP 단계. dump-user 의 `SP_PHYS_*` 는 Repository variables 를 설정해야 켜진다 — 비어 있으면 건너뛴다(SP 자산 게시 전 활성화 금지).
+- `backfill-phys`: 워크플로 입력 `model_version: phys-line-sp-v1` 로 SP 백필(모델별 체크포인트). shard resume 회귀 없음.
+- CDN Worker: `phys/user-sp/{ID}.json` 공개 허용(Worker 배포는 별도).
+
 ### 2026-10-09 — 코치 추천 사전계산 producer
 
 - `coach-precompute.mjs`: R2 `engine/coach-recs/current.json` 이 가리키는 웹 코치 엔진 묶음(지문 재검증)으로 기본 32칸을 계산해 `uslice/{ID}-coach-recs-{generation}-{cell}.json` + index `uslice/{ID}-coach-recs.json` 게시. 원본 변경 감지 시 index 미게시, 실패 시 이전 index 보존.
