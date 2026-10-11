@@ -247,6 +247,13 @@ jobs:
       PHYS_Q_VERSION: ${{ vars.PHYS_Q_VERSION }}
       PHYS_TIME_AXIS_VERSION: ${{ vars.PHYS_TIME_AXIS_VERSION }}
       PHYS_ASSETS_MANIFEST_KEY: ${{ vars.PHYS_ASSETS_MANIFEST_KEY }}
+      # SP 단계는 SP 자산 게시 완료 뒤 Repository variables(SP_PHYS_*)를 설정해야 켜진다. 비어 있으면 건너뛴다.
+      SP_PHYS_MODEL_VERSION: ${{ vars.SP_PHYS_MODEL_VERSION }}
+      SP_PHYS_LINE_VERSION: ${{ vars.SP_PHYS_LINE_VERSION }}
+      SP_PHYS_MEAN_VERSION: ${{ vars.SP_PHYS_MEAN_VERSION }}
+      SP_PHYS_Q_VERSION: ${{ vars.SP_PHYS_Q_VERSION }}
+      SP_PHYS_TIME_AXIS_VERSION: ${{ vars.SP_PHYS_TIME_AXIS_VERSION }}
+      SP_PHYS_ASSETS_MANIFEST_KEY: ${{ vars.SP_PHYS_ASSETS_MANIFEST_KEY }}
     steps:
       - uses: actions/checkout@v4
 
