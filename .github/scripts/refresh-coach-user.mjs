@@ -8,7 +8,7 @@ import { loadPhysAssets } from './phys-assets.mjs';
 const ID_RE = /^[A-Za-z0-9]+$/;
 const HASH_RE = /^[a-f0-9]{64}$/;
 const USER_KEY = id => `user/${id}.json`;
-const ALLOWED_KEYS = id => new Set([`phys/user/${id}.json`]);
+const ALLOWED_KEYS = id => new Set([`phys/user/${id}.json`, `phys/user-sp/${id}.json`]);
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 
 export function parseArgs(args) {
@@ -58,6 +58,15 @@ function configuredVersions(env) {
     q_version: env.PHYS_Q_VERSION || null, time_axis_version: env.PHYS_TIME_AXIS_VERSION || null };
 }
 
+function configuredSpVersions(env) {
+  if (!env.SP_PHYS_MODEL_VERSION && !env.SP_PHYS_LINE_VERSION && !env.SP_PHYS_MEAN_VERSION &&
+      !env.SP_PHYS_Q_VERSION && !env.SP_PHYS_TIME_AXIS_VERSION && !env.SP_PHYS_ASSETS_MANIFEST_KEY) return null;
+  return { model_version: env.SP_PHYS_MODEL_VERSION || 'phys-line-sp-v1',
+    line_version: env.SP_PHYS_LINE_VERSION || 'phys-line-sp-v1',
+    mean_version: env.SP_PHYS_MEAN_VERSION || 'mean-os-pattern-span-sp-v1',
+    q_version: env.SP_PHYS_Q_VERSION || null, time_axis_version: env.SP_PHYS_TIME_AXIS_VERSION || null };
+}
+
 export async function runRefresh(options, deps = {}) {
   const id = String(options.id ?? '');
   if (!ID_RE.test(id)) throw new Error('invalid --id');
@@ -72,17 +81,19 @@ export async function runRefresh(options, deps = {}) {
   })();
   if (typeof io?.read !== 'function' || typeof io?.put !== 'function' || typeof io?.getText !== 'function') throw new Error('conditional R2 REST IO required');
   const allowed = ALLOWED_KEYS(id), originalPut = io.put.bind(io);
-  let source, sourceChanged = false, phase = 'input';
-  const summary = { id, expected_v: expectedV, dry_run: !!options.dryRun, source: null, phys: null, attempts: 0 };
+  let source, sourceChanged = false, phase = 'input', spRaceBlocked = false;
+  const summary = { id, expected_v: expectedV, dry_run: !!options.dryRun, source: null, phys: null, phys_sp: null, attempts: 0 };
   async function sourceCheck() {
     const latest = await readSource(io, id, expectedV, 3, expectedSha256);
     if (!source || latest.version !== source.version || latest.hash !== source.hash) { sourceChanged = true; throw Object.assign(new Error('source_changed'), { code: 'source_changed' }); }
   }
   io.put = async (key, body, etag) => {
     if (!allowed.has(key)) throw new Error(`write_key_forbidden: ${key}`);
+    if (key === `phys/user-sp/${id}.json` && spRaceBlocked) throw Object.assign(new Error('source_changed'), { code: 'source_changed' });
     if (phase === 'phys' && deps.loadPhysAssets && deps.loadPhysAssets.triggerRace) deps.loadPhysAssets.triggerRace();
     await sourceCheck();
     if (key === `phys/user/${id}.json` && phase !== 'phys') throw new Error('unexpected_phys_write');
+    if (key === `phys/user-sp/${id}.json` && phase !== 'phys-sp') throw new Error('unexpected_phys_sp_write');
     return originalPut(key, body, etag);
   };
   const runOne = async () => {
@@ -120,12 +131,40 @@ export async function runRefresh(options, deps = {}) {
         summary.phys = { status: 'failed', reason: error.reason || String(error.message || error), error_message: String(error.message || error).slice(0, 200), attempts: 1, puts: 0 };
       }
     }
+    const spVersions = configuredSpVersions(env);
+    if (!spVersions || !spVersions.q_version || !spVersions.time_axis_version) {
+      summary.phys_sp = { status: 'skipped', reason: 'versions_unset', gets: 0, puts: 0 };
+    } else {
+      try {
+        const manifestKey = env.SP_PHYS_ASSETS_MANIFEST_KEY;
+        if (!manifestKey) throw new Error('manifest_key_unset');
+        const manifestText = await io.getText(manifestKey);
+        if (manifestText == null) throw new Error('manifest_missing');
+        const manifest = JSON.parse(manifestText);
+        // Keep the legacy dump.sp snapshot when the RPC path could not refresh SP rows.
+        if (!Array.isArray(dump.sp)) throw new Error('preserved_sp_missing');
+        phase = 'phys-sp';
+        const result = await (deps.producePhysUser || producePhysUser)({ id, dump,
+          versions: { ...spVersions, model_version: 'phys-line-sp-v1', line_version: 'phys-line-sp-v1', mean_version: 'mean-os-pattern-span-sp-v1' },
+          manifest, io, playStyle: 'SP', loadAssets: deps.loadPhysAssets ? (v, m, client) => deps.loadPhysAssets(v, m, client) : (v, m, client) => loadPhysAssets({ versions: v, manifest: m, getText: async key => { const value = await client.read(key); return value == null ? null : typeof value === 'string' ? value : value.body; } }),
+          generatedAt: source.version, dryRun: !!options.dryRun });
+        summary.phys_sp = { status: result.status, reason: result.reason || null, source_revision: result.source_revision || null,
+          ...(result.error_message ? { error_message: result.error_message } : {}), attempts: 1,
+          puts: result.changed && result.status === 'ready' && !options.dryRun ? 1 : 0 };
+        if (result.status === 'failed' || result.status === 'conflict' || result.status === 'stale') throw Object.assign(new Error(result.error_message || result.reason || result.status), { phaseFailure: 'phys-sp', reason: result.reason || result.status });
+      } catch (error) {
+        if (error.code === 'source_changed') throw error;
+        if (error.phaseFailure === 'phys-sp') throw error;
+        summary.phys_sp = { status: 'failed', reason: error.reason || String(error.message || error), error_message: String(error.message || error).slice(0, 200), attempts: 1, puts: 0 };
+      }
+    }
     await sourceCheck();
   };
   for (let retry = 0; retry <= 2; retry++) {
     try { await runOne(); break; }
     catch (error) {
       if (error.code !== 'source_changed') { summary.failure = String(error.message || error); break; }
+      if (phase === 'phys-sp') spRaceBlocked = true;
       if (summary.phys?.status === 'failed') summary.phys = { ...summary.phys, status: 'source_changed', reason: 'source_changed' };
       summary.source = { ...(summary.source || {}), changed: true };
       if (retry === 2) { summary.failure = 'source_changed_retry_exhausted'; break; }
@@ -134,7 +173,7 @@ export async function runRefresh(options, deps = {}) {
   io.put = originalPut;
   if (summary.failure && !summary.source) throw new Error(summary.failure);
   if (summary.attempts >= 3 && summary.source?.changed) summary.failure = 'source_changed_retry_exhausted';
-  summary.ok = !summary.failure && !['failed', 'conflict', 'stale'].includes(summary.phys?.status);
+  summary.ok = !summary.failure && !['failed', 'conflict', 'stale'].includes(summary.phys?.status) && !['failed', 'conflict', 'stale'].includes(summary.phys_sp?.status);
   return summary;
 }
 
