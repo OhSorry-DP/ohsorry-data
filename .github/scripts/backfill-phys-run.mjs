@@ -11,10 +11,12 @@ export async function run(env = process.env, deps = {}) {
   const contracts = {
     'phys-line-v1': { q: 'q-samehand-2s-v1', timeAxis: 'ta-20261004' },
     'phys-line-v2': { q: 'q-samehand-2s-v1', timeAxis: 'ta-20261004' },
+    'phys-line-sp-v1': { q: 'q-samehand-2s-v1', timeAxis: 'ta-20261004' },   // SP evidence → phys/user-sp
   };
   if (!contracts[model]) throw new Error('MODEL_VERSION 형식 또는 계약 오류');
-  const q = model === 'phys-line-v2' ? 'q-samehand-2s-v1' : (env.Q_VERSION || contracts[model].q);
-  const timeAxis = model === 'phys-line-v2' ? 'ta-20261004' : (env.TIME_AXIS_VERSION || contracts[model].timeAxis);
+  const fixed = model === 'phys-line-v2' || model === 'phys-line-sp-v1';
+  const q = fixed ? 'q-samehand-2s-v1' : (env.Q_VERSION || contracts[model].q);
+  const timeAxis = fixed ? 'ta-20261004' : (env.TIME_AXIS_VERSION || contracts[model].timeAxis);
   if (![model, q, timeAxis].every(v => /^[A-Za-z0-9_-]+$/.test(v))) throw new Error('버전 형식 오류');
   const dryRun = env.DRY_RUN ?? 'true';
   if (!['true', 'false'].includes(dryRun)) throw new Error('dry_run 형식 오류');
