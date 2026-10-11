@@ -3,8 +3,10 @@ import { createHash } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const KEY = (id) => `phys/user/${encodeURIComponent(id)}.json`;
+const KEY_SP = (id) => `phys/user-sp/${encodeURIComponent(id)}.json`;
 const IMPLEMENTATION = 'phys-user-producer/5';
 const DIFFS = { 1: 'NORMAL', 2: 'HYPER', 3: 'ANOTHER', 4: 'LEGGENDARIA' };
+const SP_AXES = ['NOTES', 'CHORD', 'PEAK', 'CHARGE', 'SCRATCH', 'PHRASE', 'JACK', 'TRILL', 'RAND', 'STAIR_UP', 'STAIR_DN', 'K1', 'K2', 'K3', 'K4', 'K5', 'K6', 'K7', 'DOUBLE_STAIR'];
 
 export function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -41,10 +43,12 @@ function arrangeMapOf(dump) {
   return map;
 }
 
-function makeRows(id, dump, charts, counts) {
-  if (!Array.isArray(dump?.dp)) throw new TypeError('dump.dp 배열 필요');
+function makeRows(id, dump, charts, counts, playStyle = 'DP') {
+  const isSp = playStyle === 'SP';
+  const sourceRows = dump?.[isSp ? 'sp' : 'dp'];
+  if (!Array.isArray(sourceRows)) throw new TypeError(`dump.${isSp ? 'sp' : 'dp'} 배열 필요`);
   if (!(charts instanceof Map)) throw new TypeError('검증된 채보 Map 필요');
-  const songMap = songMapOf(dump), arrangeMap = arrangeMapOf(dump), best = new Map();
+  const songMap = songMapOf(dump), arrangeMap = isSp ? new Map() : arrangeMapOf(dump), best = new Map();
   // 정규화 곡명 키와 Textage ID를 구분하고 자산이 선언한 일대일 조인만 허용한다.
   const aliases = new Map();
   for (const chart of charts.values()) {
@@ -53,7 +57,7 @@ function makeRows(id, dump, charts, counts) {
     if (aliases.has(key) && aliases.get(key)?.chartKey !== chart.chartKey) aliases.set(key, null);
     else if (!aliases.has(key)) aliases.set(key, chart);
   }
-  for (const row of dump.dp) {
+  for (const row of sourceRows) {
     if (!row || !Number.isInteger(row.song_id) || !Number.isInteger(row.diff)) { counts.invalid_row++; continue; }
     const diff = DIFFS[row.diff];
     if (!diff) { counts.unsupported_diff++; continue; }
@@ -70,13 +74,13 @@ function makeRows(id, dump, charts, counts) {
     // persona-lib.chartsFromGridRows: numeric lamp passes through; non-numeric becomes 0.
     const lampNum = typeof row.lamp === 'number' ? row.lamp : 0;
     if (!Number.isInteger(lampNum) || lampNum < 1 || lampNum > 7) { counts.invalid_lamp++; continue; }
-    const arrange = arrangeMap.get(`${row.song_id}|${row.diff}`) ?? chart.arrange ?? chart.arrange_assumed ?? null;
+    const arrange = isSp ? 'OFF' : arrangeMap.get(`${row.song_id}|${row.diff}`) ?? chart.arrange ?? chart.arrange_assumed ?? null;
     const meanFeatures = Object.fromEntries(Object.entries(chart.features || {}).map(([axis, value]) => [axis,
       { meanNps: value?.meanNps ?? null, meanDuration: value?.meanDuration ?? null }]));
     const out = { userId: String(id), songId: String(chart.songId), chartKey, lampNum,
       notes: chart.notes, duration: chart.duration, features: chart.features,
       meanNps: chart.meanNps ?? chart.mean_nps ?? null, meanDuration: chart.meanDuration ?? chart.mean_duration ?? chart.duration ?? null, meanFeatures,
-      ...(arrange != null ? { arrange, arrange_assumed: arrange } : { arrangeAssumed: true, arrange_assumed: 'unknown' }),
+      ...(isSp ? { arrange, arrangeAssumed: true, arrange_assumed: 'OFF' } : arrange != null ? { arrange, arrange_assumed: arrange } : { arrangeAssumed: true, arrange_assumed: 'unknown' }),
       ...(chart.provenance ? { chartProvenance: chart.provenance } : {}),
       ...(chart.excludedHands ? { excludedHands: chart.excludedHands } : {}) };
     const previous = best.get(chartKey);
@@ -85,22 +89,22 @@ function makeRows(id, dump, charts, counts) {
   return [...best.values()].sort((a, b) => a.chartKey.localeCompare(b.chartKey));
 }
 
-function isReadyFor(previous, id, versions, revision) {
+function isReadyFor(previous, id, versions, revision, playStyle = 'DP') {
   const absolute = previous?.absolute;
   const modelVersion = versions?.model_version;
-  return previous?.schema_version === 'coach-skill-evidence/1' && previous?.iidx_id === id && previous?.play_style === 'DP' &&
+  return previous?.schema_version === 'coach-skill-evidence/1' && previous?.iidx_id === id && previous?.play_style === playStyle &&
     absolute?.status === 'ready' && absolute.source_revision === revision &&
     absolute.model_version === modelVersion && absolute.line_version === modelVersion &&
     absolute.mean_version === (versions.mean_version ?? (modelVersion === 'phys-line-v2' ? 'mean-os-pattern-span-v2' : 'mean-feature-span-v1')) &&
     ['q_version', 'time_axis_version'].every((k) => absolute[k] === versions[k]);
 }
 
-function staleRecord(previous, id, generatedAt) {
-  if (previous?.schema_version === 'coach-skill-evidence/1' && previous?.iidx_id === id && previous?.play_style === 'DP' &&
+function staleRecord(previous, id, generatedAt, playStyle = 'DP') {
+  if (previous?.schema_version === 'coach-skill-evidence/1' && previous?.iidx_id === id && previous?.play_style === playStyle &&
       previous.absolute && ['ready', 'stale'].includes(previous.absolute.status)) {
     return { ...previous, absolute: { ...previous.absolute, status: 'stale', reason: 'generation_failed', stale: true } };
   }
-  return { schema_version: 'coach-skill-evidence/1', iidx_id: id, play_style: 'DP',
+  return { schema_version: 'coach-skill-evidence/1', iidx_id: id, play_style: playStyle,
     absolute: { status: 'missing', reason: 'not_generated', purpose: 'clear', unit: 'notes/s',
       model_version: null, line_version: null, mean_version: null, q_version: null, time_axis_version: null, source_revision: null,
       generated_at: generatedAt, stale: false, axes: {} } };
@@ -122,11 +126,14 @@ async function loadAssets(versions, manifest, io) {
   } });
 }
 
-export async function producePhysUser({ id, dump, versions, manifest, io, computePhysLine, assets, loadAssets: loadAssetsFn, generatedAt = new Date().toISOString(), dryRun = false }) {
-  const key = KEY(String(id));
-  const counts = { input_dp: Array.isArray(dump?.dp) ? dump.dp.length : 0, included: 0, invalid_row: 0,
+export async function producePhysUser({ id, dump, versions, manifest, io, computePhysLine, assets, loadAssets: loadAssetsFn, generatedAt = new Date().toISOString(), dryRun = false, playStyle = 'DP' }) {
+  if (!['DP', 'SP'].includes(playStyle)) throw new TypeError('playStyle은 DP 또는 SP여야 합니다');
+  const isSp = playStyle === 'SP';
+  const key = (isSp ? KEY_SP : KEY)(String(id));
+  const counts = { [isSp ? 'input_sp' : 'input_dp']: Array.isArray(dump?.[isSp ? 'sp' : 'dp']) ? dump[isSp ? 'sp' : 'dp'].length : 0, included: 0, invalid_row: 0,
     unsupported_diff: 0, song_mapping_missing: 0, chart_missing: 0, invalid_lamp: 0 };
   if (!versionsReady(versions)) return { status: 'skipped', reason: 'versions_unset', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
+  if (isSp !== (versions.model_version === 'phys-line-sp-v1')) return { status: 'skipped', reason: 'model_style_mismatch', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
   if (manifest?.publishable !== true) return { status: 'skipped', reason: 'assets_unpublished', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
   const client = io || await defaultIO();
   let previousRead;
@@ -139,24 +146,30 @@ export async function producePhysUser({ id, dump, versions, manifest, io, comput
   try {
     const loaded = assets ?? await (loadAssetsFn || loadAssets)(versions, manifest, client);
     if (loaded?.status !== 'ready') throw new Error(loaded?.reason || 'assets_unavailable');
-    const rows = makeRows(String(id), dump, loaded.charts, counts);
+    const rows = makeRows(String(id), dump, loaded.charts, counts, playStyle);
     counts.included = rows.length;
     const modelHash = loaded.model.content_hash;
     const config = loaded.model.line_config ?? loaded.model;
+    if (isSp && (config.model_version !== 'phys-line-sp-v1' || config.line_version !== 'phys-line-sp-v1' || config.mean_version !== 'mean-os-pattern-span-sp-v1' || !config.units || SP_AXES.some(axis => config.units[axis] !== 'notes/s/side'))) throw new Error('SP line config/version mismatch');
     if (versions.model_version === 'phys-line-v2' && (config.model_version !== 'phys-line-v2' || config.line_version !== 'phys-line-v2' ||
         config.mean_version !== 'mean-os-pattern-span-v2' || !config.units)) throw new Error('line config/version mismatch');
     const source_revision = sha256({ rows, versions, assets: [...loaded.charts].filter(([chartKey]) => rows.some((r) => r.chartKey === chartKey))
       .map(([chartKey, chart]) => [chartKey, chart.content_hash]), modelHash, configHash: config.content_hash,
       line_version: config.line_version, mean_version: config.mean_version,
+      play_style: isSp ? 'SP' : undefined,
       implementation: config.model_version === 'phys-line-v1' ? 'phys-line-v1' : config.model_version, producer: config.model_version === 'phys-line-v1' ? 'phys-user-producer/4' : IMPLEMENTATION });
-    if (isReadyFor(previous, String(id), versions, source_revision)) return { status: 'ready', reason: null, key, source_revision,
+    if (isReadyFor(previous, String(id), versions, source_revision, playStyle)) return { status: 'ready', reason: null, key, source_revision,
       generated_at: previous.absolute.generated_at, changed: false, counts };
     if (dryRun) return { status: 'planned', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };
     const compute = computePhysLine || require('./vendor/physLine.js').computePhysLine;
     // 계산 설정은 모델 자산이 아니라 physLine 정본 설정을 쓴다(v1 은 기본값 그대로).
-    const result = config.model_version === 'phys-line-v2' ? compute({ rows, config: require('./vendor/physLine.js').CONFIG_V2 }) : compute({ rows });
+    const vendor = require('./vendor/physLine.js');
+    const result = config.model_version === 'phys-line-v2' ? compute({ rows, config: vendor.CONFIG_V2 }) : isSp ? compute({ rows, config: vendor.CONFIG_SP }) : compute({ rows });
     // 계산값에 리더 계약의 단위·배치 가정·검증된 자산 출처를 붙인다.
-    const axes = Object.fromEntries(Object.entries(result.axes ?? {}).map(([axis, value]) => [axis, config.model_version === 'phys-line-v2' ? {
+    const axes = Object.fromEntries(Object.entries(result.axes ?? {}).map(([axis, value]) => [axis, isSp ? {
+      ...value, unit: 'notes/s/side', arrange_assumed: 'OFF', arrangeAssumed: true,
+      provenance: value.provenance ?? { source: 'phys-assets', model_hash: modelHash, source_revision },
+    } : config.model_version === 'phys-line-v2' ? {
       ...value,
       unit: config.units?.[axis],
       arrange_assumed: value.arrange_assumed ?? (rows.length && rows.every(row => row.arrange_assumed === rows[0].arrange_assumed)
@@ -174,14 +187,15 @@ export async function producePhysUser({ id, dump, versions, manifest, io, comput
       model_version: config.model_version,
       line_version: config.line_version, mean_version: config.mean_version,
       q_version: config.q_version, time_axis_version: config.time_axis_version };
-    const record = { schema_version: 'coach-skill-evidence/1', iidx_id: String(id), play_style: 'DP', absolute };
+    if (isSp) { absolute.unit = 'notes/s/side'; absolute.axes = Object.fromEntries(SP_AXES.map(axis => [axis, axes[axis] ?? { line: null, max_by_lamp: { easy: null, hard: null, exhard: null, fc: null }, unit: 'notes/s/side', arrange_assumed: 'OFF', arrangeAssumed: true }])); }
+    const record = { schema_version: 'coach-skill-evidence/1', iidx_id: String(id), play_style: playStyle, absolute };
     await client.put(key, JSON.stringify(record), etag);
     return { status: 'ready', reason: null, key, source_revision, generated_at: generatedAt, changed: true, counts };
   } catch (error) {
     const error_message = String(error?.message || error).slice(0, 200);
     if (error?.status === 412 || /HTTP 412/.test(String(error?.message))) return { status: 'conflict', reason: 'precondition_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
     if (dryRun) return { status: 'failed', reason: 'generation_failed', error_message, key, source_revision: null, generated_at: generatedAt, changed: false, counts };
-    const stale = staleRecord(previous, String(id), generatedAt);
+    const stale = staleRecord(previous, String(id), generatedAt, playStyle);
     try { await client.put(key, JSON.stringify(stale), etag); }
     catch (writeError) {
       if (writeError?.status === 412 || /HTTP 412/.test(String(writeError?.message))) return { status: 'conflict', reason: 'precondition_failed', key, source_revision: null, generated_at: generatedAt, changed: false, counts };
