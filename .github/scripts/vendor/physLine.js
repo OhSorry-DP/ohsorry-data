@@ -2,20 +2,25 @@
 
 const AXES = ['STAIR_UP', 'STAIR_DN', 'DOUBLE_STAIR', 'KEIMA', 'SPIRAL_UP', 'SPIRAL_DN', 'JUMP_WIDE', 'HSTAIR_SYM', 'HSTAIR_ASYM', 'CN'];
 const AXES_V2 = ['NOTES', 'CHORD', 'PEAK', 'CHARGE', 'SCRATCH', 'PHRASE', 'JACK', 'TRILL', 'RAND', 'STAIR_UP_L', 'STAIR_UP_R', 'STAIR_DN_L', 'STAIR_DN_R', 'K1_L', 'K1_R', 'K2_L', 'K2_R', 'K3_L', 'K3_R', 'K4_L', 'K4_R', 'K5_L', 'K5_R', 'K6_L', 'K6_R', 'K7_L', 'K7_R', 'DOUBLE_STAIR_L', 'DOUBLE_STAIR_R', 'KEIMA_L', 'KEIMA_R', 'HSTAIR_ONEHAND', 'HSTAIR_SYNC', 'HSTAIR_SAMESHAPE', 'HSTAIR_DIFFSHAPE'];
+const AXES_SP = ['NOTES', 'CHORD', 'PEAK', 'CHARGE', 'SCRATCH', 'PHRASE', 'JACK', 'TRILL', 'RAND', 'STAIR_UP', 'STAIR_DN', 'K1', 'K2', 'K3', 'K4', 'K5', 'K6', 'K7', 'DOUBLE_STAIR'];
 const UNIT_V2 = Object.freeze(Object.fromEntries(AXES_V2.map(axis => [axis, ['HSTAIR_SYNC', 'HSTAIR_SAMESHAPE', 'HSTAIR_DIFFSHAPE'].includes(axis) ? 'notes/s/both-hands' : 'notes/s/hand'])));
+const UNIT_SP = Object.freeze(Object.fromEntries(AXES_SP.map(axis => [axis, 'notes/s/side'])));
 const LAMP_WEIGHT = Object.freeze({ 1: 0, 2: 0.66, 3: 0.77, 4: 0.77, 5: 0.88, 6: 0.95, 7: 1 });
 const CONFIG = Object.freeze({ schema_version: 'phys-line-config/1', model_version: 'phys-line-v1', line_version: 'phys-line-v1', mean_version: 'mean-feature-span-v1', q_version: 'q-samehand-2s-v1', time_axis_version: 'ta-20261004', binWidth: 1.0, axes: AXES, lampWeight: LAMP_WEIGHT, section: 'Math.round(meanNps / binWidth) * binWidth', dbr: 'computeDbrLines' });
 const CONFIG_V2 = Object.freeze({ schema_version: 'phys-line-config/1', model_version: 'phys-line-v2', line_version: 'phys-line-v2', mean_version: 'mean-os-pattern-span-v2', q_version: 'q-samehand-2s-v1', time_axis_version: 'ta-20261004', binWidth: 1, axes: AXES_V2, units: UNIT_V2, lampWeight: LAMP_WEIGHT, dbr: Object.freeze({ groupMinimum: 3, clearMinimum: 6, target: 0.5 }) });
+const CONFIG_SP = Object.freeze({ schema_version: 'phys-line-config/1', model_version: 'phys-line-sp-v1', line_version: 'phys-line-sp-v1', mean_version: 'mean-os-pattern-span-sp-v1', q_version: 'q-samehand-2s-v1', time_axis_version: 'ta-20261004', binWidth: 1, axes: AXES_SP, units: UNIT_SP, lampWeight: LAMP_WEIGHT, dbr: Object.freeze({ groupMinimum: 3, clearMinimum: 6, target: 0.5 }) });
 const BASIS = 'dbr_weighted_clear×mean_nps';
 
 function validateConfig(config = CONFIG) {
   const v2 = config?.model_version === 'phys-line-v2';
-  const expected = v2 ? CONFIG_V2 : CONFIG;
-  const axes = v2 ? AXES_V2 : AXES;
-  const validDbr = v2
+  const sp = config?.model_version === 'phys-line-sp-v1';
+  const expected = v2 ? CONFIG_V2 : sp ? CONFIG_SP : CONFIG;
+  const axes = v2 ? AXES_V2 : sp ? AXES_SP : AXES;
+  const modeled = v2 || sp;
+  const validDbr = modeled
     ? config.dbr?.groupMinimum === 3 && config.dbr?.clearMinimum === 6 && config.dbr?.target === 0.5 && Object.keys(config.dbr).length === 3
     : config.section === CONFIG.section && config.dbr === CONFIG.dbr;
-  if (!config || config.schema_version !== expected.schema_version || config.model_version !== expected.model_version || config.line_version !== expected.line_version || config.mean_version !== expected.mean_version || config.q_version !== expected.q_version || config.time_axis_version !== expected.time_axis_version || config.binWidth !== 1 || !Array.isArray(config.axes) || config.axes.length !== axes.length || config.axes.some((axis, i) => axis !== axes[i]) || Object.keys(config.lampWeight || {}).length !== 7 || Object.keys(LAMP_WEIGHT).some(k => config.lampWeight[k] !== LAMP_WEIGHT[k]) || !validDbr || (v2 && (Object.keys(config.units || {}).length !== AXES_V2.length || AXES_V2.some(axis => config.units[axis] !== UNIT_V2[axis])))) throw new TypeError('물리 실력선 설정 오류');
+  if (!config || config.schema_version !== expected.schema_version || config.model_version !== expected.model_version || config.line_version !== expected.line_version || config.mean_version !== expected.mean_version || config.q_version !== expected.q_version || config.time_axis_version !== expected.time_axis_version || config.binWidth !== 1 || !Array.isArray(config.axes) || config.axes.length !== axes.length || config.axes.some((axis, i) => axis !== axes[i]) || Object.keys(config.lampWeight || {}).length !== 7 || Object.keys(LAMP_WEIGHT).some(k => config.lampWeight[k] !== LAMP_WEIGHT[k]) || !validDbr || (modeled && (Object.keys(config.units || {}).length !== axes.length || axes.some(axis => config.units[axis] !== (sp ? UNIT_SP[axis] : UNIT_V2[axis]))))) throw new TypeError('물리 실력선 설정 오류');
   return config;
 }
 
@@ -96,9 +101,9 @@ function computePhysLineV1(selected, config) {
   return { model_version: 'phys-line-v1', line_version: 'phys-line-v1', mean_version: 'mean-feature-span-v1', q_version: 'q-samehand-2s-v1', time_axis_version: 'ta-20261004', axes };
 }
 
-function computePhysLineV2(selected) {
+function computePhysLineV2(selected, config = CONFIG_V2, axesOrder = AXES_V2, unitMap = UNIT_V2) {
   const axes = {};
-  for (const axis of AXES_V2) {
+  for (const axis of axesOrder) {
     const valid = selected.filter(row => Number.isFinite(row.features?.[axis]?.meanNps) && row.lampNum >= 1);
     const pairs = valid.map(row => ({ level: Math.round(row.features[axis].meanNps), weight: LAMP_WEIGHT[row.lampNum], cleared: row.lampNum >= 2 }));
     const cleared = pairs.filter(p => p.cleared).length;
@@ -111,9 +116,9 @@ function computePhysLineV2(selected) {
       const maximum = ranked.find(row => lamps.includes(row.lampNum));
       return [lamp, maximum ? { mean_nps: maximum.features[axis].meanNps, chartKey: maximum.chartKey, lamp: maximum.lampNum } : null];
     }));
-    axes[axis] = { line, max_by_lamp, basis: BASIS, n_charts: valid.length, n_failed: valid.filter(row => row.lampNum === 1).length, top_charts: top, reason, unit: UNIT_V2[axis] };
+    axes[axis] = { line, max_by_lamp, basis: BASIS, n_charts: valid.length, n_failed: valid.filter(row => row.lampNum === 1).length, top_charts: top, reason, unit: unitMap[axis] };
   }
-  return { model_version: 'phys-line-v2', line_version: 'phys-line-v2', mean_version: 'mean-os-pattern-span-v2', q_version: 'q-samehand-2s-v1', time_axis_version: 'ta-20261004', axes };
+  return { model_version: config.model_version, line_version: config.line_version, mean_version: config.mean_version, q_version: config.q_version, time_axis_version: config.time_axis_version, axes };
 }
 
 function computePhysLine({ rows, config = CONFIG } = {}) {
@@ -126,9 +131,11 @@ function computePhysLine({ rows, config = CONFIG } = {}) {
     if (!prior || row.lampNum > prior.lampNum) best.set(row.chartKey, row);
   }
   const selected = [...best.values()];
-  return config.model_version === 'phys-line-v2' ? computePhysLineV2(selected) : computePhysLineV1(selected, config);
+  if (config.model_version === 'phys-line-v2') return computePhysLineV2(selected, CONFIG_V2, AXES_V2, UNIT_V2);
+  if (config.model_version === 'phys-line-sp-v1') return computePhysLineV2(selected, CONFIG_SP, AXES_SP, UNIT_SP);
+  return computePhysLineV1(selected, config);
 }
 
-const api = { AXES: Object.freeze(AXES), AXES_V2: Object.freeze(AXES_V2), UNIT_V2, CONFIG, CONFIG_V2, LAMP_WEIGHT, validateConfig, computeDbrForPairs, computePhysLine };
+const api = { AXES: Object.freeze(AXES), AXES_V2: Object.freeze(AXES_V2), AXES_SP: Object.freeze(AXES_SP), UNIT_V2, UNIT_SP, CONFIG, CONFIG_V2, CONFIG_SP, LAMP_WEIGHT, validateConfig, computeDbrForPairs, computePhysLine };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else globalThis.physLine = api;
