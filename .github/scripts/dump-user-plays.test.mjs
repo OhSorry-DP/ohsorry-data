@@ -1,0 +1,79 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+const plays = [
+  { columns: ['오래됨', '한글', '"quoted"', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18'] },
+  { columns: ['new', '새판', '따옴표 "유지"', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36'] },
+];
+const baseUser = {
+  iidx_id: 'tester', dj_name: '한글 이름', star: 1, r_star: 2, ereter_star: 3,
+  sp_rank: 4, dp_rank: 5, date: '2026-10-14', native_star: 6, sp_cpi: 7, sp_star: 8,
+};
+
+process.env.SUPABASE_URL = 'https://supabase.invalid';
+process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-key';
+process.env.CLOUDFLARE_R2_TOKEN = 'test-r2-token';
+
+const { dumpUser } = await import('./dump-user.mjs');
+
+async function run(user) {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const target = String(url);
+    calls.push({ target, options });
+    if (target.includes('/rest/v1/users?')) return response([user]);
+    if (target.includes('/rest/v1/user_radars?')) return response([]);
+    if (target.includes('/rest/v1/user_ohsorry_radars?')) return response([]);
+    if (target.includes('/rest/v1/rpc/make_grid_data')) return response([]);
+    if (target.includes('/rest/v1/rpc/make_update_history')) return response([]);
+    if (target.includes('/rest/v1/chart_arrange?')) return response([], { 'content-range': '*/0' });
+    if (target.includes('/r2/buckets/ohsorry-data/objects/user/tester.json')) {
+      return textResponse(JSON.stringify({ user: { ...baseUser, plays } }));
+    }
+    throw new Error(`Unexpected network request: ${target}`);
+  };
+  try {
+    const result = await dumpUser('tester', { textageMeta: {} }, { deferPersona: true });
+    return { result, calls };
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+function response(value, headers = {}) {
+  return { ok: true, json: async () => value, headers: { get: (name) => headers[name.toLowerCase()] ?? headers[name] ?? null } };
+}
+
+function textResponse(value, headers = {}) {
+  return { ok: true, status: 200, text: async () => value, headers: { get: (name) => headers[name.toLowerCase()] ?? headers[name] ?? null } };
+}
+
+test('dumpUser selects and passes plays unchanged in user object', async () => {
+  const { result, calls } = await run({ ...baseUser, plays });
+  assert.deepEqual(result.user, { ...baseUser, plays });
+  assert.deepEqual(result.user.plays, plays);
+  assert.equal(result.user.plays[0].columns.length, 18);
+  assert.equal(result.user.plays[1].columns.length, 18);
+  assert.equal(result.user.plays[0].columns[0], '오래됨');
+  assert.equal(result.user.plays[0].columns[1], '한글');
+  assert.equal(result.user.plays[0].columns[2], '"quoted"');
+  assert.equal(result.user.plays[1].columns[0], 'new');
+  assert.equal(result.user.plays[1].columns[1], '새판');
+  assert.equal(result.user.plays[1].columns[2], '따옴표 "유지"');
+  const usersRequest = calls.find(({ target }) => target.includes('/rest/v1/users?'));
+  assert.ok(usersRequest, 'users REST request was made');
+  assert.match(usersRequest.target, /select=[^&]*sp_star,plays(?:&|$)/);
+  assert.equal(calls.some(({ options }) => options.method === 'PUT'), false);
+});
+
+test('dumpUser preserves null plays', async () => {
+  const { result } = await run({ ...baseUser, plays: null });
+  assert.deepEqual(result.user, { ...baseUser, plays: null });
+});
+
+test('dumpUser preserves absent plays as absent', async () => {
+  const { result } = await run({ ...baseUser });
+  assert.deepEqual(result.user, baseUser);
+  assert.equal(Object.hasOwn(result.user, 'plays'), false);
+});
