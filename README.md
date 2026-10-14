@@ -124,6 +124,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-15 — user 덤프에 plays 포함
+
+- `dump-user.mjs` 의 users 명시 select 에 `plays` 추가 — 기존 `user/{id}.json` 의 `user.plays` 로 INF 기록기 최근 최대 100판(원본 19열 문자열)이 실린다. 새 R2 키·워크플로 변경 없음.
+- 🔴 Admin `sql/31`(users.plays 컬럼) 운영 적용 뒤에 반영해야 한다 — 컬럼이 없으면 덤프 select 가 실패한다.
+
 ### 2026-10-12 — SP 물리 실력선(phys-line-sp-v1) 생산·백필 경로
 
 - `phys-lib`: SP 유저 evidence 를 `phys/user-sp/{ID}.json` 에 생산(dump.sp, 19축·notes/s/side, SP 기록과 정배 자산 비교 가정). DP `phys/user/` 경로 불변.
