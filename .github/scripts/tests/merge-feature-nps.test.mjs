@@ -21,6 +21,33 @@ test('preserves both NPS values and applies current star/r_star including null',
   assert.equal(list[0].r_star, null);
 });
 
+test('mergeInto passes the latest SP tuple including zero and explicit nulls', () => {
+  const tuple = { sp_r_star:0, sp_r_star_model_id:'new-model', sp_r_star_formula_version:'v3' };
+  const { list } = mergeInto([{ iidx_id:'A', sp_r_star:9, sp_r_star_model_id:'old', sp_r_star_formula_version:'v1' }], incoming(tuple));
+  assert.deepEqual([list[0].sp_r_star, list[0].sp_r_star_model_id, list[0].sp_r_star_formula_version], [0, 'new-model', 'v3']);
+  const cleared = mergeInto([{ iidx_id:'A', sp_r_star:9, sp_r_star_model_id:'old', sp_r_star_formula_version:'v1' }], incoming({ sp_r_star:null, sp_r_star_model_id:null, sp_r_star_formula_version:null }));
+  assert.deepEqual([cleared.list[0].sp_r_star, cleared.list[0].sp_r_star_model_id, cleared.list[0].sp_r_star_formula_version], [null, null, null]);
+});
+
+test('CLI dump to makeEntry path carries SP tuple and ignores incoming NPS', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'merge-sp-tuple-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'users-list.json'), JSON.stringify([{ iidx_id:'A', dp_feature_nps:{ NOTES:7 }, sp_feature_nps:{ NOTES:8 } }]));
+    fs.writeFileSync(path.join(dir, 'incoming.json'), JSON.stringify({ user: {
+      iidx_id:'A', dj_name:'A', star:2, r_star:3, date:'now', sp_r_star:0,
+      sp_r_star_model_id:'model-2', sp_r_star_formula_version:'v2',
+      dp_feature_nps:{ ignored:true }, sp_feature_nps:{ ignored:true },
+    }, osPattern:[] }));
+    const script = new URL('../merge-user-into-list.mjs', import.meta.url);
+    const result = spawnSync(process.execPath, [decodeURIComponent(script.pathname.slice(1)), 'incoming.json', '--no-upload'], { cwd:dir, encoding:'utf8' });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const row = JSON.parse(fs.readFileSync(path.join(dir, 'users-list.json'), 'utf8'))[0];
+    assert.deepEqual([row.sp_r_star, row.sp_r_star_model_id, row.sp_r_star_formula_version], [0, 'model-2', 'v2']);
+    assert.deepEqual(row.dp_feature_nps, { NOTES:7 });
+    assert.deepEqual(row.sp_feature_nps, { NOTES:8 });
+  } finally { fs.rmSync(dir, { recursive:true, force:true }); }
+});
+
 test('preserves explicitly present null and initializes only absent NPS fields', () => {
   const { list } = mergeInto([{ iidx_id: 'A', dp_feature_nps: null }], incoming());
   assert.equal(list[0].dp_feature_nps, null);

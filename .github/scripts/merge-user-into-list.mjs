@@ -54,7 +54,11 @@ const pick = (ps) => {
 };
 return {
   iidx_id: user.iidx_id, dj_name: user.dj_name, star: user.star, r_star: user.r_star, ereter_star: user.ereter_star,
-  sp_rank: user.sp_rank, dp_rank: user.dp_rank, sp_cpi: user.sp_cpi, sp_star: user.sp_star, date: user.date,
+  sp_rank: user.sp_rank, dp_rank: user.dp_rank, sp_cpi: user.sp_cpi, sp_star: user.sp_star,
+  sp_r_star: user.sp_r_star ?? null,
+  sp_r_star_model_id: user.sp_r_star_model_id ?? null,
+  sp_r_star_formula_version: user.sp_r_star_formula_version ?? null,
+  date: user.date,
   os_pattern_score: pick(1),
   sp_pattern_score: pick(0),
 };

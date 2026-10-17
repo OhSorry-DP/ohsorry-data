@@ -9,7 +9,7 @@ const validId = (id) => typeof id === 'string' && /^[A-Za-z0-9]+$/.test(id);
 const digest = (etag) => String(etag || '').replace(/^W\//i, '').replace(/"/g, '').toLowerCase();
 
 // 요약 u — 곡 셸(toGridProfile)·검색창이 읽는 user 필드만 원문 그대로. 빠지면 곡 상세 분포 패널의 본인 위치(r_star) 등이 조용히 사라진다.
-const SUMMARY_USER_FIELDS = ['dj_name', 'star', 'r_star', 'sp_star'];
+const SUMMARY_USER_FIELDS = ['dj_name', 'star', 'r_star', 'sp_star', 'sp_r_star', 'sp_r_star_model_id', 'sp_r_star_formula_version'];
 const pickSummaryUser = (user) => Object.fromEntries(SUMMARY_USER_FIELDS.filter((k) => k in user).map((k) => [k, user[k]]));
 
 export function buildUserSlice(id, data, hist = []) {

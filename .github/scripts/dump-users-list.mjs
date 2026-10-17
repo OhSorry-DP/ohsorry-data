@@ -36,7 +36,7 @@ export async function fetchAllUsers({ fetchImpl = fetch, supabaseUrl = process.e
   let offset = 0;
   const headers = { apikey: serviceKey, Authorization: 'Bearer ' + serviceKey };
   while (true) {
-    const url = supabaseUrl + '/rest/v1/users?select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,sp_cpi,sp_star,date,user_ohsorry_radars(play_style,notes,chord,peak,charge,scratch,soflan,phrase,jack,trill,rand)' + `&order=star.desc.nullslast&limit=${pageSize}&offset=${offset}`;
+    const url = supabaseUrl + '/rest/v1/users?select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,sp_cpi,sp_star,sp_r_star,sp_r_star_model_id,sp_r_star_formula_version,date,user_ohsorry_radars(play_style,notes,chord,peak,charge,scratch,soflan,phrase,jack,trill,rand)' + `&order=star.desc.nullslast&limit=${pageSize}&offset=${offset}`;
     const res = await fetchImpl(url, { headers });
     if (!res.ok) throw new Error(`users 목록 HTTP ${res.status}`);
     const rows = await res.json();

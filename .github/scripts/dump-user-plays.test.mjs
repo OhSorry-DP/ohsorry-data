@@ -8,6 +8,7 @@ const plays = [
 const baseUser = {
   iidx_id: 'tester', dj_name: '한글 이름', star: 1, r_star: 2, ereter_star: 3,
   sp_rank: 4, dp_rank: 5, date: '2026-10-14', native_star: 6, sp_cpi: 7, sp_star: 8,
+  sp_r_star: 12, sp_r_star_model_id: 'model-sp', sp_r_star_formula_version: 'sp-v1',
 };
 
 process.env.SUPABASE_URL = 'https://supabase.invalid';
@@ -63,7 +64,7 @@ test('dumpUser selects and passes plays unchanged in user object', async () => {
   assert.equal(result.user.plays[1].columns[2], '따옴표 "유지"');
   const usersRequest = calls.find(({ target }) => target.includes('/rest/v1/users?'));
   assert.ok(usersRequest, 'users REST request was made');
-  assert.match(usersRequest.target, /select=[^&]*sp_star,plays(?:&|$)/);
+  assert.match(usersRequest.target, /select=[^&]*sp_star,sp_r_star,sp_r_star_model_id,sp_r_star_formula_version,plays(?:&|$)/);
   assert.equal(calls.some(({ options }) => options.method === 'PUT'), false);
 });
 
