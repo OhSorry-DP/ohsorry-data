@@ -238,8 +238,8 @@ export function conditionalR2Client({ account, token, fetchImpl = fetch, request
 // client above remains the default for every existing caller.
 export function s3R2Client(options = {}) {
   const account = options.account || ACCOUNT;
-  const accessKeyId = options.accessKeyId ?? process.env.R2_ACCESS_KEY_ID;
-  const secretAccessKey = options.secretAccessKey ?? process.env.R2_SECRET_ACCESS_KEY;
+  const accessKeyId = options.accessKeyId ?? process.env.R2_ACCESS_KEY_ID ?? process.env.CLOUDFLARE_R2_ACCESS_KEY_ID;
+  const secretAccessKey = options.secretAccessKey ?? process.env.R2_SECRET_ACCESS_KEY ?? process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY;
   if (!accessKeyId || !secretAccessKey) throw new Error('R2 S3 access key ID / secret access key 없음');
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const now = options.now || Date.now;
