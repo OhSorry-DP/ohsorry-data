@@ -59,6 +59,8 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
         # $BUILD_ARGS 는 의도적으로 unquoted — 빈 값이면 인자 없이(전체), '--songs' 면 songs 전용.
         run: node .github/scripts/dump-users-list.mjs $BUILD_ARGS
 
