@@ -234,6 +234,169 @@ export function conditionalR2Client({ account, token, fetchImpl = fetch, request
   };
 }
 
+// Explicit S3-compatible client for operations that need S3 semantics. The REST
+// client above remains the default for every existing caller.
+export function s3R2Client(options = {}) {
+  const account = options.account || ACCOUNT;
+  const accessKeyId = options.accessKeyId ?? process.env.R2_ACCESS_KEY_ID;
+  const secretAccessKey = options.secretAccessKey ?? process.env.R2_SECRET_ACCESS_KEY;
+  if (!accessKeyId || !secretAccessKey) throw new Error('R2 S3 access key ID / secret access key 없음');
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const now = options.now || Date.now;
+  const sleep = options.sleep || ((ms) => new Promise(resolve => setTimeout(resolve, ms)));
+  const retries = options.retries ?? 4;
+  const log = options.log || (() => {});
+  if (typeof fetchImpl !== 'function') throw new Error('R2 S3 fetch 구현 없음');
+  const endpoint = `https://${account}.r2.cloudflarestorage.com/${BUCKET}`;
+  const gate = createRequestGate({ intervalMs: 0, recheckDefer: true, now, sleep });
+  const stats = { requests: 0, throttled: 0, retries: 0 };
+  const hex = (bytes) => Buffer.from(bytes).toString('hex');
+  const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+  const hmac = (key, value) => crypto.createHmac('sha256', key).update(value, 'utf8').digest();
+  const rfc3986 = (value) => encodeURIComponent(value).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  const canonicalPath = (pathname) => pathname.split('/').map((part) => rfc3986(decodeURIComponent(part))).join('/');
+  const canonicalQuery = (url) => [...url.searchParams.entries()]
+    .map(([key, value]) => [rfc3986(key), rfc3986(value)])
+    .sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)
+    .map(([key, value]) => `${key}=${value}`).join('&');
+  const asBytes = (body) => body == null ? Buffer.alloc(0)
+    : Buffer.isBuffer(body) ? body
+      : body instanceof ArrayBuffer ? Buffer.from(body)
+        : ArrayBuffer.isView(body) ? Buffer.from(body.buffer, body.byteOffset, body.byteLength)
+          : typeof body === 'string' ? Buffer.from(body, 'utf8') : Buffer.from(body);
+
+  async function signedRequest(input, init = {}) {
+    const url = new URL(input, endpoint);
+    const method = String(init.method || 'GET').toUpperCase();
+    const body = asBytes(init.body);
+    const payloadHash = sha256(body);
+    const stamp = new Date(now()).toISOString().replace(/[:-]|\.\d{3}/g, '');
+    const date = stamp.slice(0, 8);
+    const headers = new Headers(init.headers || {});
+    headers.set('host', url.host);
+    headers.set('x-amz-date', stamp);
+    headers.set('x-amz-content-sha256', payloadHash);
+    if (method === 'GET') headers.set('accept-encoding', 'identity');
+    const signedNames = [...headers.keys()].map((name) => name.toLowerCase()).sort();
+    const canonicalHeaders = signedNames.map((name) => `${name}:${headers.get(name).trim().replace(/\s+/g, ' ')}\n`).join('');
+    const signedHeaders = signedNames.join(';');
+    const canonicalRequest = [method, canonicalPath(url.pathname), canonicalQuery(url), canonicalHeaders, signedHeaders, payloadHash].join('\n');
+    const scope = `${date}/auto/s3/aws4_request`;
+    const stringToSign = `AWS4-HMAC-SHA256\n${stamp}\n${scope}\n${sha256(Buffer.from(canonicalRequest, 'utf8'))}`;
+    const kDate = hmac(Buffer.from(`AWS4${secretAccessKey}`, 'utf8'), date);
+    const kRegion = hmac(kDate, 'auto');
+    const kService = hmac(kRegion, 's3');
+    const kSigning = hmac(kService, 'aws4_request');
+    const signature = hex(crypto.createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest());
+    headers.set('authorization', `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`);
+    const requestInit = { ...init, method, headers, signal: AbortSignal.timeout(60_000) };
+    if (init.body !== undefined && init.body !== null) requestInit.body = body;
+    return fetchImpl(url, requestInit);
+  }
+
+  async function send(url, init = {}) {
+    for (let attempt = 0; ; attempt++) {
+      stats.requests++;
+      let response;
+      try {
+        response = await gate.run(() => signedRequest(url, init));
+        if (response.status === 429) stats.throttled++;
+        if (response.status !== 429 && response.status < 500) return response;
+      } catch (error) {
+        if (attempt >= retries) throw error;
+        const waitMs = Math.min(30_000, 1000 * 2 ** attempt);
+        stats.retries++;
+        log({ type: 'retry', attempt: attempt + 1, waitMs, error });
+        gate.defer(waitMs);
+        continue;
+      }
+      if (response.status >= 500) {
+        if (attempt >= retries) return response;
+        const waitMs = Math.min(30_000, 1000 * 2 ** attempt);
+        stats.retries++;
+        log({ type: 'retry', attempt: attempt + 1, waitMs, status: response.status });
+        gate.defer(waitMs);
+        try { await response.arrayBuffer(); } catch { /* ignored */ }
+        continue;
+      }
+      let waitMs;
+      if (response.status === 429) {
+        const raw = response.headers.get('retry-after');
+        const parsed = raw === null ? NaN : (/^\d+(\.\d+)?$/.test(raw) ? Number(raw) * 1000 : Date.parse(raw) - now());
+        waitMs = Number.isFinite(parsed) && parsed >= 0 ? parsed : Math.min(300_000, 1000 * 2 ** stats.throttled);
+      }
+      if (attempt >= retries) return response;
+      stats.retries++;
+      log({ type: response.status === 429 ? 'throttled' : 'retry', attempt: attempt + 1, waitMs, status: response.status });
+      gate.defer(waitMs);
+      // Release this request's response resources before retrying.
+      try { await response.arrayBuffer(); } catch { /* ignored */ }
+    }
+  }
+
+  function request(key, init = {}) {
+    const keyPath = String(key).replace(/^\//, '').split('/').map(rfc3986).join('/');
+    return send(`${endpoint}/${keyPath}`, init);
+  }
+
+  function requestQuery(query, init = {}) {
+    return send(`${endpoint}?${query}`, init);
+  }
+
+  const decodeXml = (value) => value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (all, entity) => {
+    const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+    if (entity[0] !== '#') return named[entity.toLowerCase()];
+    const code = entity[1].toLowerCase() === 'x' ? parseInt(entity.slice(2), 16) : Number(entity.slice(1));
+    if (!Number.isInteger(code) || code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) throw new Error('R2 S3 LIST 잘못된 XML entity');
+    return String.fromCodePoint(code);
+  });
+  const xmlTag = (xml, name) => {
+    const re = new RegExp(`<(?:(?:[\\w.-]+):)?${name}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/(?:(?:[\\w.-]+):)?${name}\\s*>`, 'i');
+    const match = re.exec(xml);
+    return match ? decodeXml(match[1].trim()) : null;
+  };
+  function parseListXml(xml, prefix) {
+    if (typeof xml !== 'string' || !/^\s*(?:<\?xml[^>]*>\s*)?<(?:(?:[\w.-]+):)?ListBucketResult(?:\s[^>]*)?(?:xmlns(?::[\w.-]+)?="[^"]*")?\s*>[\s\S]*<\/(?:(?:[\w.-]+):)?ListBucketResult\s*>\s*$/i.test(xml)) {
+      throw new Error('R2 S3 LIST 잘못된 XML 응답');
+    }
+    const contents = [];
+    const re = /<(?:(?:[\w.-]+):)?Contents(?:\s[^>]*)?>([\s\S]*?)<\/(?:(?:[\w.-]+):)?Contents\s*>/gi;
+    for (const match of xml.matchAll(re)) {
+      const key = xmlTag(match[1], 'Key');
+      const etag = xmlTag(match[1], 'ETag');
+      if (key === null || etag === null || !key.startsWith(prefix)) throw new Error('R2 S3 LIST 잘못된 객체 항목/prefix');
+      contents.push([key, etag]);
+    }
+    const truncatedValue = xmlTag(xml, 'IsTruncated');
+    if (truncatedValue !== 'true' && truncatedValue !== 'false') throw new Error('R2 S3 LIST 잘못된 IsTruncated');
+    const token = xmlTag(xml, 'NextContinuationToken');
+    if (truncatedValue === 'true' && !token) throw new Error('R2 S3 LIST 잘린 페이지 continuation token 없음');
+    return { contents, truncated: truncatedValue === 'true', token };
+  }
+
+  async function list() {
+    const prefix = 'data/song-features-';
+    const result = new Map();
+    let token = null;
+    const seen = new Set();
+    do {
+      const query = new URLSearchParams([['list-type', '2'], ['max-keys', '1000'], ['prefix', prefix]]);
+      if (token !== null) query.set('continuation-token', token);
+      const response = await requestQuery(query.toString(), { method: 'GET' });
+      if (!response.ok) throw new Error(`R2 S3 LIST HTTP ${response.status}`);
+      const page = parseListXml(await response.text(), prefix);
+      for (const [key, etag] of page.contents) result.set(key, etag);
+      if (!page.truncated) break;
+      if (seen.has(page.token)) throw new Error('R2 S3 LIST 반복 continuation token');
+      seen.add(page.token);
+      token = page.token;
+    } while (true);
+    return result;
+  }
+
+  return { request, list, stats, now, rate: 3 };
+}
+
 export async function list(prefix) {
   return (await listEntries(prefix)).map(({ key }) => key);
 }
