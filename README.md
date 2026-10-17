@@ -124,6 +124,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-17 — 덤프·users-list 에 SP r★ 3열
+
+- `user/{ID}.json` 의 `user`, `users-list.json` 행(일일 전체·증분 병합), uslice `summary.u` 에 `sp_r_star`·`sp_r_star_model_id`·`sp_r_star_formula_version` 을 DB 값 그대로 싣는다(null 보존, 음수 허용, 증분은 최신 덤프 값). slim·검색 projection 은 불변.
+- 값은 크롤러(calcOhsorryCore v0.0.415)가 `users` 에 저장한 SP r★(U1, modelId 별). 웹 v3 SP 모드가 r★ 표시와 SP Σ 랭킹에 쓴다.
+
 ### 2026-10-17 — users-list 에 피처 NPS 원값(dp_feature_nps·sp_feature_nps)
 
 - `users-list.json` 행에 `dp_feature_nps`·`sp_feature_nps` 추가 — 9키(NOTES·CHORD·PEAK·CHARGE·SCRATCH·PHRASE·JACK·TRILL·RAND) number|null 객체 또는 null. 값은 `phys/user/{ID}.json`(phys-line-v2, notes/s/hand)·`phys/user-sp/{ID}.json`(phys-line-sp-v1, notes/s/side) 의 `absolute.axes[축].line` 원값. 실력선에 SOF-LAN 축이 없어 9축. 퍼센타일·종합값은 저장하지 않는다(웹 계산).
