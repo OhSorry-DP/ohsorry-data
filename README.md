@@ -124,6 +124,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-17 — r2-client 에 S3 호환 클라이언트 `s3R2Client`
+
+- `.github/scripts/r2-client.mjs`: R2 S3 API(`<account>.r2.cloudflarestorage.com`, SigV4·region auto, ListObjectsV2 XML) 클라이언트를 명시 생성 API 로 추가했다. 기존 REST 클라이언트와 기본 선택은 그대로다. 자격증명은 `R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` 또는 `CLOUDFLARE_R2_ACCESS_KEY_ID`/`CLOUDFLARE_R2_SECRET_ACCESS_KEY`.
+- 이유: Cloudflare REST API 는 토큰당 5분 1200건 전역 제한이 있어 곡 피처 slice 수천 개 게시가 429·300초 대기에 걸렸다. S3 경로는 이 제한 밖이다(실측: 목록 4,465개 3.1초, 단일 PUT ETag=md5 확인).
+- 재시도: 통신 오류·5xx 1/2/4/8초 4회, 429 는 별도 예산으로 Retry-After 존중. 테스트 6개 추가(서명 변이 시 3건 실패 확인).
+
 ### 2026-10-17 — 덤프·users-list 에 SP r★ 3열
 
 - `user/{ID}.json` 의 `user`, `users-list.json` 행(일일 전체·증분 병합), uslice `summary.u` 에 `sp_r_star`·`sp_r_star_model_id`·`sp_r_star_formula_version` 을 DB 값 그대로 싣는다(null 보존, 음수 허용, 증분은 최신 덤프 값). slim·검색 projection 은 불변.
