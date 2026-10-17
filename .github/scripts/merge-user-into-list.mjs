@@ -23,6 +23,7 @@
 // env: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
 
 import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { getText, putText } from './r2-client.mjs';
 import { toSlim } from './users-list-slim.mjs';
 
@@ -32,19 +33,18 @@ const LOCAL = 'users-list.json';
 const SLIM_LOCAL = 'users-list-slim.json';
 const MAX_ATTEMPTS = 5;
 
-const argPath = process.argv[2];
-const ALLOW_EMPTY = process.argv.includes('--allow-empty');
-const NO_UPLOAD = process.argv.includes('--no-upload');
-if (!argPath) { console.error('user/{id}.json 경로 인자 없음'); process.exit(1); }
-
-const dump = JSON.parse(fs.readFileSync(argPath, 'utf8'));
-const u = dump.user;
-if (!u) { console.log('user 없음 — 목록 병합 skip'); process.exit(0); }
+let argPath;
+let ALLOW_EMPTY = false;
+let NO_UPLOAD = false;
+let u;
+let entry;
 
 // os_pattern_score(DP) / sp_pattern_score(SP) — dump 의 osPattern(user_ohsorry_radars 양쪽 play_style)에서 10 feature 추출.
 //   dump-users-list.mjs 의 nested select 추출과 동일 키. play_style 로 명시 매칭할 것 —
 //   배열에 SP/DP 두 행이 함께 오므로 순서에 기대면 SP 값이 DP 자리로 들어간다.
-const radars = Array.isArray(dump.osPattern) ? dump.osPattern : [];
+function makeEntry(userDump) {
+const user = userDump.user;
+const radars = Array.isArray(userDump.osPattern) ? userDump.osPattern : [];
 const pick = (ps) => {
   const r = radars.find((x) => x.play_style === ps);
   return r ? {
@@ -52,12 +52,13 @@ const pick = (ps) => {
     'SOF-LAN': r.soflan, PHRASE: r.phrase, JACK: r.jack, TRILL: r.trill, RAND: r.rand,
   } : null;
 };
-const entry = {
-  iidx_id: u.iidx_id, dj_name: u.dj_name, star: u.star, r_star: u.r_star, ereter_star: u.ereter_star,
-  sp_rank: u.sp_rank, dp_rank: u.dp_rank, sp_cpi: u.sp_cpi, sp_star: u.sp_star, date: u.date,
+return {
+  iidx_id: user.iidx_id, dj_name: user.dj_name, star: user.star, r_star: user.r_star, ereter_star: user.ereter_star,
+  sp_rank: user.sp_rank, dp_rank: user.dp_rank, sp_cpi: user.sp_cpi, sp_star: user.sp_star, date: user.date,
   os_pattern_score: pick(1),
   sp_pattern_score: pick(0),
 };
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -75,11 +76,19 @@ function readBase(body) {
   return list;
 }
 
-function mergeInto(list) {
-  const i = list.findIndex((x) => x && x.iidx_id === u.iidx_id);
-  // r_star를 포함한 user row는 DB 조회값이 정본이다. null도 그대로 반영한다.
-  // star=null 신규는 정렬상 뒤가 맞고, 웹은 클라이언트 재정렬하므로 append 로 충분
-  if (i >= 0) list[i] = entry; else list.push(entry);
+export function mergeInto(list, nextEntry) {
+  const i = list.findIndex((x) => x && x.iidx_id === nextEntry.iidx_id);
+  const merged = { ...nextEntry };
+  if (i >= 0) {
+    const previous = list[i];
+    for (const key of ['dp_feature_nps', 'sp_feature_nps']) {
+      merged[key] = Object.hasOwn(previous, key) ? previous[key] : null;
+    }
+  } else {
+    merged.dp_feature_nps = null;
+    merged.sp_feature_nps = null;
+  }
+  if (i >= 0) list[i] = merged; else list.push(merged);
   return { list, isNew: i < 0 };
 }
 
@@ -87,7 +96,7 @@ async function main() {
   if (NO_UPLOAD) {
     let body = null;
     try { body = fs.readFileSync(LOCAL, 'utf8'); } catch (e) { body = null; }
-    const { list, isNew } = mergeInto(readBase(body));
+    const { list, isNew } = mergeInto(readBase(body), entry);
     fs.writeFileSync(LOCAL, JSON.stringify(list));
     const slimBody = JSON.stringify(toSlim(list));
     fs.writeFileSync(SLIM_LOCAL, slimBody);
@@ -120,7 +129,7 @@ async function main() {
       const before = base.length;
 
       // 2) 병합 → 3) 즉시 PUT (창을 최소화)
-      const { list, isNew } = mergeInto(base);
+      const { list, isNew } = mergeInto(base, entry);
       body = JSON.stringify(list);
       const res = await putText(KEY, body, 'application/json; charset=utf-8');
       if (!res.ok) throw new Error(`R2 저장 실패: ${res.msg}`);
@@ -175,4 +184,16 @@ async function main() {
   process.exit(1);
 }
 
-main();
+async function run() {
+  argPath = process.argv[2];
+  ALLOW_EMPTY = process.argv.includes('--allow-empty');
+  NO_UPLOAD = process.argv.includes('--no-upload');
+  if (!argPath) { console.error('user/{id}.json 경로 인자 없음'); process.exit(1); }
+  const userDump = JSON.parse(fs.readFileSync(argPath, 'utf8'));
+  u = userDump.user;
+  if (!u) { console.log('user 없음 — 목록 병합 skip'); return; }
+  entry = makeEntry(userDump);
+  await main();
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) run();
