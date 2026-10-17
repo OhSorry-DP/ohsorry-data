@@ -1,3 +1,10 @@
+import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { toSlim } from './users-list-slim.mjs';
+import { fetchAllSongs, serializeSongs } from './songs-lib.mjs';
+import { loadFeatureNps } from './feature-nps.mjs';
+import { pool, useRest } from './r2-client.mjs';
+
 // dump-users-list.mjs — 전체 유저 목록(웹 fetchAllUsers 출력)을 users-list.json 으로 덤프.
 //   유저별 user/{id}.json(webhook)과 달리 "전 유저 집계"라 cron 으로 주기 재생성(업로드마다 X).
 //   웹 fetchAllUsersUncached 와 동일 select/transform — 결과를 그대로 쓸 수 있게 동치 유지할 것.
@@ -11,42 +18,32 @@
 //   node dump-users-list.mjs           → 둘 다 (기존 동작 · 수동 실행 기본값)
 //   node dump-users-list.mjs --songs   → songs.json 만
 //   node dump-users-list.mjs --users   → users-list.json 만
-import fs from 'node:fs';
-import { toSlim } from './users-list-slim.mjs';
-import { fetchAllSongs, serializeSongs } from './songs-lib.mjs';
 
-const ARGV = process.argv.slice(2);
-// 둘 다 지정하거나 아무것도 안 주면 → 둘 다 생성(기존 동작 유지).
-const DO_USERS = !ARGV.includes('--songs') || ARGV.includes('--users');
-const DO_SONGS = !ARGV.includes('--users') || ARGV.includes('--songs');
+export const CONCURRENCY = 4;
 
-const SB = process.env.SUPABASE_URL;
-const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-if (!SB || !KEY) { console.error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 없음'); process.exit(1); }
-const H = { apikey: KEY, Authorization: 'Bearer ' + KEY };
+export async function enrichUsersWithFeatureNps(rows, load = loadFeatureNps) {
+  const out = new Array(rows.length);
+  await pool(rows, CONCURRENCY, async (row, index) => {
+    const nps = await load(row.iidx_id);
+    out[index] = { ...row, dp_feature_nps: nps?.DP ?? null, sp_feature_nps: nps?.SP ?? null };
+  });
+  return out;
+}
 
-async function fetchAllUsers() {
+export async function fetchAllUsers({ fetchImpl = fetch, supabaseUrl = process.env.SUPABASE_URL, serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY } = {}) {
   const out = [];
   const pageSize = 1000;
   let offset = 0;
+  const headers = { apikey: serviceKey, Authorization: 'Bearer ' + serviceKey };
   while (true) {
-    const url = SB
-      + '/rest/v1/users?select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,sp_cpi,sp_star,date,'
-      + 'user_ohsorry_radars(play_style,notes,chord,peak,charge,scratch,soflan,phrase,jack,trill,rand)'
-      + `&order=star.desc.nullslast&limit=${pageSize}&offset=${offset}`;
-    const res = await fetch(url, { headers: H });
+    const url = supabaseUrl + '/rest/v1/users?select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,sp_cpi,sp_star,date,user_ohsorry_radars(play_style,notes,chord,peak,charge,scratch,soflan,phrase,jack,trill,rand)' + `&order=star.desc.nullslast&limit=${pageSize}&offset=${offset}`;
+    const res = await fetchImpl(url, { headers });
     if (!res.ok) throw new Error(`users 목록 HTTP ${res.status}`);
     const rows = await res.json();
     for (const u of rows) {
       const radars = Array.isArray(u.user_ohsorry_radars) ? u.user_ohsorry_radars : [];
       // play_style 로 명시 매칭 — 배열에 SP/DP 두 행이 함께 오므로 순서에 기대면 값이 뒤섞인다.
-      const pick = (ps) => {
-        const r = radars.find((x) => x.play_style === ps);
-        return r ? {
-          NOTES: r.notes, CHORD: r.chord, PEAK: r.peak, CHARGE: r.charge, SCRATCH: r.scratch,
-          'SOF-LAN': r.soflan, PHRASE: r.phrase, JACK: r.jack, TRILL: r.trill, RAND: r.rand,
-        } : null;
-      };
+      const pick = ps => { const r = radars.find(x => x.play_style === ps); return r ? { NOTES:r.notes, CHORD:r.chord, PEAK:r.peak, CHARGE:r.charge, SCRATCH:r.scratch, 'SOF-LAN':r.soflan, PHRASE:r.phrase, JACK:r.jack, TRILL:r.trill, RAND:r.rand } : null; };
       u.os_pattern_score = pick(1);      // DP
       u.sp_pattern_score = pick(0);      // SP — 웹 SP 분석탭 피처별 랭킹/percentile 모수
       delete u.user_ohsorry_radars;
@@ -58,23 +55,33 @@ async function fetchAllUsers() {
   return out;
 }
 
-if (DO_USERS) {
-  const list = await fetchAllUsers();
-  fs.writeFileSync('users-list.json', JSON.stringify(list));
-  console.log('users-list.json 갱신:', list.length, '명');
-  // v3 검색용 슬림 — 방금 만든 full 을 4키로 projection 한다(supabase 재조회 없음).
-  const slimJson = JSON.stringify(toSlim(list));
-  fs.writeFileSync('users-list-slim.json', slimJson);
-  console.log('users-list-slim.json 갱신:', list.length, '명,', Buffer.byteLength(slimJson), 'bytes');
-} else {
-  console.log('users-list.json 재생성 skip (--songs)');
+export async function main(argv = process.argv.slice(2), deps = {}) {
+  const DO_USERS = !argv.includes('--songs') || argv.includes('--users');
+  const DO_SONGS = !argv.includes('--users') || argv.includes('--songs');
+  if (DO_USERS && !useRest) throw new Error('users 생성은 R2 REST 인증이 필요합니다');
+  if (DO_USERS) {
+    const supabaseUrl = deps.supabaseUrl ?? process.env.SUPABASE_URL;
+    const serviceKey = deps.serviceKey ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if ((!supabaseUrl || !serviceKey) && !deps.fetchAllUsers) throw new Error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 없음');
+    const list = await (deps.fetchAllUsers || fetchAllUsers)();
+    const enriched = await enrichUsersWithFeatureNps(list, deps.load || loadFeatureNps);
+    fs.writeFileSync('users-list.json', JSON.stringify(enriched));
+    const slimJson = JSON.stringify(toSlim(enriched));
+    fs.writeFileSync('users-list-slim.json', slimJson);
+    console.log('users-list.json 갱신:', enriched.length, '명');
+    console.log('users-list-slim.json 갱신:', enriched.length, '명,', Buffer.byteLength(slimJson), 'bytes');
+  } else {
+    console.log('users-list.json 재생성 skip (--songs)');
+  }
+  if (DO_SONGS) {
+    const songs = await (deps.fetchAllSongs || fetchAllSongs)();
+    fs.writeFileSync('songs.json', serializeSongs(songs));
+    console.log('songs.json 갱신:', songs.length, '곡');
+  } else {
+    console.log('songs.json 재생성 skip (--users)');
+  }
 }
 
-// songs.json — 곡 마스터(공유). 신곡이 webhook 으로 들어와도 여기서 주기 갱신(변경 시에만 commit/upload).
-if (DO_SONGS) {
-  const songs = await fetchAllSongs();
-  fs.writeFileSync('songs.json', serializeSongs(songs));
-  console.log('songs.json 갱신:', songs.length, '곡');
-} else {
-  console.log('songs.json 재생성 skip (--users)');
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => { console.error(error); process.exitCode = 1; });
 }
