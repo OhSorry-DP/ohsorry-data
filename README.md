@@ -124,6 +124,14 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-17 — users-list 에 피처 NPS 원값(dp_feature_nps·sp_feature_nps)
+
+- `users-list.json` 행에 `dp_feature_nps`·`sp_feature_nps` 추가 — 9키(NOTES·CHORD·PEAK·CHARGE·SCRATCH·PHRASE·JACK·TRILL·RAND) number|null 객체 또는 null. 값은 `phys/user/{ID}.json`(phys-line-v2, notes/s/hand)·`phys/user-sp/{ID}.json`(phys-line-sp-v1, notes/s/side) 의 `absolute.axes[축].line` 원값. 실력선에 SOF-LAN 축이 없어 9축. 퍼센타일·종합값은 저장하지 않는다(웹 계산).
+- 공통 추출 `feature-nps.mjs`(schema·ID·모델/선/평균 버전·status=ready·stale 검증, 404 는 null, 통신·JSON 오류는 실패).
+- 일일 전체 생성(`dump-users-list.mjs`)이 유저별 R2 GET 2회를 동시 4(`pool`)로 붙인다. `--users`/기본 실행은 R2 인증이 필요해 `dump-users-list.yml` Build 에 Cloudflare env 추가. `--songs` 는 무변경.
+- 증분 병합(`merge-user-into-list.mjs`)은 기존 행의 두 필드를 보존만 한다(신규 유저 null). 개별 갱신 뒤 NPS 는 최대 하루 지연되고 일일 생성이 보정한다.
+- 검증: `.github/scripts` 전체 370/370 · 변이(증분 보존 제거) 검출. 실제 Actions·R2 실행은 미검증.
+
 ### 2026-10-15 — user 덤프에 plays 포함
 
 - `dump-user.mjs` 의 users 명시 select 에 `plays` 추가 — 기존 `user/{id}.json` 의 `user.plays` 로 INF 기록기 최근 최대 100판(원본 19열 문자열)이 실린다. 새 R2 키·워크플로 변경 없음.
