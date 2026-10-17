@@ -74,7 +74,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     console.log('users-list.json 재생성 skip (--songs)');
   }
   if (DO_SONGS) {
-    const songs = await (deps.fetchAllSongs || fetchAllSongs)();
+    const songs = await fetchAllSongs();
     fs.writeFileSync('songs.json', serializeSongs(songs));
     console.log('songs.json 갱신:', songs.length, '곡');
   } else {
