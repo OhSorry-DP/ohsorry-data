@@ -29,6 +29,7 @@ import { promisify } from 'node:util';
 import { gunzip as gunzipCallback } from 'node:zlib';
 import { pathToFileURL } from 'node:url';
 import { validateCandidate, sha256Hex } from './score-buffer.mjs';
+import { runScoreDeleteGate } from './score-delete-gate.mjs';
 
 const gunzip = promisify(gunzipCallback);
 
@@ -124,6 +125,24 @@ export async function verifyDeleteSnapshot({ snapshotKey, tarBytes, expectedMani
   return { snapshotKey, tarSha256, candidates };
 }
 
+export async function prepareScoreDeletes(verifiedSnapshot) {
+  if (!verifiedSnapshot || !Array.isArray(verifiedSnapshot.candidates)) throw new TypeError('invalid verified snapshot');
+  const results = [];
+  for (const candidate of verifiedSnapshot.candidates) {
+    const result = await runScoreDeleteGate({
+      iidxId: candidate.iidxId,
+      candidateBytes: candidate.candidateBytes,
+      histBytes: candidate.histBytes,
+      snapshotKey: verifiedSnapshot.snapshotKey,
+      tarSha256: verifiedSnapshot.tarSha256,
+      execute: false,
+    });
+    results.push({ iidxId: candidate.iidxId, result });
+    console.log(`  삭제 계획 ${candidate.iidxId}: ${result.status} (${result.scoreIds.length} IDs)`);
+  }
+  return results;
+}
+
 const BUCKET = 'ohsorry-data';
 const INDEX_KEY = 'snapshot/index.json';
 // 스냅샷에 같이 넣는 루트 JSON — 슬림 row 는 song_id 만 들고 있어 songs.json 없이는 곡을 못 되살린다.
@@ -217,6 +236,7 @@ const mb = (b) => (b / 1024 / 1024).toFixed(1);
 let TMP, SNAP;
 
 export async function main() {
+try {
 const KIND = arg('kind', 'auto');
 const MAX_DROP = Number(arg('max-drop', '5')) / 100;
 const LIMIT = Number(arg('limit', '0'));
@@ -378,6 +398,7 @@ for (const t of targets) {
     if (!response.ok) throw new Error(`R2 snapshot GET ${t.key} — HTTP ${response.status}`);
     const proof = await verifyDeleteSnapshot({ snapshotKey: t.key, tarBytes: Buffer.from(await response.arrayBuffer()), expectedManifest });
     console.log(`  원본 tar 검증: ${proof.candidates.length} 후보 / SHA256 ${proof.tarSha256}`);
+    await prepareScoreDeletes(proof);
   }
 }
 if (!DRY) {
@@ -409,8 +430,12 @@ if (DRY) {
   console.log(`\n보존 정리: daily ${KEEP_DAILY}개 + monthly ${KEEP_MONTHLY}개 유지 (${del}/${pruned.length} 키 정리 요청 완료)`);
 }
 
-fs.rmSync(TMP, { recursive: true, force: true });
 console.log('\n완료.');
+} finally {
+  if (TMP) fs.rmSync(TMP, { recursive: true, force: true });
+}
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) await main();
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((error) => { console.error(error); process.exitCode = 1; });
+}
