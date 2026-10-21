@@ -124,6 +124,15 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-22 — Supabase scores 버퍼화 2단계: 삭제 후보·게이트 준비(기본 꺼짐)
+
+- 전부 `SCORE_BUFFER_PREPARE=1`(repo 변수) 일 때만 동작한다. 미설정이면 덤프·워크플로·snapshot 동작은 이전과 같다.
+- `score-buffer.mjs` 신설: 덤프가 읽은 scores 행과 R2 에서 재다운로드한 hist 를 자연키·10열(날짜는 마이크로초)로 대조해 `meta/scores-delete-{id}.json` 후보 `{score_ids, hist:{key, sha256}}` 를 만든다.
+- `dump-user.mjs`: 준비 모드에서 score_id 포함 전체 조회 → hist 조건부 PUT → 원본 재다운로드 대조 → 후보 조건부 PUT(`publishPreparedHist`). `dump-user.yml` 은 준비 모드에서만 전역 직렬 그룹·셸 hist PUT 생략.
+- `snapshot-r2.mjs`: 준비 모드 daily 에서 후보·`scores-delete-manifest.json` 을 tar 에 동봉하고, 업로드한 tar 를 원본에서 다시 받아 검증한 뒤 `score-delete-gate.mjs` 로 삭제 계획만 세운다(`execute=false` 고정 — 실제 삭제는 4단계). 상위 실행부를 `main()`·CLI 가드로 감쌌다(dry-run 스모크로 기본 경로 확인).
+- `score-delete-gate.mjs` 신설: 후보·hist 해시·snapshot 식별 검증, 200개 배치, 실행 시 `all-hist-writers` 잠금·삭제 어댑터 필수.
+- 테스트 264/264(신규 snapshot 순수 JS tar 테스트 포함).
+
 ### 2026-10-22 — DBR R2 이관: 원본 대조 `--verify`·일반 hist 에서 DBR 제외
 
 - `dump-dbr-history.mjs`: DB DBR 행과 R2 `dbr/{id}.json` history 를 자연키로 대조하는 coverage(누락·불일치·미완료·R2 추가 행) 보고, `--verify` 는 쓰기 없이 문제 시 종료코드 1. style 필터를 빼고 style≠1 은 오류로 중단.
