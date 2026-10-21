@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
 import { getText } from './r2-client.mjs';
+import { conditionalR2Client } from './r2-client.mjs';
+import { buildCandidate } from './score-buffer.mjs';
 import { computeDirtyCharts } from './ranking-dirty-charts.mjs';
 import { fetchDpArrange } from './dp-arrange.mjs';
 import { writeUserSliceFile } from './user-slice.mjs';
@@ -213,6 +215,43 @@ export async function fetchUserHist(id) {
   return out;
 }
 
+export async function fetchUserHistWithScores(id) {
+  const eid = encodeURIComponent(id);
+  const histRows = [], restRows = []; let off = 0;
+  while (true) {
+    const rows = await rest(`scores?iidx_id=eq.${eid}&played_version=neq.-10&select=score_id,${HIST_COLS.join(',')}`
+      + `&order=score_id.asc&limit=1000&offset=${off}`);
+    if (!Array.isArray(rows)) throw new Error('scores 응답이 배열이 아닙니다');
+    for (const r of rows) {
+      restRows.push(r);
+      histRows.push(HIST_COLS.map((k) => (r[k] === undefined ? null : r[k])));
+    }
+    if (rows.length < 1000) break; off += 1000;
+  }
+  return { histRows, restRows };
+}
+
+export async function publishPreparedHist(id, { restRows, histBytes, r2 = conditionalR2Client({
+  account: process.env.CLOUDFLARE_ACCOUNT_ID,
+  token: process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN,
+  rawBytes: true,
+}) }) {
+  if (!/^[A-Za-z0-9]+$/.test(id)) throw new Error('잘못된 iidx_id 형식');
+  const histKey = `hist/${id}.json`;
+  const previous = await r2.read(histKey);
+  const histEtag = previous ? previous.etag : null;
+  await r2.put(histKey, histBytes, histEtag);
+  const downloaded = await r2.read(histKey);
+  if (!downloaded) throw new Error(`hist 재다운로드 실패(${histKey})`);
+  const downloadedBytes = downloaded.bytes ?? Buffer.from(downloaded.body, 'utf8');
+  const candidate = buildCandidate({ iidxId: id, restRows, publishedHistBytes: histBytes, downloadedHistBytes: downloadedBytes });
+  const candidateKey = `meta/scores-delete-${id}.json`;
+  const existingCandidate = await r2.read(candidateKey);
+  const candidateBody = Buffer.from(JSON.stringify(candidate), 'utf8');
+  await r2.put(candidateKey, candidateBody, existingCandidate ? existingCandidate.etag : null);
+  return { candidateKey, candidate };
+}
+
 // 변경 프로브 — 행수(count=exact, 본문은 1행뿐) + 최신 date 1행. 응답 바이트가 사실상 0 이다.
 //   webhook 은 users.date 갱신만으로도 발화하므로(INF 15분 자동동기화 포함) 점수가 안 바뀐 회차가 많다.
 //   프로브 없이 매번 전체 재조회하면 덤프 1회 supabase 읽기가 **+94%** 늘어난다(실측 2026-08-09:
@@ -243,8 +282,21 @@ export function histUnchanged(prev, probe) {
 
 // hist 파일 갱신. file 에 R2 현재본이 미리 놓여 있으면(워크플로가 받아둠) 변경 없을 때 전체 조회를 건너뛴다.
 export async function updateHistFile(id, file) {
+  const preparing = process.env.SCORE_BUFFER_PREPARE === '1';
   let prev = null;
   try { prev = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* 없거나 깨짐 → 재생성 */ }
+  if (preparing) {
+    const { histRows, restRows } = await fetchUserHistWithScores(id);
+    if (!histRows.length && prev && prev.length) {
+      const hasNonDbr = prev.some((r) => Array.isArray(r) && r.length === HIST_COLS.length
+        && Number.isInteger(r[HIST_COLS.indexOf('played_version')]) && r[HIST_COLS.indexOf('played_version')] !== -10);
+      const allValidDbr = prev.every((r) => Array.isArray(r) && r.length === HIST_COLS.length
+        && Number.isInteger(r[HIST_COLS.indexOf('played_version')]) && r[HIST_COLS.indexOf('played_version')] === -10);
+      if (hasNonDbr || !allValidDbr) throw new Error(`hist 급감(${id}): ${prev.length}행 → 0행 — 기존본 유지`);
+    }
+    fs.writeFileSync(file, JSON.stringify(histRows));
+    return { rebuilt: true, rows: histRows.length, restRows };
+  }
   let probe = null;
   try { probe = await histProbe(id); } catch (e) { console.error('hist 프로브 실패(' + id + '):', e.message); }
   if (histUnchanged(prev, probe)) return { rebuilt: false, rows: prev.length };
@@ -284,6 +336,10 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     }
     fs.writeFileSync(`user/${id}.json`, JSON.stringify(data));
     const h = await updateHistFile(id, `hist/${id}.json`);
+    if (process.env.SCORE_BUFFER_PREPARE === '1') {
+      const histBytes = fs.readFileSync(`hist/${id}.json`);
+      await publishPreparedHist(id, { restRows: h.restRows, histBytes });
+    }
     const slice = writeUserSliceFile(id, data, `uslice-out/${id}.json`, { histFile: `hist/${id}.json` });
     console.log('slice 계산:', id, '| rc', slice.rc);
     console.log('덤프:', id, '| dp', data.dp.length, 'sp', data.sp.length, '| persona', data.persona ? 'OK' : '없음', '| spPersona', data.spPersona ? 'OK' : '없음',

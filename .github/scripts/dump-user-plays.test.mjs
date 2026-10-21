@@ -15,7 +15,7 @@ process.env.SUPABASE_URL = 'https://supabase.invalid';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-key';
 process.env.CLOUDFLARE_R2_TOKEN = 'test-r2-token';
 
-const { dumpUser, fetchUserHist, histProbe, updateHistFile, HIST_COLS } = await import('./dump-user.mjs');
+const { dumpUser, fetchUserHist, histProbe, updateHistFile, publishPreparedHist, HIST_COLS } = await import('./dump-user.mjs');
 
 async function run(user) {
   const originalFetch = globalThis.fetch;
@@ -140,4 +140,124 @@ test('DBR-only previous hist may transition to an empty array', async () => {
 test('previous non-DBR hist still rejects a drop to zero rows', async () => {
   const { error } = await runHistUpdate([histRow(1)], []);
   assert.match(error.message, /hist 급감/);
+});
+
+const scoreRestRow = {
+  score_id: 101, song_id: 1000, diff: 3, lamp: 4, ex_score: 1234, played_version: 33,
+  date: '2026-10-22T01:02:03.123456+00:00', date_kst: '2026-10-22', play_style: 1, bp: null, note_count: 1500,
+};
+const scoreHistRow = [1000, 3, 4, 1234, 33, scoreRestRow.date, '2026-10-22', 1, null, 1500];
+
+async function withPrepare(value, fn) {
+  const oldValue = process.env.SCORE_BUFFER_PREPARE;
+  if (value === undefined) delete process.env.SCORE_BUFFER_PREPARE;
+  else process.env.SCORE_BUFFER_PREPARE = value;
+  try { return await fn(); }
+  finally {
+    if (oldValue === undefined) delete process.env.SCORE_BUFFER_PREPARE;
+    else process.env.SCORE_BUFFER_PREPARE = oldValue;
+  }
+}
+
+async function withHistFile(initial, fn) {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prepared-hist-'));
+  const file = path.join(dir, 'hist.json');
+  if (initial !== undefined) fs.writeFileSync(file, JSON.stringify(initial));
+  try { return await fn({ fs, file }); }
+  finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('default mode skips full score fetch when probe matches', async () => withPrepare(undefined, async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const target = String(url); calls.push({ target, options });
+    if (options.headers?.Prefer) return response([], { 'content-range': '0-0/1' });
+    if (target.includes('select=date')) return response([{ date: scoreRestRow.date }]);
+    throw new Error(`Unexpected request: ${target}`);
+  };
+  try {
+    await withHistFile([scoreHistRow], async ({ file }) => {
+      const result = await updateHistFile('tester', file);
+      assert.equal(result.rebuilt, false);
+    });
+    assert.equal(calls.some(({ target }) => /select=score_id,/.test(target)), false);
+    assert.equal(calls.filter(({ target }) => target.includes('/r2/')).length, 0);
+  } finally { globalThis.fetch = originalFetch; }
+}));
+
+test('prepare mode fetches score ids and writes ten-column hist rows', async () => withPrepare('1', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const target = String(url); calls.push(target);
+    if (target.includes('/rest/v1/scores?')) return response([scoreRestRow]);
+    throw new Error(`Unexpected request: ${target}`);
+  };
+  try {
+    await withHistFile([], async ({ fs, file }) => {
+      const result = await updateHistFile('tester', file);
+      assert.deepEqual(result.restRows, [scoreRestRow]);
+      assert.equal(result.rebuilt, true);
+      assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), [scoreHistRow]);
+      assert.equal(calls.length, 1);
+      assert.match(calls[0], /select=score_id,song_id,diff,lamp,ex_score,played_version,date,date_kst,play_style,bp,note_count/);
+      assert.match(calls[0], /played_version=neq\.\-10/);
+    });
+  } finally { globalThis.fetch = originalFetch; }
+}));
+
+function r2Mock({ downloadedBytes } = {}) {
+  const calls = [];
+  let histReads = 0;
+  return {
+    calls,
+    read: async (key) => {
+      calls.push(['read', key]);
+      if (key === 'hist/tester.json') {
+        histReads += 1;
+        const bytes = histReads === 2 ? downloadedBytes : undefined;
+        if (histReads === 2 && bytes === null) return null;
+        const body = bytes === undefined ? Buffer.from(JSON.stringify([scoreHistRow])) : bytes;
+        return { body, etag: '"abc"', bytes: Buffer.from(body) };
+      }
+      if (key === 'meta/scores-delete-tester.json') return null;
+      throw new Error(`Unexpected R2 read: ${key}`);
+    },
+    put: async (key, body, etag) => { calls.push(['put', key, Buffer.from(body), etag]); },
+  };
+}
+
+test('publishPreparedHist publishes hist then a candidate hashed from re-downloaded bytes', async () => {
+  const histBytes = Buffer.from(JSON.stringify([scoreHistRow]));
+  const r2 = r2Mock();
+  const result = await publishPreparedHist('tester', { restRows: [scoreRestRow], histBytes, r2 });
+  assert.deepEqual(r2.calls.map(([kind, key]) => [kind, key]), [
+    ['read', 'hist/tester.json'], ['put', 'hist/tester.json'], ['read', 'hist/tester.json'],
+    ['read', 'meta/scores-delete-tester.json'], ['put', 'meta/scores-delete-tester.json'],
+  ]);
+  assert.equal(result.candidateKey, 'meta/scores-delete-tester.json');
+  assert.deepEqual(result.candidate, {
+    score_ids: [101],
+    hist: { key: 'hist/tester.json', sha256: (await import('node:crypto')).createHash('sha256').update(histBytes).digest('hex') },
+  });
+  const candidatePut = r2.calls[4];
+  assert.deepEqual(JSON.parse(candidatePut[2].toString('utf8')), result.candidate);
+});
+
+test('publishPreparedHist rejects changed re-download bytes before candidate put', async () => {
+  const histBytes = Buffer.from(JSON.stringify([scoreHistRow]));
+  const r2 = r2Mock({ downloadedBytes: Buffer.from('[]') });
+  await assert.rejects(publishPreparedHist('tester', { restRows: [scoreRestRow], histBytes, r2 }));
+  assert.equal(r2.calls.filter(([kind, key]) => kind === 'put' && key.startsWith('meta/')).length, 0);
+});
+
+test('publishPreparedHist rejects missing re-download before candidate put', async () => {
+  const histBytes = Buffer.from(JSON.stringify([scoreHistRow]));
+  const r2 = r2Mock({ downloadedBytes: null });
+  await assert.rejects(publishPreparedHist('tester', { restRows: [scoreRestRow], histBytes, r2 }), /재다운로드 실패/);
+  assert.equal(r2.calls.filter(([kind, key]) => kind === 'put' && key.startsWith('meta/')).length, 0);
 });
