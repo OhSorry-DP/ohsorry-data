@@ -14,8 +14,8 @@ on:
 
 # 같은 유저 연속 업로드는 마지막 것만(이전 실행 취소). 다른 유저는 병렬.
 concurrency:
-  group: dump-${{ github.event.client_payload.iidx_id }}
-  cancel-in-progress: true
+  group: ${{ vars.SCORE_BUFFER_PREPARE == '1' && 'score-buffer-prepare' || format('dump-{0}', github.event.client_payload.iidx_id) }}
+  cancel-in-progress: ${{ vars.SCORE_BUFFER_PREPARE != '1' }}
 
 jobs:
   dump:
@@ -26,6 +26,7 @@ jobs:
     # iidx_id 는 외부(supabase record) 유래 → 쉘에 직접 보간하지 말고 env 경유(인젝션 방지).
     env:
       IIDX_ID: ${{ github.event.client_payload.iidx_id }}
+      SCORE_BUFFER_PREPARE: ${{ vars.SCORE_BUFFER_PREPARE || '0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -150,7 +151,9 @@ jobs:
           #   이 잡의 낡은 로컬 사본으로 되돌려버린다.
           # hist 도 R2 PUT 이 유일한 보관 경로다. 변경이 없어 재생성을 건너뛴 회차도 그대로 다시
           #   올린다(내용 동일 · ingress 무료 · Class A 는 월 100만 중 하루 70여 회).
-          if [ -f "hist/$IIDX_ID.json" ]; then put "hist/$IIDX_ID.json"; else echo "::warning::hist 파일 없음 — PUT skip"; fi
+          if [ "$SCORE_BUFFER_PREPARE" != "1" ]; then
+            if [ -f "hist/$IIDX_ID.json" ]; then put "hist/$IIDX_ID.json"; else echo "::warning::hist 파일 없음 — PUT skip"; fi
+          fi
           exit $rc
 
 
