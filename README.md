@@ -124,6 +124,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-22 — DBR R2 이관: 원본 대조 `--verify`·일반 hist 에서 DBR 제외
+
+- `dump-dbr-history.mjs`: DB DBR 행과 R2 `dbr/{id}.json` history 를 자연키로 대조하는 coverage(누락·불일치·미완료·R2 추가 행) 보고, `--verify` 는 쓰기 없이 문제 시 종료코드 1. style 필터를 빼고 style≠1 은 오류로 중단.
+- `dump-user.mjs`: hist 본문·행수·최신일 probe 에 `played_version=neq.-10`. DBR 행만 있던 hist 의 0행 전환만 허용하고 일반 hist 급감 방어는 유지.
+- 🔴 F(hist 제외) 커밋은 운영 `--verify` 통과 뒤에만 push — 웹 v3 Recent 가 이력 미완료 유저에서 hist DBR 행으로 폴백하기 때문.
+- 테스트 241/241.
+
 ### 2026-10-21 — Supabase scores 버퍼화 1단계: hist 기반 best 병합·grid 순수 모듈
 
 - `.github/scripts/score-history.mjs` 신설: `mergeScoreHistory(hist, incoming)`(upsert_scores 의 historical-best·당일 교체·NULL 보충을 hist 10열 배열 위에서 재현)와 `gridFromHistory(iidxId, hist, songs, playStyle)`(make_grid_data 의 EX·램프 대표 분리·시즌 통합·DBR 제외). 날짜는 PostgREST timestamptz 원문을 보존하고 마이크로초로 비교한다(`dbr-history.mjs` 의 `instant()` 규칙).
