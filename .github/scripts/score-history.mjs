@@ -99,3 +99,50 @@ export function mergeScoreHistory(histRows, incomingRows) {
   }
   return result;
 }
+
+/** Build the SQL make_grid_data shape from history rows without mutating inputs. */
+export function gridFromHistory(iidxId, histRows, songs, playStyle = 1) {
+  if (!Array.isArray(histRows) || !Array.isArray(songs)) fail('histRows and songs must be arrays');
+  integer(playStyle, 'playStyle');
+  if (playStyle !== 0 && playStyle !== 1) fail('playStyle must be 0 or 1');
+
+  const songById = new Map();
+  for (let i = 0; i < songs.length; i += 1) {
+    const song = songs[i];
+    if (song === null || typeof song !== 'object' || Array.isArray(song)) fail(`song at index ${i} must be an object`);
+    integer(song.song_id, `song at index ${i} song_id`);
+    if (songById.has(song.song_id)) fail(`duplicate song_id at index ${i}: ${song.song_id}`);
+    songById.set(song.song_id, song);
+  }
+
+  const groups = new Map();
+  for (let i = 0; i < histRows.length; i += 1) {
+    const { row, time } = normalize(histRows[i], 'hist', i);
+    if (row[7] !== playStyle || row[4] === -10) continue;
+    const song = songById.get(row[0]);
+    if (song === undefined) continue;
+    const key = JSON.stringify([row[0], row[1]]);
+    const candidate = { row, time, ordinal: i, song };
+    const group = groups.get(key) ?? { ex: null, lamp: null };
+    if (group.ex === null || ex(row) > ex(group.ex.row)
+      || (ex(row) === ex(group.ex.row) && (time < group.ex.time
+        || (time === group.ex.time && i < group.ex.ordinal)))) group.ex = candidate;
+    if (group.lamp === null || lamp(row) > lamp(group.lamp.row)
+      || (lamp(row) === lamp(group.lamp.row) && (time < group.lamp.time
+        || (time === group.lamp.time && i < group.lamp.ordinal)))) group.lamp = candidate;
+    groups.set(key, group);
+  }
+
+  return [...groups.values()].map(({ ex: exBest, lamp: lampBest }) => {
+    const e = exBest.row;
+    const l = lampBest.row;
+    const latest = exBest.time >= lampBest.time ? exBest : lampBest;
+    const song = exBest.song;
+    return {
+      song_id: e[0], iidx_id: iidxId, diff: e[1], lamp: l[2], ex_score: e[3],
+      played_version: latest.row[4], date: latest.row[5], date_kst: latest.row[6],
+      textage_song_id: song.textage_song_id, title: song.title, series_no: song.series_no,
+      ac: song.ac, legen: song.legen, bp: e[8], note_count: e[9],
+    };
+  }).sort((a, b) => a.song_id - b.song_id || a.diff - b.diff);
+}
