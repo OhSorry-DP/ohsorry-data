@@ -73,7 +73,7 @@ test('키셋 페이지 경계: 짧은 페이지도 계속 읽고 실제 필터·
     assert.equal(url.pathname, '/rest/v1/scores');
     assert.deepEqual(Object.fromEntries(url.searchParams), {
       select: ['iidx_id', ...DBR_HISTORY_COLS].join(','), played_version: 'eq.-10',
-      play_style: 'eq.1', order: 'score_id.asc', limit: '2', score_id: cursors[index],
+      order: 'score_id.asc', limit: '2', score_id: cursors[index],
     });
     assert.equal(url.searchParams.has('offset'), false);
   }
@@ -255,18 +255,67 @@ test('결함 주입: 나중 객체의 잘못된 JSON·scores·history·소실도
   }
 });
 
-test('빈 덤프 통계·해시는 결정적이며 CLI는 기본 dry-run과 명시적 apply만 허용한다', async () => {
+test('빈 덤프 통계·해시는 결정적이며 CLI는 기본 dry-run, apply, verify만 허용한다', async () => {
   const f = fixture();
   const result = await run(f.options);
   assert.deepEqual(result.bytes, { total: 0, max: 0, median: 0 });
   assert.equal(result.users, 0);
   assert.equal(result.sha256, hash('[]'));
-  assert.deepEqual(parseArgs([]), { apply: false });
-  assert.deepEqual(parseArgs(['--dry-run']), { apply: false });
-  assert.deepEqual(parseArgs(['--apply']), { apply: true });
+  assert.deepEqual(parseArgs([]), { apply: false, verify: false });
+  assert.deepEqual(parseArgs(['--dry-run']), { apply: false, verify: false });
+  assert.deepEqual(parseArgs(['--apply']), { apply: true, verify: false });
+  assert.deepEqual(parseArgs(['--verify']), { apply: false, verify: true });
   assert.throws(() => parseArgs(['--apply', '--dry-run']));
+  assert.throws(() => parseArgs(['--apply', '--verify']));
   assert.throws(() => parseArgs(['--aply']));
   await assert.rejects(readDbrRows({ ...f.options, pageSize: 0 }));
+});
+
+test('coverage는 보강 전 R2 history와 대조하고 완전 일치를 정확히 센다', async () => {
+  const history = normalizeDbrHistory([row({ score_id: '1', date: '2026-09-01T19:00:00.000000+09:00' })],
+    { complete: true, revision: 4 });
+  const f = fixture({ existing: { 'dbr/A.json': { scores: {}, history } }, pages: [[row()], []] });
+  const result = await run(f.options);
+  assert.deepEqual(result.coverage, { sourceRows: 1, matchedRows: 1, missingRows: 0,
+    mismatchedRows: 0, incompleteUsers: [], extraR2Rows: 0, details: [] });
+  assert.equal(result.puts, 0);
+});
+
+test('coverage는 누락과 같은 자연키의 값 불일치를 구분하고 비교 열만 상세화한다', async () => {
+  const old = normalizeDbrHistory([row({ song_id: 1, lamp: 2, score_id: '1' }),
+    row({ song_id: 2, score_id: 2 })], { complete: true, revision: 1 });
+  const f = fixture({ existing: { 'dbr/A.json': { scores: {}, history: old } },
+    pages: [[row({ lamp: 4 }), row({ song_id: 3, score_id: 3 })], []] });
+  const result = await run(f.options);
+  assert.equal(result.coverage.sourceRows, 2);
+  assert.equal(result.coverage.matchedRows, 0);
+  assert.equal(result.coverage.missingRows, 1);
+  assert.equal(result.coverage.mismatchedRows, 1);
+  assert.deepEqual(result.coverage.details.map((detail) => detail.mismatchColumns), [['lamp'], []]);
+  assert.equal(result.coverage.details[0].id, 'A');
+  assert.equal(JSON.stringify(result.coverage).includes('date value'), false);
+});
+
+test('coverage에 incomplete 사용자와 R2 추가행을 포함한다', async () => {
+  const history = normalizeDbrHistory([row({ song_id: 9, score_id: 9 })], { complete: false, revision: 2 });
+  const f = fixture({ existing: { 'dbr/A.json': { scores: {}, history } }, pages: [[row()], []] });
+  const result = await run(f.options);
+  assert.deepEqual(result.coverage.incompleteUsers, ['A']);
+  assert.equal(result.coverage.extraR2Rows, 1);
+  assert.equal(result.coverage.missingRows, 1);
+});
+
+test('기본 dry-run과 verify는 PUT하지 않고 verify 실패만 exitCode 1이다', async () => {
+  const history = normalizeDbrHistory([row()], { complete: true, revision: 1 });
+  const matching = fixture({ existing: { 'dbr/A.json': { scores: {}, history } }, pages: [[row()], []] });
+  const ok = await run({ ...matching.options, verify: true });
+  assert.equal(ok.exitCode, undefined);
+  assert.equal(matching.puts.length, 0);
+  const missing = fixture({ pages: [[row()], []] });
+  const failed = await run({ ...missing.options, verify: true });
+  assert.equal(failed.exitCode, 1);
+  assert.equal(failed.puts, 0);
+  assert.equal(missing.puts.length, 0);
 });
 
 test('workflow는 수동 전용이며 dry_run 기본 true 및 apply 분기가 명시되어 있다', () => {
