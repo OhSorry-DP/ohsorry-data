@@ -124,6 +124,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-21 — Supabase scores 버퍼화 1단계: hist 기반 best 병합·grid 순수 모듈
+
+- `.github/scripts/score-history.mjs` 신설: `mergeScoreHistory(hist, incoming)`(upsert_scores 의 historical-best·당일 교체·NULL 보충을 hist 10열 배열 위에서 재현)와 `gridFromHistory(iidxId, hist, songs, playStyle)`(make_grid_data 의 EX·램프 대표 분리·시즌 통합·DBR 제외). 날짜는 PostgREST timestamptz 원문을 보존하고 마이크로초로 비교한다(`dbr-history.mjs` 의 `instant()` 규칙).
+- 현행 SQL 과 의도적으로 다른 점 2개: 같은 날 교체 때 새 값이 NULL 이면 기존 note_count·(EX 동일 시)BP 를 보존(재병합 멱등성), 한 요청 안 같은 채보 중복은 요청 전체 거부.
+- 아직 운영 경로에 연결하지 않았다(import·workflow 변경 없음). 테스트 12개(`score-history.test.mjs`·`score-grid.test.mjs`), 결함 주입 4종 모두 검출 확인.
+- 배경: Supabase 를 덤프 후 즉시 비울 수 있는 입력 버퍼로 만드는 재설계의 첫 조각.
+
 ### 2026-10-17 — r2-client 에 S3 호환 클라이언트 `s3R2Client`
 
 - `.github/scripts/r2-client.mjs`: R2 S3 API(`<account>.r2.cloudflarestorage.com`, SigV4·region auto, ListObjectsV2 XML) 클라이언트를 명시 생성 API 로 추가했다. 기존 REST 클라이언트와 기본 선택은 그대로다. 자격증명은 `R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` 또는 `CLOUDFLARE_R2_ACCESS_KEY_ID`/`CLOUDFLARE_R2_SECRET_ACCESS_KEY`.
