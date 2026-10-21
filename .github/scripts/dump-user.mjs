@@ -195,7 +195,7 @@ export async function dumpUser(id, personaRes, opts = {}) {
 // - 배열형인 이유: 키 이름 반복 제거. 전 유저 기준 객체형 102MB vs 배열형 44.5MB.
 // - user/{id}.json 에 합치지 않는다 — 히스토리는 랭킹모달을 열 때만 필요한데 카드 첫 로딩에
 //   매번 딸려오면 응답이 느려진다.
-// - DBR(played_version=-10)도 포함 — 웹 fetchDbrScores 가 이걸로 읽는다.
+// - DBR(played_version=-10)은 dbr 문서에서 공급한다. 일반 hist 에는 포함하지 않는다.
 export const HIST_COLS = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'date_kst', 'play_style', 'bp', 'note_count'];
 const HIST_DATE_I = HIST_COLS.indexOf('date');
 
@@ -204,7 +204,7 @@ export async function fetchUserHist(id) {
   const eid = encodeURIComponent(id);
   const out = []; let off = 0;
   while (true) {
-    const rows = await rest(`scores?iidx_id=eq.${eid}&select=${HIST_COLS.join(',')}`
+    const rows = await rest(`scores?iidx_id=eq.${eid}&played_version=neq.-10&select=${HIST_COLS.join(',')}`
       + `&order=score_id.asc&limit=1000&offset=${off}`);
     if (!Array.isArray(rows)) break;
     for (const r of rows) out.push(HIST_COLS.map((k) => (r[k] === undefined ? null : r[k])));
@@ -220,12 +220,12 @@ export async function fetchUserHist(id) {
 //   그 비용을 그냥 낼 수 없다.
 export async function histProbe(id) {
   const eid = encodeURIComponent(id);
-  const r = await fetch(SB + `/rest/v1/scores?iidx_id=eq.${eid}&select=score_id&limit=1`, {
+  const r = await fetch(SB + `/rest/v1/scores?iidx_id=eq.${eid}&played_version=neq.-10&select=score_id&limit=1`, {
     headers: { ...H, Prefer: 'count=exact', Range: '0-0' },
   });
   if (!r.ok) throw new Error(`hist count ${id} HTTP ${r.status}`);
   const n = Number((r.headers.get('content-range') || '').split('/')[1]);
-  const top = await rest(`scores?iidx_id=eq.${eid}&select=date&order=date.desc&limit=1`);
+  const top = await rest(`scores?iidx_id=eq.${eid}&played_version=neq.-10&select=date&order=date.desc&limit=1`);
   return { n: Number.isFinite(n) ? n : -1, maxDate: (top && top[0] && top[0].date) || null };
 }
 
@@ -252,7 +252,13 @@ export async function updateHistFile(id, file) {
   // ⚠️ 있던 이력이 0 행으로 바뀌는 건 정상 상황이 아니다(supabase 일시 오류·필터 사고).
   //    덮어쓰면 R2 의 유일한 복원 원본이 빈 파일이 되므로 기존본을 남기고 실패로 알린다.
   if (!rows.length && prev && prev.length) {
-    throw new Error(`hist 급감(${id}): ${prev.length}행 → 0행 — 기존본 유지`);
+    const hasNonDbr = prev.some((r) => Array.isArray(r) && r.length === HIST_COLS.length
+      && Number.isInteger(r[HIST_COLS.indexOf('played_version')]) && r[HIST_COLS.indexOf('played_version')] !== -10);
+    const allValidDbr = prev.every((r) => Array.isArray(r) && r.length === HIST_COLS.length
+      && Number.isInteger(r[HIST_COLS.indexOf('played_version')]) && r[HIST_COLS.indexOf('played_version')] === -10);
+    if (hasNonDbr || !allValidDbr) {
+      throw new Error(`hist 급감(${id}): ${prev.length}행 → 0행 — 기존본 유지`);
+    }
   }
   fs.writeFileSync(file, JSON.stringify(rows));
   return { rebuilt: true, rows: rows.length };
