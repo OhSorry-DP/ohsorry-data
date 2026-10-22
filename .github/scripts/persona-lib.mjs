@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
+import { gridFromHistory } from './score-history.mjs';
 
 const GIST_RAW = 'https://gist.githubusercontent.com/OhSorry-DP/c3da608194c44f431abd2f1a7a4a9f5e/raw';
 
@@ -37,7 +38,8 @@ const SEC_TIER = { s_lo: '저속', s8: '저속', s11: '저속', s14: '중속', s
 const TIERS = ['저속', '중속', '고속', '초고속'];
 
 // gist 에서 해석엔진 모듈(UMD/CommonJS)·데이터 일괄 로드. Actions 1회 실행당 1번만 호출.
-export async function loadPersonaResources() {
+export async function loadPersonaResources(opts = {}) {
+  const official = opts?.official === true;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-'));
   const bust = '?t=' + Date.now();
   const mods = ['calcWeakness.js', 'persona.js', 'normTitle.js', 'reachNps.js'];
@@ -49,6 +51,20 @@ export async function loadPersonaResources() {
   const personaLib = req(path.join(tmp, 'persona.js'));
   const { norm } = req(path.join(tmp, 'normTitle.js'));
   const reachNpsLib = req(path.join(tmp, 'reachNps.js'));
+  let officialLibs = null;
+  let ereterData = null, cpiData = null, spFeatScores = null;
+  if (official) {
+    const files = ['normTitle.js', 'onlyOSR.js', 'OSR13.5+.js', 'onlyOSRtoEreter.js', 'userRateStar.js', 'spUserRateStar.js', 'spSkillCpi.js', 'cpiStar.js', 'patternScoreKernel.js'];
+    for (const n of files) {
+      const url = n === 'spUserRateStar.js' ? `https://data.iidx.in/lib/${n}${bust}` : `${GIST_RAW}/${n}${bust}`;
+      fs.writeFileSync(path.join(tmp, n), await fetchText(url));
+    }
+    officialLibs = {};
+    for (const n of ['onlyOSR.js', 'OSR13.5+.js', 'onlyOSRtoEreter.js', 'userRateStar.js', 'spUserRateStar.js', 'spSkillCpi.js', 'cpiStar.js', 'patternScoreKernel.js']) {
+      try { officialLibs[n] = req(path.join(tmp, n)); }
+      catch (e) { throw new Error(`official module ${n} failed to load: ${e.message}`, { cause: e }); }
+    }
+  }
   // r★ 모듈은 신규 배포 전 과도기에도 기존 덤프를 막지 않도록 optional. 없으면 호출부가 이전값을 보존한다.
   let userRateStarLib = null;
   try {
@@ -70,6 +86,23 @@ export async function loadPersonaResources() {
     fetchJson(`${GIST_RAW}/sp-arrange.json${bust}`).catch(() => null),
     fetchJson(`${GIST_RAW}/sp-rate-reference.json${bust}`).catch(() => null),   // SP 스코어링 마스터용 인구 rate 기준(gameLevel별). 없으면 SP overallResid null
   ]);
+  if (official) {
+    const [ereterRaw, cpiRaw, spFeaturesRaw] = await Promise.all([
+      fetchJson(`${GIST_RAW}/ereter-data.json${bust}`),
+      fetchJson(`${GIST_RAW}/cpi.json${bust}`),
+      fetchJson(`${GIST_RAW}/sp-feature-scores-slim.json${bust}`),
+    ]);
+    ereterData = Array.isArray(ereterRaw) ? { charts: ereterRaw, extractedAt: null, players: null }
+      : ereterRaw && Array.isArray(ereterRaw.charts) ? {
+        charts: ereterRaw.charts, extractedAt: ereterRaw.extractedAt || null,
+        players: ereterRaw.players && typeof ereterRaw.players === 'object' ? ereterRaw.players : null,
+      } : null;
+    cpiData = Array.isArray(cpiRaw) ? cpiRaw : Array.isArray(cpiRaw?.data) ? cpiRaw.data : null;
+    spFeatScores = spFeaturesRaw?.scores;
+    if (!ratingJson?.ratings || !ratingJson?.rateStar || !ratingJson?.spRateStar
+      || !ereterData || !Array.isArray(ereterData.charts) || !Array.isArray(cpiData)
+      || !spFeatScores || !officialLibs) throw new Error('official resources missing required rating, ereter, CPI, feature scores, or modules');
+  }
   // SP rate 인구 기준 — gameLevel(int) → 평균 rate. spPersonaFor 가 SP overallResid(스코어링 마스터) 계산에 사용.
   const spRateRef = (spRateRefRaw && spRateRefRaw.byGameLevel) ? spRateRefRaw.byGameLevel : null;
   const patternsMap = {};
@@ -132,13 +165,20 @@ export async function loadPersonaResources() {
   //   없으면 persona 는 종전 raw 경로(자기중심화만) — 하위호환.
   const popmean = localJson('persona-popmean.json');
   const popmeanSp = localJson('persona-popmean-sp.json');   // SP 판 — 축·스케일이 달라 파일이 별개다
-  return {
+  const result = {
     weaknessLib, personaLib, userRateStarLib, norm, textageMeta,
     ratingData: ratingJson.ratings,
     rateStarScale: ratingJson.rateStar && ratingJson.rateStar.scale,
     zasaData: Array.isArray(zasaRaw.charts) ? zasaRaw.charts : zasaRaw,
     patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef, pop, popmean, popmeanSp, reachNpsLib,
   };
+  if (official) Object.assign(result, {
+    ratingJson, ereterData, cpiData, spFeatScores,
+    onlyOSR2eLib: officialLibs['onlyOSRtoEreter.js'],
+    userRateStarLib: officialLibs['userRateStar.js'], spUserRateStarLib: officialLibs['spUserRateStar.js'],
+    spSkillLib: officialLibs['spSkillCpi.js'], patternScoreKernelLib: officialLibs['patternScoreKernel.js'],
+  });
+  return result;
 }
 
 // DP 배치를 계산용 행에만 결합한다. 값 해석은 calcWeakness의 normArrange에 맡긴다.
@@ -556,6 +596,30 @@ export function spPersonaFor(ownSp, R) {
     head: rich.head, oneLiner: P.oneLiner, prose: P.prose, report: rich.report,
     tags: P.tags, rel: personaRelOf(P), nCharts: ownSp.length, _v: new Date().toISOString(), i18n,
   };
+}
+
+const HIST_COLS = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'date_kst', 'play_style', 'bp', 'note_count'];
+
+export function historyInputs(id, histRows, songs, arrangeRows, R) {
+  if (!Array.isArray(histRows) || !Array.isArray(songs)) throw new TypeError('histRows and songs must be arrays');
+  const dp = gridFromHistory(id, histRows, songs, 1);
+  const sp = gridFromHistory(id, histRows, songs, 0);
+  const dpCharts = chartsFromGridRows(attachArrange(dp, arrangeRows), R.textageMeta);
+  const spCharts = spChartsFromGridRows(sp, R.textageMeta);
+  const songById = new Map(songs.map((song) => [song.song_id, song]));
+  const spRateRows = [];
+  for (let i = 0; i < histRows.length; i += 1) {
+    const row = histRows[i];
+    if (!Array.isArray(row) || (row.length !== 8 && row.length !== 10)) throw new TypeError(`hist row at index ${i} must have 8 or 10 columns`);
+    const values = row.length === 8 ? [...row, null, null] : [...row];
+    if (values[7] !== 0 || values[4] === -10) continue;
+    const song = songById.get(values[0]);
+    if (!song) continue;
+    spRateRows.push(Object.fromEntries(HIST_COLS.map((key, col) => [key, values[col]]).concat([
+      ['title', song.title], ['textage_song_id', song.textage_song_id],
+    ])));
+  }
+  return { dp, sp, dpCharts, spCharts, spRateRows };
 }
 
 // persona 의 10피처 프로파일(feats)만 산출 — **usernorm 인구 통계 생성 전용**.
