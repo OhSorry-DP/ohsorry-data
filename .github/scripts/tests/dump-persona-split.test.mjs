@@ -79,25 +79,27 @@ test('single mode SP matches direct dump SP engine with identical grid input', (
   assert.deepEqual(actual, expected);
 });
 
-test('workflow keeps prepare-mode shared concurrency and default per-user cancellation', () => {
+test('workflow uses per-user cancellation in every mode and keeps 33/34 uploads in that user group', () => {
   const workflow = fs.readFileSync(new URL('../../workflows/dump-user.yml', import.meta.url), 'utf8');
   const concurrency = workflow.match(/^concurrency:\r?\n((?:[ \t]+[^\r\n]*\r?\n)+)/m)?.[1];
   assert.ok(concurrency, 'workflow-level concurrency block exists');
-  assert.match(concurrency, /^  group: \$\{\{ vars\.SCORE_BUFFER_PREPARE == '1' && 'score-buffer-prepare' \|\| format\('dump-\{0\}', github\.event\.client_payload\.iidx_id\) \}\}$/m);
-  assert.match(concurrency, /^  cancel-in-progress: \$\{\{ vars\.SCORE_BUFFER_PREPARE != '1' \}\}$/m);
+  const groupTemplate = concurrency.match(/^  group: (.+)$/m)?.[1];
+  assert.equal(groupTemplate, 'dump-${{ github.event.client_payload.iidx_id }}');
+  assert.match(concurrency, /^  cancel-in-progress: true$/m);
+  assert.doesNotMatch(concurrency, /SCORE_BUFFER_PREPARE/);
   assert.match(workflow, /^  dump:\r?\n[\s\S]*?^    env:\r?\n(?:[ \t]+[^\r\n]*\r?\n)*?      SCORE_BUFFER_PREPARE: \$\{\{ vars\.SCORE_BUFFER_PREPARE \|\| '0' \}\}$/m);
-  // '' and '0' use dump-{id} with cancellation; '1' shares a group and disables cancellation.
   for (const mode of ['', '0', '1']) {
-    const preparing = mode === '1';
-    const groupExpression = "vars.SCORE_BUFFER_PREPARE == '1' && 'score-buffer-prepare' || format('dump-{0}', github.event.client_payload.iidx_id)";
-    const cancelExpression = "vars.SCORE_BUFFER_PREPARE != '1'";
-    assert.ok(concurrency.includes(groupExpression));
-    assert.ok(concurrency.includes(cancelExpression));
-    assert.equal(preparing ? 'score-buffer-prepare' : 'dump-{id}', preparing ? 'score-buffer-prepare' : 'dump-{id}');
-    assert.equal(preparing ? false : true, !preparing);
+    assert.equal(groupTemplate.replace('${{ github.event.client_payload.iidx_id }}', '12345678'), 'dump-12345678', `mode ${mode}`);
+    assert.match(concurrency, /^  cancel-in-progress: true$/m, `mode ${mode}`);
   }
-  assert.equal('score-buffer-prepare', 'score-buffer-prepare');
-  assert.equal('score-buffer-prepare', 'score-buffer-prepare');
+  const groupFor = ({ iidx_id }) => groupTemplate.replace('${{ github.event.client_payload.iidx_id }}', iidx_id);
+  const a33 = groupFor({ iidx_id: '12345678', played_version: 33 });
+  const a34 = groupFor({ iidx_id: '12345678', played_version: 34 });
+  const b33 = groupFor({ iidx_id: '87654321', played_version: 33 });
+  assert.equal(a33, a34);
+  assert.notEqual(a33, b33);
+  assert.equal(new Set([a33, a34, b33]).size, 2);
+  assert.doesNotMatch(workflow, /played_version[^\n]*(?:reject|deny|dispatch)/i);
 });
 
 test('workflow keeps early upload, Node guard and dump-persona-coach order', () => {

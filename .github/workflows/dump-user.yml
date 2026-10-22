@@ -14,8 +14,8 @@ on:
 
 # 같은 유저 연속 업로드는 마지막 것만(이전 실행 취소). 다른 유저는 병렬.
 concurrency:
-  group: ${{ vars.SCORE_BUFFER_PREPARE == '1' && 'score-buffer-prepare' || format('dump-{0}', github.event.client_payload.iidx_id) }}
-  cancel-in-progress: ${{ vars.SCORE_BUFFER_PREPARE != '1' }}
+  group: dump-${{ github.event.client_payload.iidx_id }}
+  cancel-in-progress: true
 
 jobs:
   dump:

@@ -43,8 +43,11 @@ test('official write failure does not fail or interrupt the dump job; final chec
 });
 
 test('default concurrency, hist mode gate, and list/slice sequence remain intact', () => {
-  assert.match(workflow, /group: \$\{\{ vars\.SCORE_BUFFER_PREPARE == '1' && 'score-buffer-prepare' \|\| format\('dump-\{0\}', github\.event\.client_payload\.iidx_id\) \}\}/);
-  assert.match(workflow, /cancel-in-progress: \$\{\{ vars\.SCORE_BUFFER_PREPARE != '1' \}\}/);
+  const concurrency = workflow.match(/^concurrency:\r?\n((?:[ \t]+[^\r\n]*\r?\n)+)/m)?.[1];
+  assert.ok(concurrency);
+  assert.match(concurrency, /^  group: dump-\$\{\{ github\.event\.client_payload\.iidx_id \}\}$/m);
+  assert.match(concurrency, /^  cancel-in-progress: true$/m);
+  assert.doesNotMatch(concurrency, /SCORE_BUFFER_PREPARE/);
   const upload = section('- name: Upload to R2 (data.iidx.in)', '- name: Write official user to Supabase');
   assert.match(upload, /if \[ "\$SCORE_BUFFER_PREPARE" != "1" \]; then[\s\S]*put "hist\/\$IIDX_ID\.json"/);
   const list = workflow.indexOf('- name: users-list 증분 병합');
