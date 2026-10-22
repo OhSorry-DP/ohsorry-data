@@ -15,6 +15,8 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { calculateOfficialScores } from './official-score.mjs';
+import { mergeScoreHistory } from './score-history.mjs';
 
 const validId = (value) => /^[A-Za-z0-9]+$/.test(String(value || ''));
 
@@ -61,7 +63,14 @@ export async function runCoachOnly({ ids, options, producer = './coach-precomput
 }
 
 // Single-user mode never seeds R2 from git; retry a stale ETag once with fresh rows.
-export async function updateSinglePersona(id, { client, calculate } = {}) {
+const OFFICIAL_USER_FIELDS = ['star', 'native_star', 'r_star', 'sp_cpi', 'sp_star', 'sp_r_star', 'sp_r_star_model_id', 'sp_r_star_formula_version'];
+const officialSnapshot = (data) => JSON.stringify([
+  data.persona, data.spPersona, [Object.hasOwn(data, 'reachNps'), data.reachNps],
+  ...OFFICIAL_USER_FIELDS.map(field => [Object.hasOwn(data.user || {}, field), data.user?.[field]]),
+  [Object.hasOwn(data, 'osPattern'), data.osPattern],
+]);
+
+export async function updateSinglePersona(id, { client, calculate, official = false, dry = false } = {}) {
   if (!validId(id)) throw new Error('Invalid single-user id');
   const key = `user/${id}.json`;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -69,12 +78,28 @@ export async function updateSinglePersona(id, { client, calculate } = {}) {
     if (!source) throw new Error(`R2 user missing: ${id}`);
     const data = JSON.parse(source.body);
     if (String(data.user?.iidx_id) !== id) throw new Error('R2 user identity mismatch');
-    const before = JSON.stringify([data.persona, data.spPersona]);
-    const fields = await calculate(data);
+    const histSource = official ? await client.read(`hist/${id}.json`) : null;
+    if (official && !histSource) throw new Error(`R2 hist missing: ${id}`);
+    let histRows;
+    if (official) {
+      try { histRows = JSON.parse(histSource.body); } catch (error) { throw new Error(`R2 hist JSON invalid: ${id}`, { cause: error }); }
+      if (!Array.isArray(histRows)) throw new TypeError(`R2 hist must be an array: ${id}`);
+      mergeScoreHistory(histRows, []);
+    }
+    const before = official ? officialSnapshot(data) : JSON.stringify([data.persona, data.spPersona]);
+    const fields = official ? await calculate(data, { histRows }) : await calculate(data);
     // Null/failed calculations preserve the previous persona, as dumpUser does.
     if (fields.persona != null) data.persona = fields.persona;
     if (fields.spPersona != null) data.spPersona = fields.spPersona;
-    if (JSON.stringify([data.persona, data.spPersona]) === before) return { unchanged: true };
+    if (official) {
+      if (fields.reachNps !== undefined) data.reachNps = fields.reachNps;
+      data.user = { ...data.user };
+      for (const field of OFFICIAL_USER_FIELDS) if (Object.hasOwn(fields.userFields || {}, field)) data.user[field] = fields.userFields[field];
+      if (fields.osPattern !== undefined) data.osPattern = fields.osPattern;
+    }
+    const after = official ? officialSnapshot(data) : JSON.stringify([data.persona, data.spPersona]);
+    if (after === before) return dry ? { dry: true, changed: false } : { unchanged: true };
+    if (dry) return { dry: true, changed: true };
     try {
       await client.put(key, JSON.stringify(data), source.etag);
       return { updated: true };
@@ -100,6 +125,20 @@ export function personaFields(data, R, songById, arrange, engine, dpCharts) {
   };
 }
 
+export function historyPersonaFields(id, data, histRows, songs, arrange, R, engine) {
+  const { historyInputs, personaFor, spPersonaFor, reachNpsFor } = engine;
+  const inputs = historyInputs(id, histRows, songs, arrange, R);
+  const official = calculateOfficialScores({ id, inputs, R, previousUser: data.user, previousOsPattern: data.osPattern });
+  const user = { ...data.user, ...official.userFields };
+  return {
+    persona: personaFor(inputs.dpCharts, R, user),
+    spPersona: spPersonaFor(inputs.spCharts, R),
+    reachNps: reachNpsFor(inputs.dpCharts, R),
+    userFields: official.userFields,
+    osPattern: official.osPattern,
+  };
+}
+
 async function runSingle(id) {
   if (!validId(id)) throw new Error('Invalid single-user id');
   const engine = await import('./persona-lib.mjs');
@@ -107,9 +146,20 @@ async function runSingle(id) {
   const { conditionalR2Client } = await import('./r2-client.mjs');
   const client = conditionalR2Client({ account: process.env.CLOUDFLARE_ACCOUNT_ID,
     token: process.env.CLOUDFLARE_API_TOKEN });
-  const [R, songs, arrange] = await Promise.all([
-    engine.loadPersonaResources(), client.read('songs.json'), fetchDpArrange(id),
-  ]);
+  const official = process.env.SCORE_BUFFER_PREPARE === '1';
+  const R = await engine.loadPersonaResources(official ? { official: true } : undefined);
+  if (official) {
+    const { fetchDpArrange } = await import('./dp-arrange.mjs');
+    return updateSinglePersona(id, { client, official,
+      calculate: async (data, { histRows }) => {
+        const [songsSource, arrange] = await Promise.all([client.read('songs.json'), fetchDpArrange(id)]);
+        if (!songsSource) throw new Error('R2 songs.json missing');
+        const songs = JSON.parse(songsSource.body);
+        if (!Array.isArray(songs)) throw new TypeError('R2 songs.json must be an array');
+        return historyPersonaFields(id, data, histRows, songs, arrange, R, engine);
+      } });
+  }
+  const [songs, arrange] = await Promise.all([client.read('songs.json'), fetchDpArrange(id)]);
   if (!songs) throw new Error('R2 songs.json missing');
   const songById = new Map(JSON.parse(songs.body).map(song => [song.song_id, song]));
   let attempt = 0;
