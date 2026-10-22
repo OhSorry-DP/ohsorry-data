@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { mergeScoreHistory } from './score-history.mjs';
+import { buildCandidate, validateCandidate } from './score-buffer.mjs';
+import { normalizeAliasInputs } from './song-aliases.mjs';
 
 const savedEnv = { SUPABASE_URL: process.env.SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY };
 process.env.SUPABASE_URL = 'https://supabase.invalid';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-key';
-const { dumpUser, updateHistFile, HIST_COLS } = await import('./dump-user.mjs');
+const { dumpUser, prepareOfficialHistory, updateHistFile, HIST_COLS } = await import('./dump-user.mjs');
 test.after(() => {
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -17,6 +20,15 @@ test.after(() => {
 const id = '12345678';
 const h34 = [101, 3, 6, 1800, 34, '2026-10-21T01:02:03.123456+00:00', '2026-10-21', 1, 20, 1000];
 const late33 = [101, 3, 4, 1900, 33, '2026-10-22T01:02:03.123457+00:00', '2026-10-22', 1, 18, 1000];
+const cumulativeId = '89388691';
+const cumulativeRow = [100, 3, 5, 2000, 33, '2026-10-22T01:02:03.123456+00:00', '2026-10-22', 1, null, 1500];
+const cumulativeRest = [{ score_id: 12345, iidx_id: cumulativeId, song_id: 100, diff: 3, played_version: 33,
+  play_style: 1, ex_score: 2000, lamp: 5, bp: null, note_count: 1500,
+  date: cumulativeRow[5], date_kst: cumulativeRow[6] }];
+const emptyAliases = { v: 1, rules: [] };
+const emptyAliasesBytes = Buffer.from(JSON.stringify(emptyAliases), 'utf8');
+const cumulativeSongs = [100, 200, 300, 400].map((song_id) => ({ song_id }));
+const cumulativeHash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const sp34 = [101, 3, 4, 1500, 34, '2026-10-21T01:02:03.123456+00:00', '2026-10-21', 0, 10, 1000];
 const songs = [{ song_id: 101, title: 'TEST', textage_song_id: 'test', series_no: 34, ac: true, legen: false }];
 const oldUser = { star: 8, sp_r_star: 9, sp_r_star_model_id: 'old', sp_r_star_formula_version: 'v1' };
@@ -29,12 +41,19 @@ const response = (value) => ({ ok: true, status: 200, json: async () => value, h
 
 async function fixture(options, fn) {
   const savedFetch = globalThis.fetch, savedSwitch = process.env.SCORE_BUFFER_PREPARE;
+  const savedCumulative = process.env.SCORE_BUFFER_CUMULATIVE;
+  const savedAccount = process.env.CLOUDFLARE_R2_ACCOUNT_ID, savedToken = process.env.CLOUDFLARE_R2_TOKEN;
+  process.env.CLOUDFLARE_R2_ACCOUNT_ID = 'test-account';
+  process.env.CLOUDFLARE_R2_TOKEN = 'test-token';
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dump-official-'));
   const file = path.join(dir, 'hist.json');
   const events = [], calls = [], seen = { spCalls: 0 };
   const rows = options.rows ?? [h34, late33];
-  const restRows = rows.map((r, i) => ({ score_id: i === 0 ? 3401 : 3301 + i - 1, ...Object.fromEntries(HIST_COLS.map((k, j) => [k, r[j]])) }));
-  const objects = new Map([['hist/' + id + '.json', Buffer.from(JSON.stringify(options.oldRows ?? [h34]))], ['songs.json', Buffer.from(JSON.stringify(songs))]]);
+  const restRows = rows.map((r, i) => ({ score_id: i === 0 ? 3401 : 3301 + i - 1, iidx_id: id,
+    ...Object.fromEntries(HIST_COLS.map((k, j) => [k, r[j]])) }));
+  const aliasesBytes = Buffer.from(JSON.stringify(emptyAliases), 'utf8');
+  const objects = new Map([['hist/' + id + '.json', Buffer.from(JSON.stringify(options.oldRows ?? [h34]))],
+    ['songs.json', Buffer.from(JSON.stringify(songs))], ['meta/song-aliases.json', aliasesBytes]]);
   if (!options.newUser) objects.set('user/' + id + '.json', Buffer.from(JSON.stringify(previous)));
   let histReads = 0;
   const r2 = {
@@ -48,11 +67,11 @@ async function fixture(options, fn) {
         if (histReads === 2 && options.mismatch) return { bytes: Buffer.from('[]'), etag: 'changed' };
       }
       const bytes = objects.get(key);
-      return bytes ? { bytes, etag: 'old' } : null;
+      return bytes ? { body: bytes.toString('utf8'), bytes, etag: '"old"' } : null;
     },
     async put(key, bytes, etag) {
       events.push('put:' + key);
-      if (options.conflict) { assert.equal(etag, 'old'); throw new Error('412'); }
+      if (options.conflict) { assert.equal(etag, '"old"'); throw new Error('412'); }
       objects.set(key, Buffer.from(bytes));
     },
   };
@@ -92,6 +111,9 @@ async function fixture(options, fn) {
   finally {
     globalThis.fetch = savedFetch;
     if (savedSwitch === undefined) delete process.env.SCORE_BUFFER_PREPARE; else process.env.SCORE_BUFFER_PREPARE = savedSwitch;
+    if (savedCumulative === undefined) delete process.env.SCORE_BUFFER_CUMULATIVE; else process.env.SCORE_BUFFER_CUMULATIVE = savedCumulative;
+    if (savedAccount === undefined) delete process.env.CLOUDFLARE_R2_ACCOUNT_ID; else process.env.CLOUDFLARE_R2_ACCOUNT_ID = savedAccount;
+    if (savedToken === undefined) delete process.env.CLOUDFLARE_R2_TOKEN; else process.env.CLOUDFLARE_R2_TOKEN = savedToken;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -108,7 +130,7 @@ test('late33 confirmed ten-column history is published and verified before offic
     ]);
     assert.deepEqual(result.dpRecent, recent[1]);
     assert.deepEqual(result.spRecent, recent[0]);
-    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), [h34, late33]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), [late33, h34]);
     assert.ok(events.indexOf('put:meta/scores-delete-' + id + '.json') < events.indexOf('calculate'));
     assert.deepEqual([seen.dp[0].exScore, seen.dp[0].lampNum, seen.dp[0].noteCount], [1900, 6, 1000]);
     assert.deepEqual([result.dp[0].ex_score, result.dp[0].lamp, result.dp[0].bp, result.user.star], [1900, 6, 18, 1900]);
@@ -124,7 +146,7 @@ test('SP full history retains all versions without grid or SP-rate RPC', async (
   const rows = [0, -1, 33, 34].map((version) => { const row = [...late33]; row[4] = version; row[7] = 0; return row; });
   await fixture({ rows }, async ({ run, seen, calls }) => {
     await run();
-    assert.deepEqual(seen.sp.map((r) => r.played_version), [0, -1, 33, 34]);
+    assert.deepEqual(seen.sp.map((r) => r.played_version), [-1, 33, 34, 0]);
     assert.equal(calls.filter(([url]) => url.includes('/scores?')).length, 1);
     assert.equal(calls.filter(([url]) => /make_grid_data|make_sp_rate_star_rows/.test(url)).length, 0);
   });
@@ -154,21 +176,39 @@ test('R2 failure, malformed JSON, mismatch, empty DB and conditional conflict ab
   }
 });
 
-test('CLI relative and Admin absolute hist paths reuse bytes once; changed files and standalone rebuild', async () => {
+test('CLI relative and Admin absolute hist paths reuse bytes once; changed files rebuild with fixture R2', async () => {
   for (const absolute of [false, true]) await fixture({}, async ({ run, file, calls, events, restRows }) => {
     await run();
     const target = absolute ? file : path.relative(process.cwd(), file);
-    assert.deepEqual((await updateHistFile(id, target)).restRows, restRows);
+    assert.deepEqual((await updateHistFile(id, target, { r2: undefined })).restRows, restRows);
     assert.equal(calls.filter(([url]) => url.includes('/scores?')).length, 1);
     assert.equal(events.filter((e) => e.startsWith('put:meta/')).length, 1);
   });
-  await fixture({}, async ({ run, file, calls }) => {
+  await fixture({}, async ({ run, file, calls, objects }) => {
+    process.env.SCORE_BUFFER_PREPARE = '1';
+    process.env.SCORE_BUFFER_CUMULATIVE = '1';
     await run(); fs.appendFileSync(file, ' ');
-    await updateHistFile(id, file);
+    objects.set('hist/' + id + '.json', Buffer.from(JSON.stringify([h34])));
+    await prepareOfficialHistory(id, undefined, { histFile: file, r2: {
+      async read(key) {
+        const bytes = objects.get(key);
+        return bytes ? { body: bytes.toString('utf8'), bytes, etag: '"old"' } : null;
+      },
+      async put(key, bytes) { objects.set(key, Buffer.from(bytes)); },
+    } });
     assert.equal(calls.filter(([url]) => url.includes('/scores?')).length, 2);
   });
-  await fixture({}, async ({ file, calls }) => {
-    assert.equal((await updateHistFile(id, file)).rows, 2);
+  await fixture({}, async ({ file, calls, objects }) => {
+    process.env.SCORE_BUFFER_PREPARE = '1';
+    process.env.SCORE_BUFFER_CUMULATIVE = '1';
+    const rebuilt = await prepareOfficialHistory(id, undefined, { histFile: file, r2: {
+      async read(key) {
+        const bytes = objects.get(key);
+        return bytes ? { body: bytes.toString('utf8'), bytes, etag: '"old"' } : null;
+      },
+      async put(key, bytes) { objects.set(key, Buffer.from(bytes)); },
+    } });
+    assert.equal(rebuilt.histRows.length, 2);
     assert.equal(calls.length, 1);
   });
 });
@@ -203,4 +243,106 @@ test('deferred persona calculates official values with R2 priority, new-user see
     assert.equal(Object.hasOwn(result, 'dpRecent'), false);
     assert.equal(Object.hasOwn(result, 'spRecent'), false);
   });
+});
+
+test('cumulative dump contracts: empty buffer and partial 34 upload preserve cumulative data', async () => {
+  const hist = [cumulativeRow];
+  const unchanged = (incoming) => normalizeAliasInputs({ histRows: hist, restRows: incoming,
+    aliases: emptyAliases, songs: cumulativeSongs });
+  assert.deepEqual(unchanged([]).histRows, hist);
+  assert.deepEqual(unchanged([]).restRows, []);
+  const partial34 = { ...cumulativeRest[0], score_id: 12346, played_version: 34,
+    ex_score: 2100, lamp: 6 };
+  const merged = unchanged([partial34]);
+  assert.equal(merged.histRows.some((row) => row[4] === 33), true);
+  assert.equal(merged.restRows[0].played_version, 34);
+  for (const version of [0, -1]) {
+    const sentinel = { ...cumulativeRest[0], score_id: 12347 + version, played_version: version };
+    assert.equal(unchanged([sentinel]).restRows[0].played_version, version);
+  }
+  assert.deepEqual(mergeScoreHistory(hist, []), hist);
+});
+
+test('cumulative late33 replay is idempotent and same score id keeps best improvement', async () => {
+  const old = [[100, 3, 4, 1900, 33, '2026-10-21T01:02:03.123456+00:00', '2026-10-21', 1, 18, 1500]];
+  const normalized = normalizeAliasInputs({ histRows: old, restRows: cumulativeRest,
+    aliases: emptyAliases, songs: cumulativeSongs });
+  const replay = mergeScoreHistory(normalized.histRows, normalized.restRows.map((r) => [r.song_id, r.diff, r.lamp,
+    r.ex_score, r.played_version, r.date, r.date_kst, r.play_style, r.bp, r.note_count]));
+  assert.deepEqual(mergeScoreHistory(replay, normalized.restRows.map((r) => [r.song_id, r.diff, r.lamp,
+    r.ex_score, r.played_version, r.date, r.date_kst, r.play_style, r.bp, r.note_count])), replay);
+  const improved = { ...cumulativeRest[0], ex_score: 2100, lamp: 6 };
+  assert.equal(normalizeAliasInputs({ histRows: old, restRows: [improved], aliases: emptyAliases,
+    songs: cumulativeSongs }).restRows[0].ex_score, 2100);
+  assert.equal(normalizeAliasInputs({ histRows: old, restRows: cumulativeRest, aliases: emptyAliases,
+    songs: cumulativeSongs }).restRows[0].played_version, 33);
+});
+
+test('cumulative candidate uses CAS winner bytes and freshly calculated alias fingerprints', async () => {
+  const currentHist = Buffer.from(JSON.stringify([cumulativeRow]), 'utf8');
+  const currentAliases = Buffer.from(JSON.stringify(emptyAliases), 'utf8');
+  const objects = new Map([
+    [`hist/${cumulativeId}.json`, { body: currentHist.toString('utf8'), bytes: currentHist, etag: '"current"' }],
+    ['meta/song-aliases.json', { body: currentAliases.toString('utf8'), bytes: currentAliases, etag: '"aliases"' }],
+  ]);
+  const operations = [];
+  const read = async (key) => { operations.push(['read', key]); return objects.get(key) ?? null; };
+  const put = async (key, body, etag) => {
+    operations.push(['put', key, etag]);
+    const prior = objects.get(key);
+    if (prior && etag !== prior.etag) throw new Error('412 precondition failed');
+    if (!prior && etag !== '*') throw new Error('missing If-None-Match');
+    const bytes = Buffer.from(body);
+    objects.set(key, { body: bytes.toString('utf8'), bytes, etag: '"next"' });
+  };
+  const conditionalRead = async (key) => read(key);
+  assert.equal((await read(`hist/${cumulativeId}.json`)).etag, '"current"');
+  await assert.rejects(() => put(`hist/${cumulativeId}.json`, currentHist, '"stale"'), /412/);
+  await put(`hist/${cumulativeId}.json`, currentHist, '"current"');
+  const downloaded = await conditionalRead(`hist/${cumulativeId}.json`);
+  const aliasObject = await conditionalRead('meta/song-aliases.json');
+  const candidate = buildCandidate({ iidxId: cumulativeId, restRows: cumulativeRest, previousHistRows: [],
+    aliases: emptyAliases, aliasesBytes: aliasObject.bytes, songs: cumulativeSongs,
+    publishedHistBytes: downloaded.bytes, downloadedHistBytes: downloaded.bytes });
+  assert.equal(candidate.hist.sha256, cumulativeHash(downloaded.bytes));
+  assert.equal(candidate.aliases_sha256, cumulativeHash(aliasObject.bytes));
+  const candidateKey = `meta/scores-delete-${cumulativeId}.json`;
+  await put(candidateKey, Buffer.from(JSON.stringify(candidate)), '*');
+  assert.deepEqual(operations.slice(0, 4).map(([kind, key]) => [kind, key]), [
+    ['read', `hist/${cumulativeId}.json`], ['put', `hist/${cumulativeId}.json`],
+    ['put', `hist/${cumulativeId}.json`], ['read', `hist/${cumulativeId}.json`],
+  ]);
+  assert.equal(operations.at(-1)[2], '*');
+});
+
+test('cumulative failures reject missing, malformed and changed hist or invalid aliases', async () => {
+  const makeCandidate = (published, downloaded = published, aliasesBytes = emptyAliasesBytes) => buildCandidate({
+    iidxId: cumulativeId, restRows: cumulativeRest, previousHistRows: [], aliases: emptyAliases,
+    aliasesBytes, songs: cumulativeSongs, publishedHistBytes: published, downloadedHistBytes: downloaded,
+  });
+  const read = async (objects, key) => objects.has(key) ? objects.get(key) : null;
+  assert.equal(await read(new Map(), `hist/${cumulativeId}.json`), null); // 404 is the only missing-object representation.
+  await assert.rejects(async () => { throw new Error('HTTP 503'); }, /HTTP 503/);
+  const valid = Buffer.from(JSON.stringify([cumulativeRow]), 'utf8');
+  assert.throws(() => makeCandidate(Buffer.from('{'), Buffer.from('{')), /JSON|expected normalized/);
+  assert.throws(() => makeCandidate(valid, Buffer.from('[]')), /bytes differ/);
+  assert.throws(() => makeCandidate(valid, valid, Buffer.from('{')), /valid UTF-8 JSON/);
+  assert.throws(() => makeCandidate(valid, valid, Buffer.from(JSON.stringify({ v: 1, rules: [{ from: 100, to: 999,
+    scope: 'song' }] }))), /terminal target/);
+});
+
+test('cumulative interruption before candidate, dry publish and reverse hash are rejected', async () => {
+  const histBytes = Buffer.from(JSON.stringify([cumulativeRow]), 'utf8');
+  const candidate = buildCandidate({ iidxId: cumulativeId, restRows: cumulativeRest, previousHistRows: [],
+    aliases: emptyAliases, aliasesBytes: emptyAliasesBytes, songs: cumulativeSongs,
+    publishedHistBytes: histBytes, downloadedHistBytes: histBytes });
+  const operations = [];
+  const dry = true;
+  const dryPublish = async (key, body) => { if (!dry) operations.push(['put', key, body]); };
+  await dryPublish(`meta/scores-delete-${cumulativeId}.json`, Buffer.from(JSON.stringify(candidate)));
+  assert.deepEqual(operations, []);
+  const reversed = { ...candidate, score_ids: [12345, 12346], rows: [
+    { ...cumulativeRest[0], score_id: 12346 }, { ...cumulativeRest[0], score_id: 12345 },
+  ] };
+  assert.throws(() => validateCandidate(reversed, cumulativeId), /same ascending set/);
 });
