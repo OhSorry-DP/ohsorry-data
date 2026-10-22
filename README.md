@@ -124,6 +124,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-22 — Supabase scores 버퍼화 3단계: 공식값 users 역기록(기본 꺼짐)
+
+- `SCORE_BUFFER_PREPARE=1` 일 때만. `dump-user.yml` 이 R2 user 게시에 성공한 뒤 `write-official-user.mjs` 로 공식 ★·native★·r★·SP CPI/★·SP r★ tuple 을 `upsert_user`(sql/33 14인자), `osPattern` 을 `upsert_user_feature_score` 로 다시 쓴다. 새 RPC·DDL 없음.
+- 웹훅 루프 차단: 쓰기 직전 DB 행에 RPC 의 실효 규칙(COALESCE·SP tuple 보존·동일 모델 GREATEST)을 적용해 바뀌는 게 없으면 POST 를 생략한다. 값이 바뀐 업로드당 덤프 1회가 더 돌 수 있다(묶음 2 C10 에서 제거 예정).
+- dj_name·ereter_star·rank·plays 는 DB 최신값 재전송. 역기록 실패는 후속 스텝·persona·코치 job 을 막지 않고 마지막 `official-write-check` job 에서 실패로 드러난다.
+- `tests/dump-persona-split` 테스트를 2단계 S6 concurrency 분기에 맞춰 갱신. 테스트 463/463.
+
 ### 2026-10-22 — Supabase scores 버퍼화 3단계 묶음 1: 덤프가 R2 hist 로 공식 계산(기본 꺼짐)
 
 - 전부 `SCORE_BUFFER_PREPARE=1` 일 때만 동작한다. 미설정이면 덤프·repersona 는 이전과 같다.
@@ -131,7 +138,7 @@ https://data.iidx.in/version.json
 - `persona-lib.mjs`: `historyInputs()`(hist→DP/SP grid·차트·SP r★ 전 시즌 행)·`loadPersonaResources({official:true})`(Rating 모듈·ereter/CPI/피처 자산, 누락 시 예외).
 - `dump-user.mjs`: 준비 경로에서 hist 게시·재다운로드 검증 뒤 그 hist 로 공식값을 R2 user 에 반영(이전값은 R2 우선, 404 신규만 users). 갱신 이력 RPC 는 유지.
 - `r2-repersona.mjs`: 단일·배치 재계산을 R2 hist 기반 공식 계산·조건부 PUT(412 1회 재시도)으로.
-- 운영 전 필요: `patternScoreKernel.js` 가 gist 에 없다(404) — 스위치를 켜기 전에 게시 방식을 정해야 한다.
+- `patternScoreKernel.js` 를 운영 gist 에 게시(10-22, Rating 원본·크롤러 inline 사본 패리티 통과).
 - 테스트 451/452(실패 1 = `tests/dump-persona-split` 워크플로 순서 검사, 2단계 S6 부터 기존 실패).
 
 ### 2026-10-22 — Supabase scores 버퍼화 2단계: 삭제 후보·게이트 준비(기본 꺼짐)
