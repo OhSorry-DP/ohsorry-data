@@ -7,12 +7,13 @@ import { updateSinglePersona, historyPersonaFields } from './r2-repersona.mjs';
 const id = '12345678';
 const h34 = [101, 3, 6, 1800, 34, '2026-10-21T01:02:03.123456+00:00', '2026-10-21', 1, 20, 1000];
 const late33 = [101, 3, 4, 1900, 33, '2026-10-22T01:02:03.123457+00:00', '2026-10-22', 1, 18, 1000];
+const sp34 = [101, 3, 4, 1500, 34, '2026-10-21T01:02:03.123456+00:00', '2026-10-21', 0, 10, 1000];
 const song = { song_id: 101, title: 'TEST', textage_song_id: 'test', series_no: 34, ac: true, legen: false };
 const meta = { songs: { test: { title: 'TEST', notes: { DA: 1000, SA: 1000 }, levels: { DA: 12, SA: 12 } } } };
 const baseData = () => ({ user: { iidx_id: id, dj_name: 'OLD', star: 1, native_star: 2, r_star: 3,
   sp_cpi: 4, sp_star: 5, sp_r_star: 6, sp_r_star_model_id: 'old', sp_r_star_formula_version: 1 },
   dp: [{ old: 'dp' }], sp: [{ old: 'sp' }], plays: 77, date: 'kept', persona: { p: 1 },
-  spPersona: { s: 1 }, reachNps: { n: 1 }, osPattern: [{ play_style: 1, os_notes: 1 }] });
+  spPersona: { s: 1 }, reachNps: { n: 1 }, osPattern: [{ play_style: 1, notes: 1 }] });
 
 function officialResources(capture = {}) {
   return { textageMeta: meta, ratingJson: { ratings: {}, rateStar: { scale: 1 }, spRateStar: {} },
@@ -22,6 +23,7 @@ function officialResources(capture = {}) {
     userRateStarLib: { inferUserRStar(charts) { capture.rCharts = charts; return { rStar: 10 }; } },
     spSkillLib: { computeSpStarGuarded() { return { cpiInt: 11, starRounded: 12 }; } },
     spUserRateStarLib: { inferSpUserRStar(rows, _seed, opts) {
+      capture.spCalls = (capture.spCalls || 0) + 1;
       capture.spRows = rows; capture.prevSp = opts.prev;
       return capture.spFew ? { status: 'few_plays', modelId: 'model-new', formulaVersion: 2 }
         : { status: 'ok', rStar: 13, modelId: 'model-new', formulaVersion: 2 };
@@ -123,11 +125,17 @@ test('persona 불변이어도 공식 tuple, 모델명, osPattern과 reachNps 변
   { unchanged: true });
   assert.equal(client.puts.length, 0);
 
-  const before = { ...data.user }, fewCapture = { spFew: true }, fewR = officialResources(fewCapture);
-  const few = officialFields(fewR, fewCapture, data);
+  const noSpCapture = {}, noSp = officialFields(officialResources(noSpCapture), noSpCapture, data, [h34, late33]);
+  assert.equal(noSpCapture.spCalls || 0, 0);
+  assert.deepEqual({ rStar: noSp.userFields.sp_r_star, model: noSp.userFields.sp_r_star_model_id,
+    formula: noSp.userFields.sp_r_star_formula_version }, { rStar: 6, model: 'old', formula: 1 });
+
+  const fewCapture = { spFew: true }, fewR = officialResources(fewCapture);
+  const few = officialFields(fewR, fewCapture, data, [h34, late33, sp34]);
+  assert.equal(fewCapture.spCalls, 1);
+  assert.equal(fewCapture.spRows.length, 1);
   assert.deepEqual(few.userFields, { star: 8, native_star: 9, r_star: 10, sp_cpi: 11, sp_star: 12,
     sp_r_star: null, sp_r_star_model_id: 'model-new', sp_r_star_formula_version: 2 });
-  assert.equal(before.sp_r_star_model_id, 'old');
   client = makeClient(data);
   assert.deepEqual(await updateSinglePersona(id, { client, official: true, calculate: async () => ({
     persona: data.persona, spPersona: data.spPersona, ...few,

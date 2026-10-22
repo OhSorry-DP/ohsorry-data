@@ -17,6 +17,7 @@ test.after(() => {
 const id = '12345678';
 const h34 = [101, 3, 6, 1800, 34, '2026-10-21T01:02:03.123456+00:00', '2026-10-21', 1, 20, 1000];
 const late33 = [101, 3, 4, 1900, 33, '2026-10-22T01:02:03.123457+00:00', '2026-10-22', 1, 18, 1000];
+const sp34 = [101, 3, 4, 1500, 34, '2026-10-21T01:02:03.123456+00:00', '2026-10-21', 0, 10, 1000];
 const songs = [{ song_id: 101, title: 'TEST', textage_song_id: 'test', series_no: 34, ac: true, legen: false }];
 const oldUser = { star: 8, sp_r_star: 9, sp_r_star_model_id: 'old', sp_r_star_formula_version: 'v1' };
 const previous = { user: oldUser, dpRecent: [], spRecent: [{ song_id: 101 }], persona: { old: true }, spPersona: { old: true }, sp: [] };
@@ -30,7 +31,7 @@ async function fixture(options, fn) {
   const savedFetch = globalThis.fetch, savedSwitch = process.env.SCORE_BUFFER_PREPARE;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dump-official-'));
   const file = path.join(dir, 'hist.json');
-  const events = [], calls = [], seen = {};
+  const events = [], calls = [], seen = { spCalls: 0 };
   const rows = options.rows ?? [h34, late33];
   const restRows = rows.map((r, i) => ({ score_id: i === 0 ? 3401 : 3301 + i - 1, ...Object.fromEntries(HIST_COLS.map((k, j) => [k, r[j]])) }));
   const objects = new Map([['hist/' + id + '.json', Buffer.from(JSON.stringify(options.oldRows ?? [h34]))], ['songs.json', Buffer.from(JSON.stringify(songs))]]);
@@ -65,7 +66,7 @@ async function fixture(options, fn) {
     } },
     userRateStarLib: { inferUserRStar: () => ({}) },
     spSkillLib: { computeSpStarGuarded: () => ({}) },
-    spUserRateStarLib: { inferSpUserRStar(rows) { seen.sp = rows; return { status: 'few_plays', modelId: 'new', formulaVersion: 'v2' }; } },
+    spUserRateStarLib: { inferSpUserRStar(rows) { seen.spCalls++; seen.sp = rows; return { status: 'few_plays', modelId: 'new', formulaVersion: 'v2' }; } },
     patternScoreKernelLib: { computePatternScoreKernel: () => ({ matched: 1, vec: { NOTES: 7 } }) },
   };
   globalThis.fetch = async (url, init = {}) => {
@@ -111,7 +112,7 @@ test('late33 confirmed ten-column history is published and verified before offic
     assert.ok(events.indexOf('put:meta/scores-delete-' + id + '.json') < events.indexOf('calculate'));
     assert.deepEqual([seen.dp[0].exScore, seen.dp[0].lampNum, seen.dp[0].noteCount], [1900, 6, 1000]);
     assert.deepEqual([result.dp[0].ex_score, result.dp[0].lamp, result.dp[0].bp, result.user.star], [1900, 6, 18, 1900]);
-    assert.equal(result.osPattern.find((row) => row.play_style === 1).os_notes, 7);
+    assert.equal(result.osPattern.find((row) => row.play_style === 1).notes, 7);   // R2·DB 열 이름(접두사 없음)
     assert.equal(seen.prevStar, undefined);   // ★ 래칫은 엔진 인자가 아니라 어댑터 바깥 max(크롤러 정본)
     assert.equal(mergeScoreHistory([h34], [late33]).length, 2);
     const better = [...late33]; better[3] = 1950; better[2] = 6;
@@ -173,16 +174,24 @@ test('CLI relative and Admin absolute hist paths reuse bytes once; changed files
 });
 
 test('deferred persona calculates official values with R2 priority, new-user seed and few-plays tuple result', async () => {
-  await fixture({}, async ({ run, calls }) => {
+  await fixture({ rows: [h34, late33, sp34] }, async ({ run, calls, seen }) => {
     const result = await run();
     assert.equal(result.user.star, 1900);
     assert.equal(result.user.sp_r_star, null);
     assert.equal(result.user.sp_r_star_model_id, 'new');
     assert.equal(result.user.sp_r_star_formula_version, 'v2');
+    assert.equal(seen.spCalls, 1);
+    assert.equal(seen.sp.length, 1);
     assert.deepEqual(result.persona, previous.persona);
     assert.deepEqual(result.spRecent, recent[0]);
     assert.deepEqual(result.user.plays, ['keep']);
     assert.equal(calls.some(([url, init]) => init.method && init.method !== 'GET' && !url.includes('make_update_history')), false);
+  });
+  await fixture({}, async ({ run, seen }) => {
+    const result = await run();
+    assert.deepEqual({ rStar: result.user.sp_r_star, model: result.user.sp_r_star_model_id,
+      formula: result.user.sp_r_star_formula_version }, { rStar: 9, model: 'old', formula: 'v1' });
+    assert.equal(seen.spCalls, 0);
   });
   await fixture({ newUser: true, rows: [], oldRows: [] }, async ({ run }) => {
     const result = await run(); assert.equal(result.user.sp_r_star, null); assert.equal(result.persona, null);
