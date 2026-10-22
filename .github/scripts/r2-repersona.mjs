@@ -139,6 +139,29 @@ export function historyPersonaFields(id, data, histRows, songs, arrange, R, engi
   };
 }
 
+export async function runHistoryBatch({ ids, client, R, songs, engine, arrangeFor, dry = false, concurrency = 4 }) {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error('concurrency must be a positive integer');
+  const results = new Array(ids.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, ids.length) }, async () => {
+    while (next < ids.length) {
+      const index = next++;
+      const id = ids[index];
+      try {
+        let firstArrange;
+        const result = await updateSinglePersona(id, { client, official: true, dry,
+          calculate: async (data, { histRows }) => {
+            const arrange = firstArrange === undefined ? (firstArrange = await arrangeFor(id)) : await arrangeFor(id);
+            return historyPersonaFields(id, data, histRows, songs, arrange, R, engine);
+          } });
+        results[index] = { id, ...result };
+      } catch (error) { results[index] = { id, error }; }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function runSingle(id) {
   if (!validId(id)) throw new Error('Invalid single-user id');
   const engine = await import('./persona-lib.mjs');
@@ -182,6 +205,31 @@ export async function main(args = process.argv.slice(2), deps = {}) {
     const source = await client.read('users-list.json');
     const ids = selectIds(source ? JSON.parse(source.bytes.toString('utf8')) : null, options);
     return runCoachOnly({ ids, options, producer: deps.producer, producerMain: deps.producerMain, client });
+  }
+  if (process.env.SCORE_BUFFER_PREPARE === '1') {
+    const options = parseArgs(args);
+    const { conditionalR2Client } = await import('./r2-client.mjs');
+    const client = deps.client || conditionalR2Client({ account: process.env.CLOUDFLARE_ACCOUNT_ID,
+      token: process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN });
+    const listSource = await client.read('users-list.json');
+    if (!listSource) throw new Error('R2 users-list.json missing');
+    const ids = selectIds(JSON.parse(listSource.body), options);
+    const engine = deps.engine || await import('./persona-lib.mjs');
+    const R = deps.R || await engine.loadPersonaResources({ official: true });
+    const songsSource = await client.read('songs.json');
+    if (!songsSource) throw new Error('R2 songs.json missing');
+    const songs = JSON.parse(songsSource.body);
+    if (!Array.isArray(songs)) throw new TypeError('R2 songs.json must be an array');
+    const { fetchDpArrange } = await import('./dp-arrange.mjs');
+    const results = await runHistoryBatch({ ids, client, R, songs, engine, dry: options.dry,
+      concurrency: options.concurrency, arrangeFor: deps.arrangeFor || fetchDpArrange });
+    const failed = results.filter(result => result.error || result.conflicted);
+    const unchanged = results.filter(result => result.unchanged || (result.dry && !result.changed)).length;
+    const changed = results.filter(result => result.updated || (result.dry && result.changed)).length;
+    console.log(`공식 batch 완료: 성공 ${changed} / 무변화 ${unchanged} / 충돌 ${results.filter(result => result.conflicted).length} / 실패 ${results.filter(result => result.error).length}${options.dry ? ' / DRY RUN' : ''}`);
+    for (const result of failed) console.error(`batch 실패 ${result.id}: ${result.conflicted ? 'conflicted' : result.error.message}`);
+    if (failed.length) process.exitCode = 1;
+    return results;
   }
   const { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } = await import('./persona-lib.mjs');
   const { fetchDpArrangeByUser } = await import('./dp-arrange.mjs');
