@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   dump:
+    outputs:
+      official_write: ${{ steps.official_write.outcome }}
     runs-on: ubuntu-latest
     # §4 로 git 쓰기가 사라져 write 권한이 필요 없다 — 최소 권한으로 낮춘다.
     permissions:
@@ -112,6 +114,7 @@ jobs:
         run: node .github/scripts/dump-user.mjs "$IIDX_ID"
 
       - name: Upload to R2 (data.iidx.in)
+        id: upload
         # 서빙 = R2(cf/ Worker → data.iidx.in). **§4 이후 R2 가 유일본이다**(git 데이터 커밋 중단).
         #   종전 jsdelivr purge 를 대체 — `@main` 별칭 해석 캐시(12h)를 purge API 로는 못 풀어
         #   push 직후 purge 가 구본을 12h 고착시키는 사고가 두 번 났다(2026-07-17 / 2026-08-04).
@@ -155,6 +158,15 @@ jobs:
             if [ -f "hist/$IIDX_ID.json" ]; then put "hist/$IIDX_ID.json"; else echo "::warning::hist 파일 없음 — PUT skip"; fi
           fi
           exit $rc
+
+      - name: Write official user to Supabase
+        id: official_write
+        if: ${{ !cancelled() && env.SCORE_BUFFER_PREPARE == '1' && steps.dump.outcome == 'success' && steps.upload.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node .github/scripts/write-official-user.mjs "$IIDX_ID" "$GITHUB_WORKSPACE/user/$IIDX_ID.json"
 
 
       # 신곡 누락 시에만 공통 생성기로 갱신. 본인 덤프는 이미 반영됐고 실패해도 병합을 계속한다.
@@ -339,3 +351,12 @@ jobs:
         shell: bash
         run: |
           node .github/scripts/coach-precompute.mjs --only "$IIDX_ID" --concurrency 4
+  official-write-check:
+    needs: [dump, persona, dispatch-coach-user]
+    if: ${{ !cancelled() && needs.dump.outputs.official_write == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail job when official write failed
+        run: |
+          echo "::error::Official user write failed"
+          exit 1
