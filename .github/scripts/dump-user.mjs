@@ -2,7 +2,11 @@
 //   지정 iidx_id 유저를 supabase 에서 받아 user/{id}.json 으로 갱신(웹 fetchUserProfile 의 jsdelivr 소스).
 //   ohSorryAdmin/scripts/dump-data-repo.js 의 단일유저판 — 스키마/RPC 동일하게 유지할 것.
 import fs from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { calculateOfficialScores } from './official-score.mjs';
+import { historyInputs } from './persona-lib.mjs';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
 import { getText } from './r2-client.mjs';
 import { conditionalR2Client } from './r2-client.mjs';
@@ -61,15 +65,20 @@ const slimRow = (r) => { const o = {}; for (const k of SCORE_KEEP) if (r[k] !== 
 // 이전 덤프를 R2 에서 한 번만 읽는다. 세 상태를 구별하는 게 핵심이다 —
 //   있음 / 정당한 부재(404, 신규 유저) / **모름**(조회 실패). 마지막을 '없음' 으로 바꾸면
 //   그게 곧 데이터 삭제다(users.star 사고와 같은 구조, 2026-09-04).
-async function readPreviousDump(id) {
+async function readPreviousDump(id, r2, official = false) {
   try {
-    const text = await getText(`user/${id}.json`);
+    const object = r2 ? await r2.read(`user/${id}.json`) : undefined;
+    const text = r2 ? (object ? (object.bytes ?? object.body).toString('utf8') : null) : await getText(`user/${id}.json`);
     if (text === null) {
       console.log('이전 덤프 없음(신규 유저, ' + id + ')');
       return { prevOk: true, prev: null };
     }
     try {
       const prev = JSON.parse(text);
+      if (official && (!prev || typeof prev !== 'object' || Array.isArray(prev)
+        || !prev.user || typeof prev.user !== 'object' || Array.isArray(prev.user))) {
+        throw new Error('이전 공식 user 덤프 형식 오류');
+      }
       console.log('이전 덤프 읽음(' + id + ')');
       return { prevOk: true, prev };
     } catch (e) {
@@ -83,28 +92,42 @@ async function readPreviousDump(id) {
 }
 
 export async function dumpUser(id, personaRes, opts = {}) {
+  const preparing = process.env.SCORE_BUFFER_PREPARE === '1';
+  const prepared = preparing ? await prepareOfficialHistory(id, personaRes, opts) : null;
+  if (preparing) personaRes = await officialResources(personaRes);
   const eid = encodeURIComponent(id);
-  const [user, radars, osPattern, dp, spResult, dpRecent, spRecent, prevResult, dpArrange] = await Promise.all([
+  let [user, radars, osPattern, dp, spResult, dpRecent, spRecent, prevResult, dpArrange] = await Promise.all([
     // dbr_pw 는 비밀(공개 repo·anon 노출 금지) → 명시 컬럼만 select(select=* 금지).
     rest(`users?iidx_id=eq.${eid}&select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,date,native_star,sp_cpi,sp_star,sp_r_star,sp_r_star_model_id,sp_r_star_formula_version,plays`),
     rest(`user_radars?iidx_id=eq.${eid}&select=*`),
     // SP(play_style=0)/DP(1) 두 행 모두 — SP 분석탭 피처별 랭킹용. 소비처(웹 osPatternFromRows·
     //   merge-user-into-list)는 반드시 play_style 로 골라 쓸 것(순서에 기대면 SP↔DP 혼입).
     rest(`user_ohsorry_radars?iidx_id=eq.${eid}&select=*`),
-    rpcGrid(id, 1),
-    rpcGrid(id, 0).then((rows) => ({ ok: true, rows })).catch((error) => ({ ok: false, error })),
-    rpcUpdateHistory(id, 1).catch(() => null),   // DP 갱신 이력 — RPC 미적용/실패 시 null(필드 생략)
-    rpcUpdateHistory(id, 0).catch(() => null),   // SP 갱신 이력 — SP 연습추천 피처 recency 용
-    readPreviousDump(id),
+    preparing ? null : rpcGrid(id, 1),
+    preparing ? null : rpcGrid(id, 0).then((rows) => ({ ok: true, rows })).catch((error) => ({ ok: false, error })),
+    rpcUpdateHistory(id, 1).catch(() => null),   // DP 갱신 이력
+    rpcUpdateHistory(id, 0).catch(() => null),   // SP 갱신 이력
+    readPreviousDump(id, opts.r2, preparing),
     fetchDpArrange(id),   // 실패는 DP grid와 같이 덤프 전체 중단 — 배치 없음으로 대체하지 않는다.
   ]);
   const { prevOk, prev } = prevResult;
+  let inputs = null;
+  if (preparing) {
+    if (!prevOk) throw new Error(`이전 공식 덤프 상태 모름(${id})`);
+    inputs = historyInputs(id, prepared.histRows, prepared.songs, dpArrange, personaRes);
+    const official = calculateOfficialScores({ id, inputs, R: personaRes,
+      previousUser: prev ? prev.user : user[0], previousOsPattern: prev ? prev.osPattern : osPattern });
+    if (user[0]) user = [{ ...user[0], ...official.userFields }];
+    osPattern = official.osPattern;
+    dp = inputs.dp;
+    spResult = { ok: true, rows: inputs.sp };
+  }
   // ── persona (DP)/spPersona (SP) 성향 리포트 — raw grid rows 로 슬림 전에 산출. 실패 시 이전값 유지, 이전 상태도 모르면 중단. ──
   let persona = null;
   let personaError = null;
   let dpCharts = null;
   try {
-    dpCharts = chartsFromGridRows(attachArrange(dp, dpArrange), personaRes.textageMeta);
+    dpCharts = inputs ? inputs.dpCharts : chartsFromGridRows(attachArrange(dp, dpArrange), personaRes.textageMeta);
     // 미룸은 이전 덤프 상태를 알 때만 — 모르면(R2 조회 실패) 보존할 값이 없으니 예전처럼 여기서 계산한다.
     if (!opts.deferPersona || !prevOk) persona = personaFor(dpCharts, personaRes, user[0]);
   } catch (e) {
@@ -201,6 +224,42 @@ export async function dumpUser(id, personaRes, opts = {}) {
 export const HIST_COLS = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'date_kst', 'play_style', 'bp', 'note_count'];
 const HIST_DATE_I = HIST_COLS.indexOf('date');
 
+let officialResourcePromise;
+function officialResources(resources) {
+  if (resources?.onlyOSR2eLib && resources?.spUserRateStarLib && resources?.patternScoreKernelLib) return resources;
+  return officialResourcePromise ??= loadPersonaResources({ official: true });
+}
+
+const preparedFiles = new Map();
+const bytesHash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const historyClient = () => conditionalR2Client({
+  account: process.env.CLOUDFLARE_ACCOUNT_ID,
+  token: process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN,
+  rawBytes: true,
+});
+
+export async function prepareOfficialHistory(id, personaRes, opts = {}) {
+  const r2 = opts.r2 ?? historyClient();
+  const previous = await r2.read(`hist/${id}.json`);
+  const oldRows = previous ? JSON.parse((previous.bytes ?? previous.body).toString('utf8')) : [];
+  if (!Array.isArray(oldRows)) throw new Error('R2 hist 응답이 배열이 아닙니다');
+  const { histRows, restRows } = await fetchUserHistWithScores(id);
+  if (!histRows.length && oldRows.some((row) => !Array.isArray(row) || row[4] !== -10)) {
+    throw new Error(`hist 급감(${id}): ${oldRows.length}행 → 0행 — 기존본 유지`);
+  }
+  const songsObject = opts.songs === undefined ? await r2.read('songs.json') : null;
+  const songs = opts.songs ?? (songsObject ? JSON.parse((songsObject.bytes ?? songsObject.body).toString('utf8')) : null);
+  if (!Array.isArray(songs)) throw new Error('R2 songs 응답이 배열이 아닙니다');
+  const histBytes = Buffer.from(JSON.stringify(histRows), 'utf8');
+  await publishPreparedHist(id, { restRows, histBytes, r2, previous });
+  const file = path.resolve(opts.histFile ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'hist', `${id}.json`));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, histBytes);
+  const result = { histRows, histBytes, restRows, songs };
+  preparedFiles.set(file, { id, hash: bytesHash(histBytes), result });
+  return result;
+}
+
 // scores 전 행 → 배열형. score_id 오름차순으로 페이징(안정 정렬이 없으면 offset 페이징이 행을 흘린다).
 export async function fetchUserHist(id) {
   const eid = encodeURIComponent(id);
@@ -231,14 +290,14 @@ export async function fetchUserHistWithScores(id) {
   return { histRows, restRows };
 }
 
-export async function publishPreparedHist(id, { restRows, histBytes, r2 = conditionalR2Client({
+export async function publishPreparedHist(id, { restRows, histBytes, previous: initial, r2 = conditionalR2Client({
   account: process.env.CLOUDFLARE_ACCOUNT_ID,
   token: process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN,
   rawBytes: true,
 }) }) {
   if (!/^[A-Za-z0-9]+$/.test(id)) throw new Error('잘못된 iidx_id 형식');
   const histKey = `hist/${id}.json`;
-  const previous = await r2.read(histKey);
+  const previous = initial === undefined ? await r2.read(histKey) : initial;
   const histEtag = previous ? previous.etag : null;
   await r2.put(histKey, histBytes, histEtag);
   const downloaded = await r2.read(histKey);
@@ -283,6 +342,15 @@ export function histUnchanged(prev, probe) {
 // hist 파일 갱신. file 에 R2 현재본이 미리 놓여 있으면(워크플로가 받아둠) 변경 없을 때 전체 조회를 건너뛴다.
 export async function updateHistFile(id, file) {
   const preparing = process.env.SCORE_BUFFER_PREPARE === '1';
+  const normalizedFile = path.resolve(file);
+  const cached = preparedFiles.get(normalizedFile);
+  if (preparing && cached) {
+    preparedFiles.delete(normalizedFile);
+    if (cached.id === id && fs.existsSync(normalizedFile)
+      && bytesHash(fs.readFileSync(normalizedFile)) === cached.hash) {
+      return { rebuilt: true, rows: cached.result.histRows.length, restRows: cached.result.restRows };
+    }
+  }
   let prev = null;
   try { prev = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* 없거나 깨짐 → 재생성 */ }
   if (preparing) {
@@ -324,7 +392,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   if (!ids.length) { console.error('iidx_id 인자 없음'); process.exit(1); }
   fs.mkdirSync('user', { recursive: true });
   fs.mkdirSync('hist', { recursive: true });
-  const personaRes = await loadPersonaResources();
+  const personaRes = await loadPersonaResources({ official: process.env.SCORE_BUFFER_PREPARE === '1' });
   for (const id of ids) {
     if (!/^[A-Za-z0-9]+$/.test(id)) { console.error('잘못된 iidx_id 형식:', id); process.exit(1); }
     let dirtyCharts = [];
@@ -336,10 +404,6 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     }
     fs.writeFileSync(`user/${id}.json`, JSON.stringify(data));
     const h = await updateHistFile(id, `hist/${id}.json`);
-    if (process.env.SCORE_BUFFER_PREPARE === '1') {
-      const histBytes = fs.readFileSync(`hist/${id}.json`);
-      await publishPreparedHist(id, { restRows: h.restRows, histBytes });
-    }
     const slice = writeUserSliceFile(id, data, `uslice-out/${id}.json`, { histFile: `hist/${id}.json` });
     console.log('slice 계산:', id, '| rc', slice.rc);
     console.log('덤프:', id, '| dp', data.dp.length, 'sp', data.sp.length, '| persona', data.persona ? 'OK' : '없음', '| spPersona', data.spPersona ? 'OK' : '없음',
