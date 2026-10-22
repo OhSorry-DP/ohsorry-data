@@ -60,11 +60,11 @@ export function calculateOfficialScores({ id, inputs, R, previousUser, previousO
   const inferEreter = required(R?.onlyOSR2eLib?.inferEreter, 'onlyOSR2eLib.inferEreter');
   const ereterData = required(R?.ereterData, 'ereterData');
   const er = inferEreter(inputs.dpCharts, rating, {
-    charts: ereterData.charts || ereterData, players: ereterData.players || {}, prevStar: user?.star,
+    charts: ereterData.charts || ereterData, players: ereterData.players || {},
   });
   assertNumericResult(er?.ereterStar, 'inferEreter.ereterStar');
   assertNumericResult(er?.ohsorryStar, 'inferEreter.ohsorryStar');
-  if (finite(er?.ereterStar)) userFields.star = round(er.ereterStar, 4);
+  if (finite(er?.ereterStar)) userFields.star = round(finite(user?.star) && user.star > er.ereterStar ? user.star : er.ereterStar, 4);
   if (finite(er?.ohsorryStar)) userFields.native_star = round(er.ohsorryStar, 4);
 
   const userRate = required(R?.userRateStarLib?.inferUserRStar, 'userRateStarLib.inferUserRStar');
