@@ -124,6 +124,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-23 — 버퍼화 4단계: 누적 hist·조건부 삭제·업로드 필터
+
+- 누적 hist CAS·별칭 정규화·후보/manifest v2 지문과 snapshot 검증 기반 조건부 삭제를 반영했다. append 폐기, 기존 입력 의미 유지. 업로드 필터 정본은 `score-history.mjs` `filterScoreHistoryRows`; dbConn·INF·Admin 동기 사본 패리티 시험 `.github/scripts/tests/score-upload-filter.test.mjs` 는 로컬 수동 실행이며 CI 글롭 밖이다.
+- 🔴 기존 3단계 배포 안내 대신 [data-serving.md](../docs/data-serving.md)의 「4단계 결과」를 따른다. 빈 별칭표 선게시 → data(누적 OFF) → gist → Web → Admin → INF → 구 업로더 비중 확인·SQL 03 → 01 → 누적 ON·운영 읽기 전용 대조 → 다음 daily snapshot 직후 89388691 시범 삭제 순이다. compact cron 중단으로 DB 가 증가한다. 운영 배포·삭제는 대기.
+- 랭킹·1위 R2 집계(R01~R10)·전 유저 삭제 확대·필터 O(n²) 최적화(3천 행 1.9초)·삭제 후 재유입 행 수 측정은 후속이다. 버전 bump 없음.
+
 ### 2026-10-22 — 버퍼화 3단계 운영 대조 수정·준비 모드 덤프 누락 수정
 
 - 스위치 ON 전 운영 R2 읽기 전용 대조에서 찾은 공식 계산 결함 수정: DP 엔진 입력의 textage 키 제거(★·native★ 가 lv11floor 0.02 로 나오던 문제), `osPattern` 을 R2·DB 열 이름(`notes`…)으로, 피처 `soflan` 을 커널 키 `SOF-LAN` 에서, SP 이력 없는 유저는 SP r★ 미계산. 대조 6명 ★·native★·osPattern 37축 일치.
