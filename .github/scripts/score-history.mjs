@@ -100,6 +100,27 @@ export function mergeScoreHistory(histRows, incomingRows) {
   return result;
 }
 
+/** Replay REST score rows in score_id order, preserving the existing history slots. */
+export function replayScoreBuffer(histRows, restRows) {
+  if (!Array.isArray(histRows) || !Array.isArray(restRows)) fail('histRows and restRows must be arrays');
+  const seen = new Set();
+  const ordered = restRows.map((row, index) => {
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+      fail(`REST row at index ${index} must be an object`);
+    }
+    const id = row.score_id;
+    if (!Number.isSafeInteger(id) || id < 0) fail(`REST row at index ${index} score_id must be a safe integer`);
+    if (seen.has(id)) fail(`duplicate score_id in REST rows: ${id}`);
+    seen.add(id);
+    return { id, row: [row.song_id, row.diff, row.lamp, row.ex_score, row.played_version,
+      row.date, row.date_kst, row.play_style, row.bp, row.note_count] };
+  }).sort((a, b) => a.id - b.id);
+
+  let acc = histRows;
+  for (const { row } of ordered) acc = mergeScoreHistory(acc, [row]);
+  return acc;
+}
+
 /** Build the SQL make_grid_data shape from history rows without mutating inputs. */
 export function gridFromHistory(iidxId, histRows, songs, playStyle = 1) {
   if (!Array.isArray(histRows) || !Array.isArray(songs)) fail('histRows and songs must be arrays');
