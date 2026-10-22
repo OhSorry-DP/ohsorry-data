@@ -124,6 +124,16 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-22 — Supabase scores 버퍼화 3단계 묶음 1: 덤프가 R2 hist 로 공식 계산(기본 꺼짐)
+
+- 전부 `SCORE_BUFFER_PREPARE=1` 일 때만 동작한다. 미설정이면 덤프·repersona 는 이전과 같다.
+- `official-score.mjs` 신설: hist grid 로 공식 ★·native★·r★·SP CPI/★·SP r★ tuple·`osPattern`(os_*)을 계산하는 순수 어댑터. ★ 래칫·SP r★ few_plays 규칙은 크롤러 정본(`calcOhsorryCore.js`)과 같다.
+- `persona-lib.mjs`: `historyInputs()`(hist→DP/SP grid·차트·SP r★ 전 시즌 행)·`loadPersonaResources({official:true})`(Rating 모듈·ereter/CPI/피처 자산, 누락 시 예외).
+- `dump-user.mjs`: 준비 경로에서 hist 게시·재다운로드 검증 뒤 그 hist 로 공식값을 R2 user 에 반영(이전값은 R2 우선, 404 신규만 users). 갱신 이력 RPC 는 유지.
+- `r2-repersona.mjs`: 단일·배치 재계산을 R2 hist 기반 공식 계산·조건부 PUT(412 1회 재시도)으로.
+- 운영 전 필요: `patternScoreKernel.js` 가 gist 에 없다(404) — 스위치를 켜기 전에 게시 방식을 정해야 한다.
+- 테스트 451/452(실패 1 = `tests/dump-persona-split` 워크플로 순서 검사, 2단계 S6 부터 기존 실패).
+
 ### 2026-10-22 — Supabase scores 버퍼화 2단계: 삭제 후보·게이트 준비(기본 꺼짐)
 
 - 전부 `SCORE_BUFFER_PREPARE=1`(repo 변수) 일 때만 동작한다. 미설정이면 덤프·워크플로·snapshot 동작은 이전과 같다.
