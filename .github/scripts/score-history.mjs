@@ -1,3 +1,5 @@
+// BEGIN SCORE_HISTORY_UPLOAD_FILTER_SYNC
+// Canonical source: D:/work/ohsorry-data/.github/scripts/score-history.mjs
 // Pure score history merge helpers. Date parsing follows dbr-history.mjs day()/instant().
 
 const COLS = 10;
@@ -99,6 +101,35 @@ export function mergeScoreHistory(histRows, incomingRows) {
   }
   return result;
 }
+
+/** Return original incoming rows whose canonical merge changes history. */
+export function filterScoreHistoryRows(histRows, incomingRows) {
+  if (!Array.isArray(histRows) || !Array.isArray(incomingRows)) fail('histRows and incomingRows must be arrays');
+  const baseline = mergeScoreHistory(histRows, []);
+  // Validate all incoming rows and request uniqueness through the canonical validator.
+  const normalizedIncoming = incomingRows.map((r, i) => normalize(r, 'incoming', i));
+  const normalizedRequest = mergeScoreHistory([], incomingRows);
+  void normalizedRequest;
+
+  const byChart = new Map();
+  for (const row of baseline) {
+    if (row[4] === -10) continue;
+    const key = chartKey(row);
+    const group = byChart.get(key) ?? [];
+    group.push(row);
+    byChart.set(key, group);
+  }
+
+  const changed = [];
+  for (let i = 0; i < normalizedIncoming.length; i += 1) {
+    const item = normalizedIncoming[i];
+    const group = byChart.get(chartKey(item.row)) ?? [];
+    const merged = mergeScoreHistory(group, [incomingRows[i]]);
+    if (JSON.stringify(merged) !== JSON.stringify(group)) changed.push(incomingRows[i]);
+  }
+  return changed;
+}
+// END SCORE_HISTORY_UPLOAD_FILTER_SYNC
 
 /** Replay REST score rows in score_id order, preserving the existing history slots. */
 export function replayScoreBuffer(histRows, restRows) {
