@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeScoreHistory, replayScoreBuffer } from './score-history.mjs';
+import { filterScoreHistoryRows, mergeScoreHistory, replayScoreBuffer } from './score-history.mjs';
 
 const d = '2026-10-20T03:12:45.123456+00:00';
 const d2 = '2026-10-20T03:12:45.123457+00:00';
@@ -155,4 +155,71 @@ test('기존 저점 이력·슬롯 순서·8열 확장·DBR 행을 보존', () =
   const result = replayScoreBuffer(hist, [rest(44)]);
   assert.deepEqual(result, [low, [...legacy, null, null], dbr, row(100, 3, 5, 2000, 33,
     rest(44).date, '2026-10-22', 1, null, 1500)]);
+});
+
+function assertUploadFilter(hist, incoming, expected) {
+  const baseline = mergeScoreHistory(hist, []);
+  const selected = filterScoreHistoryRows(hist, incoming);
+  assert.deepEqual(selected.map((r) => incoming.indexOf(r)), expected);
+  assert.deepEqual(mergeScoreHistory(hist, selected), mergeScoreHistory(hist, incoming));
+  assert.deepEqual(mergeScoreHistory(hist, selected), mergeScoreHistory(baseline, selected));
+}
+
+test('upload filter: EX and lamp decisions', () => {
+  const hist = [row(1, 0, 5, 200), row(2, 0, 5, 200), row(3, 0, 5, 200),
+    row(4, 0, 5, 200), row(5, 0, 5, 200)];
+  const incoming = [row(1, 0, 7, 199), row(2, 0, 5, 200), row(3, 0, 4, 201),
+    row(4, 0, 6, 200, 30, d2), row(5, 0, 7, 199, 31)];
+  assertUploadFilter(hist, incoming, [2, 3, 4]);
+});
+
+test('upload filter: same KST date slot replacement and date-only no-op', () => {
+  const hist = [row(1, 0, 4, 100, 30, d, '2026-10-20'), row(2, 0, 4, 100, 30, d, '2026-10-20')];
+  const incoming = [row(1, 0, 5, 101, 30, d2, '2026-10-20'),
+    row(2, 0, 4, 100, 30, '2026-10-20T04:00:00Z', '2026-10-20')];
+  assertUploadFilter(hist, incoming, [0]);
+});
+
+test('upload filter: note_count NULL fill without replacing a known value', () => {
+  const hist = [row(1, 0, 4, 100, 30, d, '2026-10-20', 1, 3, null),
+    row(2, 0, 4, 100, 30, d, '2026-10-20', 1, 3, 120)];
+  const incoming = [row(1, 0, 1, 90, 30, d2, '2026-10-20', 1, 9, 110),
+    row(2, 0, 7, 90, 30, d2, '2026-10-20', 1, 9, 130)];
+  assertUploadFilter(hist, incoming, [0]);
+});
+
+test('upload filter: BP NULL and zero fill; lower BP alone is ignored', () => {
+  const hist = [row(1, 0, 4, 100, 30, d, '2026-10-20', 1, null, 100),
+    row(2, 0, 4, 100, 30, d, '2026-10-20', 1, null, 100),
+    row(3, 0, 4, 100, 30, d, '2026-10-20', 1, 2, 100)];
+  const incoming = [row(1, 0, 4, 100, 30, d2, '2026-10-20', 1, 5, 100),
+    row(2, 0, 4, 100, 30, d2, '2026-10-20', 1, 0, 100),
+    row(3, 0, 4, 100, 30, d2, '2026-10-20', 1, 1, 100)];
+  assertUploadFilter(hist, incoming, [0, 1]);
+});
+
+test('upload filter: late version 33 plus SP/DP and version zero separation', () => {
+  const hist = [row(100, 3, 7, 2200, 34), row(100, 3, 4, 1800, 33, d, '2026-10-20', 1),
+    row(100, 3, 3, 1600, 33, d, '2026-10-20', 0), row(100, 3, 2, 1500, 0)];
+  const incoming = [row(100, 3, 5, 1900, 33, d2, '2026-10-20', 1),
+    row(100, 3, 5, 1700, 33, d2, '2026-10-20', 0), row(100, 3, 3, 1550, 0, d2)];
+  assertUploadFilter(hist, incoming, [0, 1, 2]);
+});
+
+test('upload filter: legacy rows, microseconds, duplicates, errors, DBR, immutability and idempotence', () => {
+  const legacy = row(1, 0, 4, 100, 30, d, '2026-10-20', 1).slice(0, 8);
+  const hist = [legacy, row(2, 0, 7, 300, -10, '2026-10-20T03:12:45Z', '2026-10-20')];
+  const incoming = [row(1, 0, 5, 101, 30, d2, '2026-10-20'),
+    row(3, 0, 4, 80, 30, '2026-10-20T03:12:45.123458+00:00', '2026-10-20')];
+  const histBefore = structuredClone(hist);
+  const incomingBefore = structuredClone(incoming);
+  assertUploadFilter(hist, incoming, [0, 1]);
+  const filtered = filterScoreHistoryRows(hist, incoming);
+  assert.deepEqual(filterScoreHistoryRows(hist, filtered), filtered);
+  assert.deepEqual(hist, histBefore);
+  assert.deepEqual(incoming, incomingBefore);
+  assert.throws(() => filterScoreHistoryRows([], [incoming[0], [...incoming[0]]]), /duplicate/);
+  assert.throws(() => filterScoreHistoryRows([], [row(4, 0, 4, 100, 30, 'bad-date')]), /date/);
+  const dbr = { scores: [], history: [], updatedAt: '2026-10-23T02:00:00Z', v: 1 };
+  assert.throws(() => filterScoreHistoryRows(dbr, incoming), /arrays/);
 });
