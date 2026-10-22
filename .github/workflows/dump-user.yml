@@ -29,6 +29,7 @@ jobs:
     env:
       IIDX_ID: ${{ github.event.client_payload.iidx_id }}
       SCORE_BUFFER_PREPARE: ${{ vars.SCORE_BUFFER_PREPARE || '0' }}
+      SCORE_BUFFER_CUMULATIVE: ${{ vars.SCORE_BUFFER_CUMULATIVE || '0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -70,6 +71,7 @@ jobs:
       #   취득 실패는 무해 — 파일이 없으면 전체 재생성으로 떨어진다(정확성은 그쪽이 상위).
       #   ⚠️ hist 는 git 에 없다(.gitignore) — R2 가 유일한 보관처이므로 베이스도 R2 에서 받는다.
       - name: R2 hist 현재본 받기
+        if: ${{ env.SCORE_BUFFER_CUMULATIVE != '1' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
@@ -154,7 +156,7 @@ jobs:
           #   이 잡의 낡은 로컬 사본으로 되돌려버린다.
           # hist 도 R2 PUT 이 유일한 보관 경로다. 변경이 없어 재생성을 건너뛴 회차도 그대로 다시
           #   올린다(내용 동일 · ingress 무료 · Class A 는 월 100만 중 하루 70여 회).
-          if [ "$SCORE_BUFFER_PREPARE" != "1" ]; then
+          if [ "$SCORE_BUFFER_CUMULATIVE" != "1" ] && [ "$SCORE_BUFFER_PREPARE" != "1" ]; then
             if [ -f "hist/$IIDX_ID.json" ]; then put "hist/$IIDX_ID.json"; else echo "::warning::hist 파일 없음 — PUT skip"; fi
           fi
           exit $rc
