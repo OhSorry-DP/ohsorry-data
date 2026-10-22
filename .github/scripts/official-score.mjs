@@ -41,7 +41,7 @@ function featureRows(id, rows, style, R, previous) {
   row.play_style = style;
   const vec = result.vec;
   for (const feat of FEATS) {
-    const value = vec?.[feat.toUpperCase()];
+    const value = vec?.[feat === 'soflan' ? 'SOF-LAN' : feat.toUpperCase()];   // 커널 키는 'SOF-LAN'(dbConn.js:1019 정본 매핑)
     assertNumericResult(value, `computePatternScoreKernel.${feat}`);
     row[feat] = style === 0 && !SP_FEATS.has(feat) ? null : (finite(value) ? value : null);
   }
