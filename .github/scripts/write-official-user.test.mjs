@@ -65,11 +65,14 @@ test('disabled mode skips without validation, environment, or fetch', async () =
 
 test('sends exact users and 39 feature arguments, preserving protected values and empty 204 responses', async () => {
   const f = fixture();
-  const result = await writeOfficialUser(id, dump, opts(f));
+  const input = structuredClone(dump);
+  input.user.ereter_star = 99;
+  const result = await writeOfficialUser(id, input, opts(f));
   const posts = f.calls.filter((x) => x.init.method === 'POST');
   const user = JSON.parse(posts.find((x) => x.url.pathname.endsWith('/upsert_user')).init.body);
   assert.deepEqual(Object.keys(user), ['p_iidx_id', 'p_dj_name', 'p_star', 'p_ereter_star', 'p_sp_rank', 'p_dp_rank', 'p_native_star', 'p_sp_cpi', 'p_sp_star', 'p_r_star', 'p_plays', 'p_sp_r_star', 'p_sp_r_star_model_id', 'p_sp_r_star_formula_version']);
   assert.equal(user.p_dj_name, 'KEEP'); assert.equal(user.p_ereter_star, 7); assert.equal(user.p_sp_rank, 6); assert.deepEqual(user.p_plays, [34]);
+  assert.equal(user.p_dp_rank, 5);
   const dp = JSON.parse(posts.find((x) => x.url.pathname.endsWith('/upsert_user_feature_score') && JSON.parse(x.init.body).p_play_style === 1).init.body);
   const sp = JSON.parse(posts.find((x) => x.url.pathname.endsWith('/upsert_user_feature_score') && JSON.parse(x.init.body).p_play_style === 0).init.body);
   assert.equal(Object.keys(dp).length, 39); assert.equal(Object.keys(sp).length, 39); assert.equal(dp.p_os_hands, 16); assert.equal(sp.p_os_hands, null);
@@ -79,16 +82,29 @@ test('sends exact users and 39 feature arguments, preserving protected values an
 });
 
 test('effective RPC state prevents repeat writes after the first successful application', async () => {
+  for (const nullable of ['native_star', 'sp_cpi']) {
+    const f = fixture();
+    const input = structuredClone(dump);
+    Object.assign(input.user, { star: current.star, native_star: current.native_star, r_star: current.r_star,
+      sp_cpi: current.sp_cpi, sp_star: current.sp_star, sp_r_star: current.sp_r_star,
+      sp_r_star_model_id: current.sp_r_star_model_id, sp_r_star_formula_version: current.sp_r_star_formula_version });
+    input.user[nullable] = null;
+    input.osPattern = [];
+    const result = await writeOfficialUser(id, input, opts(f));
+    assert.equal(f.calls.filter((x) => x.init.method === 'POST' && x.url.pathname.endsWith('/rpc/upsert_user')).length, 0,
+      `${nullable}: COALESCE 보존 시 users POST 생략`);
+    assert.equal(result.usersWritten, false);
+  }
   const f = fixture();
-  await writeOfficialUser(id, dump, opts(f));
-  assert.deepEqual(f.db.user, { ...current, star: 11, native_star: 10, r_star: 9, sp_cpi: 200, sp_star: 5,
-    sp_r_star: null, sp_r_star_model_id: 'm2', sp_r_star_formula_version: 'f2' });
-  // The fixture applies the actual COALESCE effects; align feature rows to the submitted values.
-  const before = f.calls.length;
-  const result = await writeOfficialUser(id, dump, opts(f));
-  assert.equal(f.calls.slice(before).filter((x) => x.init.method === 'POST').length, 0,
-    JSON.stringify(f.calls.slice(before).map((x) => [x.url.pathname, x.init.body && JSON.parse(x.init.body).p_play_style])));
-  assert.equal(result.usersWritten, false); assert.deepEqual(result.stylesWritten, []);
+  const input = structuredClone(dump);
+  Object.assign(input.user, { star: current.star, native_star: current.native_star, r_star: current.r_star,
+    sp_cpi: current.sp_cpi, sp_star: current.sp_star, sp_r_star: null,
+    sp_r_star_model_id: null, sp_r_star_formula_version: null });
+  input.osPattern = [];
+  const result = await writeOfficialUser(id, input, opts(f));
+  assert.equal(f.calls.filter((x) => x.init.method === 'POST' && x.url.pathname.endsWith('/rpc/upsert_user')).length, 0,
+    'all-null SP tuple preserves the stored tuple and skips users POST');
+  assert.equal(result.usersWritten, false);
 });
 
 test('null, zero, COALESCE, same-model ratchet and model tuple transitions are compared correctly', async () => {
