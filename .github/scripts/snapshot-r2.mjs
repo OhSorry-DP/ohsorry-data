@@ -29,9 +29,17 @@ import { promisify } from 'node:util';
 import { gunzip as gunzipCallback } from 'node:zlib';
 import { pathToFileURL } from 'node:url';
 import { validateCandidate, sha256Hex } from './score-buffer.mjs';
-import { runScoreDeleteGate } from './score-delete-gate.mjs';
+import { runScoreDeleteGate, validateDeleteResponse } from './score-delete-gate.mjs';
 
 const gunzip = promisify(gunzipCallback);
+const verifiedSnapshots = new WeakMap();
+const liveSnapshots = new WeakSet();
+export const isVerifiedDeleteSnapshot = (value) => verifiedSnapshots.has(value);
+export const isExecutableDeleteSnapshot = (value) => liveSnapshots.has(value);
+export function getVerifiedDeleteSnapshot(value) {
+  if (!verifiedSnapshots.has(value)) throw new TypeError('invalid verified snapshot');
+  return structuredClone(verifiedSnapshots.get(value));
+}
 
 export function buildDeleteManifest(entries) {
   const candidates = [];
@@ -47,14 +55,18 @@ export function buildDeleteManifest(entries) {
     if (candidate.hist.key !== entry.histKey || candidate.hist.sha256 !== sha256Hex(entry.histBytes)) {
       throw new TypeError(`candidate hist mismatch: ${entry.key}`);
     }
-    candidates.push({ key: entry.key, sha256: sha256Hex(entry.bytes), hist: { key: entry.histKey, sha256: sha256Hex(entry.histBytes) } });
+    candidates.push({ key: entry.key, candidate_sha256: sha256Hex(entry.bytes),
+      hist_sha256: sha256Hex(entry.histBytes), aliases_sha256: candidate.aliases_sha256,
+      rows: candidate.rows, hist: { key: entry.histKey, sha256: sha256Hex(entry.histBytes) } });
   }
   candidates.sort((a, b) => a.key.localeCompare(b.key));
-  return { candidates };
+  if (new Set(candidates.map((item) => item.key)).size !== candidates.length) throw new TypeError('duplicate candidate');
+  return { v: 2, candidates };
 }
 
 function parseTar(bytes) {
   const files = new Map();
+  const seen = new Set();
   const text = (b) => { const end = b.indexOf(0); return b.subarray(0, end < 0 ? b.length : end).toString('utf8'); };
   const octal = (b) => {
     const s = text(b).trim();
@@ -75,17 +87,26 @@ function parseTar(bytes) {
     const rawName = prefix ? `${prefix}/${name}` : name;
     const type = h[156];
     const size = octal(h.subarray(124, 136));
+    if (!Number.isSafeInteger(size)) throw new Error('invalid tar length');
     const magic = h.subarray(257, 263).toString('ascii');
     if (magic !== 'ustar\0' && magic !== 'ustar ') throw new Error('unsupported tar format');
+    const normalized = rawName.replace(/^\.\//, '').replace(/\/$/, '');
+    if (rawName.includes('\\') || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized)
+      || normalized.split('/').some((part) => part === '..' || part === '.')) {
+      if (!(type === 53 && (rawName === './' || rawName === '.'))) throw new Error('unsafe tar path');
+    }
     if (type === 53) {
       if (size !== 0) throw new Error('directory with body');
+      if (seen.has(normalized)) throw new Error(`duplicate tar path: ${normalized}`);
+      seen.add(normalized);
+      offset += 512;
       continue;
     }
     if (type !== 0 && type !== 48) throw new Error('tar link or unsupported member type');
-    const normalized = rawName.replace(/^\.\//, '').replace(/\/$/, '');
-    if (!normalized || normalized === '.') continue;
+    if (!normalized || normalized === '.') throw new Error('empty tar file path');
     if (normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').some((part) => part === '..' || part === '.')) throw new Error('unsafe tar path');
-    if (files.has(normalized)) throw new Error(`duplicate tar path: ${normalized}`);
+    if (seen.has(normalized)) throw new Error(`duplicate tar path: ${normalized}`);
+    seen.add(normalized);
     const start = offset + 512, end = start + size;
     if (end > bytes.length) throw new Error('truncated tar body');
     files.set(normalized, bytes.subarray(start, end));
@@ -98,7 +119,9 @@ function parseTar(bytes) {
 
 export async function verifyDeleteSnapshot({ snapshotKey, tarBytes, expectedManifest }) {
   if (!(tarBytes instanceof Uint8Array)) throw new TypeError('tarBytes must be bytes');
-  if (!expectedManifest || !Array.isArray(expectedManifest.candidates)) throw new TypeError('invalid expected manifest');
+  tarBytes = Buffer.from(tarBytes);
+  expectedManifest = structuredClone(expectedManifest);
+  if (!expectedManifest || expectedManifest.v !== 2 || !Array.isArray(expectedManifest.candidates)) throw new TypeError('invalid expected manifest');
   const tarSha256 = sha256Hex(tarBytes);
   const unpacked = await gunzip(tarBytes);
   const files = parseTar(unpacked);
@@ -111,7 +134,7 @@ export async function verifyDeleteSnapshot({ snapshotKey, tarBytes, expectedMani
   const candidates = [];
   for (const item of expectedManifest.candidates) {
     const bytes = files.get(item.key);
-    if (!bytes || sha256Hex(bytes) !== item.sha256) throw new Error(`candidate missing or hash mismatch: ${item.key}`);
+    if (!bytes || sha256Hex(bytes) !== item.candidate_sha256) throw new Error(`candidate missing or hash mismatch: ${item.key}`);
     const id = item.key.slice('meta/scores-delete-'.length, -'.json'.length);
     let candidate;
     try { candidate = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
@@ -120,27 +143,76 @@ export async function verifyDeleteSnapshot({ snapshotKey, tarBytes, expectedMani
     const histBytes = files.get(item.hist.key);
     if (!histBytes || sha256Hex(histBytes) !== item.hist.sha256 || candidate.hist.key !== item.hist.key
       || candidate.hist.sha256 !== item.hist.sha256) throw new Error(`candidate hist mismatch: ${item.key}`);
-    candidates.push({ iidxId: id, candidateKey: item.key, candidateBytes: Buffer.from(bytes), histBytes: Buffer.from(histBytes) });
+    if (item.hist_sha256 !== candidate.hist.sha256 || item.aliases_sha256 !== candidate.aliases_sha256
+      || JSON.stringify(item.rows) !== JSON.stringify(candidate.rows)) throw new Error('manifest fingerprint mismatch');
+    candidates.push({ iidxId: id, candidateKey: item.key, candidate_sha256: item.candidate_sha256,
+      hist_sha256: item.hist_sha256, aliases_sha256: item.aliases_sha256, rows: candidate.rows,
+      candidateBytes: Buffer.from(bytes), histBytes: Buffer.from(histBytes) });
   }
-  return { snapshotKey, tarSha256, candidates };
+  const rebuilt = buildDeleteManifest(candidates.map((item) => ({ key: item.candidateKey, bytes: item.candidateBytes,
+    histKey: `hist/${item.iidxId}.json`, histBytes: item.histBytes })));
+  if (JSON.stringify(rebuilt) !== JSON.stringify(manifest)) throw new Error('invalid manifest schema');
+  const proof = { snapshotKey, tarSha256, candidates };
+  // Keep private copies: exposed Buffers and nested rows are mutable.
+  verifiedSnapshots.set(proof, structuredClone(proof));
+  return proof;
 }
 
-export async function prepareScoreDeletes(verifiedSnapshot) {
-  if (!verifiedSnapshot || !Array.isArray(verifiedSnapshot.candidates)) throw new TypeError('invalid verified snapshot');
+export async function prepareScoreDeletes(verifiedSnapshot, { execute = false, deleteScoreRows } = {}) {
+  if (!verifiedSnapshots.has(verifiedSnapshot)) throw new TypeError('invalid verified snapshot');
+  if (execute && !liveSnapshots.has(verifiedSnapshot)) throw new TypeError('same-run uploaded daily snapshot required');
   const results = [];
-  for (const candidate of verifiedSnapshot.candidates) {
+  for (const candidate of verifiedSnapshots.get(verifiedSnapshot).candidates) {
+    if (candidate.iidxId !== '89388691') continue;
     const result = await runScoreDeleteGate({
       iidxId: candidate.iidxId,
+      verifiedSnapshot,
       candidateBytes: candidate.candidateBytes,
       histBytes: candidate.histBytes,
       snapshotKey: verifiedSnapshot.snapshotKey,
       tarSha256: verifiedSnapshot.tarSha256,
-      execute: false,
+      execute, deleteScoreRows,
     });
     results.push({ iidxId: candidate.iidxId, result });
+    if (result.status === 'partial') {
+      const { batches, ...summary } = result;
+      console.error(JSON.stringify({ iidxId: candidate.iidxId, ...summary }));
+      const error = new Error('score deletion incomplete');
+      error.result = result;
+      throw error;
+    }
     console.log(`  삭제 계획 ${candidate.iidxId}: ${result.status} (${result.scoreIds.length} IDs)`);
   }
   return results;
+}
+
+export function createDeleteScoreRowsAdapter({ url, key, fetchImpl = fetch }) {
+  if (typeof url !== 'string' || !/^https?:\/\//.test(url) || !key) throw new TypeError('Supabase credentials required');
+  return async (iidxId, rows) => {
+    const response = await fetchImpl(`${url.replace(/\/$/, '')}/rest/v1/rpc/delete_score_buffer_exact`, {
+      method: 'POST', headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_iidx_id: iidxId, p_rows: rows }),
+    });
+    if (!response.ok) throw new Error(`delete_score_buffer_exact HTTP ${response.status}`);
+    return validateDeleteResponse(await response.json(), rows);
+  };
+}
+
+export function collectDeleteEntry({ iidxId, candidateBytes, histBytes }) {
+  const candidate = validateCandidate(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(candidateBytes)), iidxId);
+  if (candidate.hist.sha256 !== sha256Hex(histBytes)) return null;
+  return { key: `meta/scores-delete-${iidxId}.json`, bytes: candidateBytes, histKey: candidate.hist.key, histBytes };
+}
+
+async function r2GetBytes(key) {
+  if (!useRest) {
+    const text = await r2GetText(key);
+    return text === null ? null : Buffer.from(text, 'utf8');
+  }
+  const response = await restFetch(key, { method: 'GET', headers: { 'Accept-Encoding': 'identity' } });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`R2 GET ${key} HTTP ${response.status}`);
+  return Buffer.from(await response.arrayBuffer());
 }
 
 const BUCKET = 'ohsorry-data';
@@ -241,10 +313,23 @@ const KIND = arg('kind', 'auto');
 const MAX_DROP = Number(arg('max-drop', '5')) / 100;
 const LIMIT = Number(arg('limit', '0'));
 const DRY = process.argv.includes('--dry') || LIMIT > 0;
+if (!Number.isSafeInteger(LIMIT) || LIMIT < 0 || !Number.isFinite(MAX_DROP) || MAX_DROP < 0 || MAX_DROP > 1) throw new TypeError('invalid snapshot limits');
+if (!['daily', 'monthly', 'auto'].includes(KIND)) throw new TypeError('invalid snapshot kind');
+const executeSetting = process.env.SCORE_BUFFER_DELETE_EXECUTE || '0';
+if (!['0', '1'].includes(executeSetting)) throw new TypeError('invalid SCORE_BUFFER_DELETE_EXECUTE');
+const allowedUsers = process.env.SCORE_BUFFER_DELETE_USERS;
+if (allowedUsers !== undefined && allowedUsers !== '89388691') throw new TypeError('SCORE_BUFFER_DELETE_USERS must be exactly 89388691');
+const executeDeletes = executeSetting === '1';
+if (executeDeletes && (allowedUsers !== '89388691' || DRY || KIND === 'monthly'
+  || process.env.SCORE_BUFFER_PREPARE !== '1')) throw new TypeError('deletion requires full daily preparation and 89388691');
+const deleteScoreRows = executeDeletes ? createDeleteScoreRowsAdapter({
+  url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY,
+}) : undefined;
 ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID;
 TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 REST_BASE = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/r2/buckets/${BUCKET}/objects/`;
 useRest = !!(ACCOUNT && TOKEN);
+if ((executeDeletes || process.env.SCORE_BUFFER_PREPARE === '1') && !useRest) throw new TypeError('score buffer snapshot requires R2 REST credentials');
 VIA_CDN = DRY && !useRest;
 TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'ohsorry-snap-'));
 SNAP = path.join(TMP, 'snap');
@@ -273,7 +358,8 @@ const deleteEntries = [];
 const scoreBufferEnabled = process.env.SCORE_BUFFER_PREPARE === '1' && !DRY && (KIND === 'daily' || KIND === 'auto');
 await pool(ids, CONC, async (id) => {
   try {
-    const [uText, hText] = await Promise.all([r2GetText(`user/${id}.json`), r2GetText(`hist/${id}.json`)]);
+    const [uText, histBytes] = await Promise.all([r2GetText(`user/${id}.json`), r2GetBytes(`hist/${id}.json`)]);
+    const hText = histBytes === null ? null : new TextDecoder('utf-8', { fatal: true }).decode(histBytes);
     if (uText == null) { stat.missUser++; } else {
       fs.writeFileSync(path.join(SNAP, 'user', `${id}.json`), uText);
       stat.bytes += Buffer.byteLength(uText);
@@ -283,22 +369,20 @@ await pool(ids, CONC, async (id) => {
       if (u.spPersona) stat.spPersona++;
     }
     if (hText == null) { stat.missHist++; } else {
-      fs.writeFileSync(path.join(SNAP, 'hist', `${id}.json`), hText);
-      stat.bytes += Buffer.byteLength(hText);
+      fs.writeFileSync(path.join(SNAP, 'hist', `${id}.json`), histBytes);
+      stat.bytes += histBytes.length;
       const h = JSON.parse(hText);
       if (Array.isArray(h)) stat.histRows += h.length;
     }
-    if (scoreBufferEnabled && uText != null && hText != null) {
+    if (scoreBufferEnabled && String(id) === '89388691' && uText != null && hText != null) {
       const candidateKey = `meta/scores-delete-${id}.json`;
       const candidateResponse = await restFetch(candidateKey, { method: 'GET' });
       if (candidateResponse.status !== 404) {
         if (!candidateResponse.ok) throw new Error(`R2 GET ${candidateKey} — HTTP ${candidateResponse.status}`);
         const candidateBytes = Buffer.from(await candidateResponse.arrayBuffer());
-        const histBytes = Buffer.from(hText, 'utf8');
-        const candidate = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(candidateBytes));
-        validateCandidate(candidate, id);
-        if (candidate.hist.sha256 !== sha256Hex(histBytes)) throw new Error(`candidate hist hash mismatch: ${id}`);
-        deleteEntries.push({ key: candidateKey, bytes: candidateBytes, histKey: `hist/${id}.json`, histBytes });
+        const entry = collectDeleteEntry({ iidxId: String(id), candidateBytes, histBytes });
+        if (entry) deleteEntries.push(entry);
+        else console.warn(`::warning::candidate/hist race: ${id}; deletion skipped, backup retained`);
       }
     }
   } catch (e) { fails.push(`${id}: ${e.message}`); }
@@ -312,6 +396,7 @@ for (const f of ROOT_FILES) {
 let expectedManifest = null;
 if (scoreBufferEnabled) {
   expectedManifest = buildDeleteManifest(deleteEntries);
+  fs.mkdirSync(path.join(SNAP, 'meta'), { recursive: true });
   for (const item of deleteEntries) fs.writeFileSync(path.join(SNAP, item.key), item.bytes);
   fs.writeFileSync(path.join(SNAP, 'scores-delete-manifest.json'), JSON.stringify(expectedManifest));
   stat.bytes += deleteEntries.reduce((n, e) => n + e.bytes.length, 0)
@@ -396,9 +481,13 @@ for (const t of targets) {
   if (scoreBufferEnabled && t.kind === 'daily') {
     const response = await restFetch(t.key, { method: 'GET', headers: { 'Accept-Encoding': 'identity' } });
     if (!response.ok) throw new Error(`R2 snapshot GET ${t.key} — HTTP ${response.status}`);
-    const proof = await verifyDeleteSnapshot({ snapshotKey: t.key, tarBytes: Buffer.from(await response.arrayBuffer()), expectedManifest });
+    const downloadedTar = Buffer.from(await response.arrayBuffer());
+    if (sha256Hex(downloadedTar) !== sha256Hex(fs.readFileSync(tarPath))) throw new Error('uploaded tar byte hash mismatch');
+    const proof = await verifyDeleteSnapshot({ snapshotKey: t.key, tarBytes: downloadedTar, expectedManifest });
+    liveSnapshots.add(proof);
     console.log(`  원본 tar 검증: ${proof.candidates.length} 후보 / SHA256 ${proof.tarSha256}`);
-    await prepareScoreDeletes(proof);
+    try { await prepareScoreDeletes(proof, { execute: executeDeletes, deleteScoreRows }); }
+    finally { liveSnapshots.delete(proof); }
   }
 }
 if (!DRY) {
