@@ -80,6 +80,9 @@ test('공식 로더는 wrapper·필수 모듈을 읽고 누락 자산을 실패�
     assert.ok(urls.some((u) => u.includes('https://data.iidx.in/lib/spUserRateStar.js')));
     json['ohSorryRating.json'] = { ratings: {}, rateStar: { scale: 1 } };
     await assert.rejects(loadPersonaResources({ official: true }), /official resources missing/);
+    json['ohSorryRating.json'] = { ratings: {}, rateStar: { scale: 1 }, spRateStar: {} };
+    json['sp-feature-scores-slim.json'] = {};
+    await assert.rejects(loadPersonaResources({ official: true }), /official resources missing/);
   } finally { globalThis.fetch = originalFetch; }
 });
 

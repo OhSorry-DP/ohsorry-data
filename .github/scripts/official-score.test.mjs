@@ -34,11 +34,16 @@ test('merge history → historyInputs → adapter forwards the late best and dro
   assert.equal(merged.length, 2);
   const inputs = historyInputs('12345678', merged, [song], [], { textageMeta: { songs: { test: { title: 'TEST', notes: { DA: 1000 }, levels: { DA: 12 } } } } });
   let seen;
-  const R = baseR({ onlyOSR2eLib: { inferEreter: (charts) => { seen = charts[0]; return { ereterStar: 2, ohsorryStar: 1.23456 }; } },
+  const ereterLib = rating('onlyOSRtoEreter.js');
+  const R = baseR({ onlyOSR2eLib: { inferEreter: (charts, data, ereter, opts) => { seen = charts[0]; return ereterLib.inferEreter(charts, data, ereter, opts); } },
     userRateStarLib: { inferUserRStar: (charts, data, opts) => { assert.equal(charts[0].exScore, 1900); assert.equal(opts.prevRStar, 4); return { rStar: 4 }; } } });
-  const result = calculateOfficialScores({ id: '12345678', inputs, R, previousUser: { star: 1, r_star: 4 } });
+  const unratcheted = ereterLib.inferEreter(inputs.dpCharts, ratingJson, { charts: [], players: {} }).ereterStar;
+  const previousStar = unratcheted + 1;
+  const result = calculateOfficialScores({ id: '12345678', inputs, R, previousUser: { star: previousStar, r_star: 4 } });
   assert.equal(seen.exScore, 1900); assert.equal(seen.lampNum, 6); assert.equal(seen.noteCount, 1000);
-  assert.deepEqual([result.userFields.star, result.userFields.native_star, result.userFields.r_star], [2, 1.2346, 4]);
+  assert.equal(result.userFields.star, previousStar, 'actual inferEreter ratchets to previous user star');
+  assert.equal(result.userFields.native_star, null);
+  assert.equal(result.userFields.r_star, 4);
   const worse = mergeScoreHistory([hist(33, 1950, 6, dateB)], [hist(33, 1900, 4, dateB)]);
   assert.equal(worse.length, 1); assert.equal(worse[0][3], 1950);
 });
