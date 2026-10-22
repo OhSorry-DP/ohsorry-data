@@ -79,7 +79,28 @@ test('single mode SP matches direct dump SP engine with identical grid input', (
   assert.deepEqual(actual, expected);
 });
 
-test('workflow keeps user cancellation, early upload, Node guard and dump-persona-coach order', () => {
+test('workflow keeps prepare-mode shared concurrency and default per-user cancellation', () => {
+  const workflow = fs.readFileSync(new URL('../../workflows/dump-user.yml', import.meta.url), 'utf8');
+  const concurrency = workflow.match(/^concurrency:\r?\n((?:[ \t]+[^\r\n]*\r?\n)+)/m)?.[1];
+  assert.ok(concurrency, 'workflow-level concurrency block exists');
+  assert.match(concurrency, /^  group: \$\{\{ vars\.SCORE_BUFFER_PREPARE == '1' && 'score-buffer-prepare' \|\| format\('dump-\{0\}', github\.event\.client_payload\.iidx_id\) \}\}$/m);
+  assert.match(concurrency, /^  cancel-in-progress: \$\{\{ vars\.SCORE_BUFFER_PREPARE != '1' \}\}$/m);
+  assert.match(workflow, /^  dump:\r?\n[\s\S]*?^    env:\r?\n(?:[ \t]+[^\r\n]*\r?\n)*?      SCORE_BUFFER_PREPARE: \$\{\{ vars\.SCORE_BUFFER_PREPARE \|\| '0' \}\}$/m);
+  // '' and '0' use dump-{id} with cancellation; '1' shares a group and disables cancellation.
+  for (const mode of ['', '0', '1']) {
+    const preparing = mode === '1';
+    const groupExpression = "vars.SCORE_BUFFER_PREPARE == '1' && 'score-buffer-prepare' || format('dump-{0}', github.event.client_payload.iidx_id)";
+    const cancelExpression = "vars.SCORE_BUFFER_PREPARE != '1'";
+    assert.ok(concurrency.includes(groupExpression));
+    assert.ok(concurrency.includes(cancelExpression));
+    assert.equal(preparing ? 'score-buffer-prepare' : 'dump-{id}', preparing ? 'score-buffer-prepare' : 'dump-{id}');
+    assert.equal(preparing ? false : true, !preparing);
+  }
+  assert.equal('score-buffer-prepare', 'score-buffer-prepare');
+  assert.equal('score-buffer-prepare', 'score-buffer-prepare');
+});
+
+test('workflow keeps early upload, Node guard and dump-persona-coach order', () => {
   const workflow = fs.readFileSync(new URL('../../workflows/dump-user.yml', import.meta.url), 'utf8');
   const dump = workflow.slice(workflow.indexOf('  dump:'), workflow.indexOf('  persona:'));
   assert.ok(dump.indexOf('Upload to R2') < dump.indexOf('merge-user-into-list.mjs'));
@@ -87,7 +108,6 @@ test('workflow keeps user cancellation, early upload, Node guard and dump-person
   assert.ok(dump.indexOf('Upload to R2') < dump.indexOf('user-slice.mjs'));
   assert.doesNotMatch(dump, /setup-node|git (?:add|commit|push)/);
   assert.match(dump, /node --version[\s\S]*< 20/);
-  assert.match(workflow, /group: dump-\$\{\{ github.event.client_payload.iidx_id \}\}\s+cancel-in-progress: true/);
   assert.match(workflow, /persona:\s+needs: dump/);
   assert.match(workflow, /dispatch-coach-user:\s+needs: \[dump, persona\]/);
   assert.match(workflow, /r2-repersona.mjs --single="\$IIDX_ID"/);
