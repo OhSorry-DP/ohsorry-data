@@ -38,6 +38,8 @@ jobs:
   snapshot:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -48,10 +50,29 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SCORE_BUFFER_PREPARE: ${{ vars.SCORE_BUFFER_PREPARE || '0' }}
+          SCORE_BUFFER_DELETE_EXECUTE: ${{ vars.SCORE_BUFFER_DELETE_EXECUTE || '0' }}
+          SCORE_BUFFER_DELETE_USERS: ${{ vars.SCORE_BUFFER_DELETE_USERS }}
         run: |
           # 폴백(wrangler)은 객체당 프로세스 스폰이라 742회 GET 에 쓸 수 없다 → 토큰 없으면 중단.
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "::error::CLOUDFLARE_API_TOKEN 미설정 — R2 접근 불가"; exit 1
+          fi
+          case "$SCORE_BUFFER_PREPARE" in
+            0|1) ;;
+            *) echo "::error::invalid SCORE_BUFFER_PREPARE (expected 0 or 1)"; exit 1 ;;
+          esac
+          case "$SCORE_BUFFER_DELETE_EXECUTE" in
+            0|1) ;;
+            *) echo "::error::invalid SCORE_BUFFER_DELETE_EXECUTE (expected 0 or 1)"; exit 1 ;;
+          esac
+          if [ -n "$SCORE_BUFFER_DELETE_USERS" ] && [ "$SCORE_BUFFER_DELETE_USERS" != "89388691" ]; then
+            echo "::error::SCORE_BUFFER_DELETE_USERS must be exactly 89388691"; exit 1
+          fi
+          if [ "$SCORE_BUFFER_DELETE_EXECUTE" = "1" ] && [ "$SCORE_BUFFER_DELETE_USERS" != "89388691" ]; then
+            echo "::error::deletion requires SCORE_BUFFER_DELETE_USERS=89388691"; exit 1
           fi
           ARGS="--kind=${{ inputs.kind || 'auto' }}"
           [ "${{ inputs.dry }}" = "true" ] && ARGS="$ARGS --dry"
