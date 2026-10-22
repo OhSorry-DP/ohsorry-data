@@ -95,6 +95,7 @@ async function readPreviousDump(id, r2, official = false) {
 
 export async function dumpUser(id, personaRes, opts = {}) {
   const preparing = process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1';
+  const cumulative = process.env.SCORE_BUFFER_CUMULATIVE === '1';
   const prepared = preparing ? await prepareOfficialHistory(id, personaRes, opts) : null;
   if (preparing) personaRes = await officialResources(personaRes);
   const eid = encodeURIComponent(id);
@@ -107,8 +108,8 @@ export async function dumpUser(id, personaRes, opts = {}) {
     rest(`user_ohsorry_radars?iidx_id=eq.${eid}&select=*`),
     preparing ? null : rpcGrid(id, 1),
     preparing ? null : rpcGrid(id, 0).then((rows) => ({ ok: true, rows })).catch((error) => ({ ok: false, error })),
-    rpcUpdateHistory(id, 1).catch(() => null),   // DP 갱신 이력
-    rpcUpdateHistory(id, 0).catch(() => null),   // SP 갱신 이력
+    cumulative ? recentHistoryFromRows(prepared.histRows, 1) : rpcUpdateHistory(id, 1).catch(() => null),
+    cumulative ? recentHistoryFromRows(prepared.histRows, 0) : rpcUpdateHistory(id, 0).catch(() => null),
     readPreviousDump(id, opts.r2, preparing),
     fetchDpArrange(id),   // 실패는 DP grid와 같이 덤프 전체 중단 — 배치 없음으로 대체하지 않는다.
   ]);
@@ -205,8 +206,9 @@ export async function dumpUser(id, personaRes, opts = {}) {
     } : null, radars, osPattern, persona, spPersona, reachNps,
     dp: dp.map(slimRow), sp,
     // 최근 92일 갱신 이력 [{song_id,diff,date_kst}] — ④/SP연습 피처 recency. null 이면 키 생략(웹이 RPC fallback).
-    ...(dpRecent ? { dpRecent } : {}),
-    ...(spRecent ? { spRecent } : {}),
+    ...(cumulative ? { dpRecent: dpRecent ?? [], spRecent: spRecent ?? [] } : {}),
+    ...(!cumulative && dpRecent ? { dpRecent } : {}),
+    ...(!cumulative && spRecent ? { spRecent } : {}),
   };
   if (result.user && opts.onDirty) {
     try { await opts.onDirty(computeDirtyCharts({ prevOk, prev, user: result.user, dp: result.dp })); }
@@ -225,6 +227,24 @@ export async function dumpUser(id, personaRes, opts = {}) {
 // - DBR(played_version=-10)은 dbr 문서에서 공급한다. 일반 hist 에는 포함하지 않는다.
 export const HIST_COLS = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'date_kst', 'play_style', 'bp', 'note_count'];
 const HIST_DATE_I = HIST_COLS.indexOf('date');
+
+function recentHistoryFromRows(rows, playStyle) {
+  const todayKst = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const cutoff = new Date(`${todayKst}T00:00:00+09:00`);
+  cutoff.setUTCDate(cutoff.getUTCDate() - 92);
+  const cutoffKst = cutoff.toISOString().slice(0, 10);
+  const distinct = new Map();
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length !== HIST_COLS.length) continue;
+    const [song_id, diff, , , played_version, , date_kst, style] = row;
+    if (style !== playStyle || played_version === -10 || typeof date_kst !== 'string'
+      || date_kst < cutoffKst || date_kst > todayKst) continue;
+    const key = `${song_id}\u0000${diff}\u0000${date_kst}`;
+    if (!distinct.has(key)) distinct.set(key, { song_id, diff, date_kst });
+  }
+  return [...distinct.values()].sort((a, b) => b.date_kst.localeCompare(a.date_kst)
+    || a.song_id - b.song_id || a.diff - b.diff);
+}
 
 let officialResourcePromise;
 function officialResources(resources) {
