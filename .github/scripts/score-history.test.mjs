@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeScoreHistory } from './score-history.mjs';
+import { mergeScoreHistory, replayScoreBuffer } from './score-history.mjs';
 
 const d = '2026-10-20T03:12:45.123456+00:00';
 const d2 = '2026-10-20T03:12:45.123457+00:00';
@@ -88,4 +88,71 @@ test('중복 요청·잘못된 날짜·불일치 날짜·11열·신규 DBR·기�
   const sourceBefore = structuredClone(valid);
   for (const run of cases) assert.throws(run);
   assert.deepEqual(valid, sourceBefore);
+});
+
+const rest = (scoreId, overrides = {}) => ({
+  score_id: scoreId, iidx_id: '89388691', song_id: 100, diff: 3, played_version: 33,
+  play_style: 1, ex_score: 2000, lamp: 5, bp: null, note_count: 1500,
+  date: '2026-10-22T01:02:03.123456+00:00', date_kst: '2026-10-22', ...overrides,
+});
+
+test('누적 재생은 여러 요청의 동일 채보를 허용하고 단일 요청 내부 중복은 거부', () => {
+  const first = replayScoreBuffer([], [rest(10)]);
+  const second = replayScoreBuffer(first, [rest(11, { ex_score: 2100 })]);
+  assert.equal(second.length, 1);
+  assert.equal(second[0][3], 2100);
+  assert.throws(() => replayScoreBuffer([], [rest(10), rest(10)]), /duplicate score_id/);
+});
+
+test('누적 재생은 같은 날 개선 결과로 슬롯을 교체하고 NULL BP·notes를 보충', () => {
+  const hist = [row(100, 3, 5, 2000, 33, '2026-10-22T01:02:03.123456+00:00', '2026-10-22', 1, null, null)];
+  const result = replayScoreBuffer(hist, [rest(12, { ex_score: 2100, lamp: 6, bp: 0, note_count: 1500 })]);
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0].slice(2, 4), [6, 2100]);
+  assert.deepEqual(result[0].slice(8), [0, 1500]);
+  assert.equal(result[0][5], hist[0][5]);
+});
+
+test('같은 버퍼를 두 번 재생해도 멱등이고 입력 배열을 바꾸지 않음', () => {
+  const hist = [row(100, 3, 4, 1800, 33, '2026-10-21T01:02:03Z', '2026-10-21', 1, null, null)];
+  const rows = [rest(20, { ex_score: 2000 })];
+  const beforeHist = structuredClone(hist);
+  const beforeRows = structuredClone(rows);
+  const once = replayScoreBuffer(hist, rows);
+  const twice = replayScoreBuffer(once, rows);
+  assert.deepEqual(twice, once);
+  assert.deepEqual(hist, beforeHist);
+  assert.deepEqual(rows, beforeRows);
+});
+
+test('33 늦은 업로드는 34·INF와 SP·DP 슬롯과 공존', () => {
+  const hist = [
+    row(100, 3, 7, 2200, 34, '2026-10-22T01:02:03Z', '2026-10-22', 1),
+    row(100, 3, 6, 1900, 0, '2026-10-22T01:02:04Z', '2026-10-22', 1),
+    row(100, 3, 4, 1700, 33, '2026-10-22T01:02:05Z', '2026-10-22', 0),
+  ];
+  const result = replayScoreBuffer(hist, [rest(30)]);
+  assert.deepEqual(result, [...hist, row(100, 3, 5, 2000, 33, rest(30).date, '2026-10-22', 1, null, 1500)]);
+});
+
+test('score_id 정렬 순으로 재생하고 마이크로초 및 원문 타임존을 보존하며 안전 정수 오류 거부', () => {
+  const early = rest(1, { ex_score: 1900, date: '2026-10-22T01:02:03.123456+00:00' });
+  const late = rest(2, { ex_score: 2000, date: '2026-10-22T01:02:03.123457+00:00' });
+  const input = [late, early];
+  const result = replayScoreBuffer([], input);
+  assert.equal(result.length, 1);
+  assert.equal(result[0][5], late.date);
+  assert.equal(result[0][3], late.ex_score);
+  assert.throws(() => replayScoreBuffer([], [rest(Number.MAX_SAFE_INTEGER + 1)]), /safe integer/);
+  assert.throws(() => replayScoreBuffer([], [rest(-1)]), /safe integer/);
+});
+
+test('기존 저점 이력·슬롯 순서·8열 확장·DBR 행을 보존', () => {
+  const low = row(100, 3, 2, 1500, 33, '2026-10-20T01:02:03Z', '2026-10-20', 1, 8, 1500);
+  const legacy = row(200, 1, 3, 800, 30, '2026-10-19T01:02:03Z', '2026-10-19', 0).slice(0, 8);
+  const dbr = row(300, 0, 7, 400, -10, '2026-10-18T01:02:03Z', '2026-10-18', 1, null, 300);
+  const hist = [low, legacy, dbr];
+  const result = replayScoreBuffer(hist, [rest(44)]);
+  assert.deepEqual(result, [low, [...legacy, null, null], dbr, row(100, 3, 5, 2000, 33,
+    rest(44).date, '2026-10-22', 1, null, 1500)]);
 });
