@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { mergeScoreHistory } from './score-history.mjs';
-import { historyInputs } from './persona-lib.mjs';
+import { historyInputs, loadPersonaResources } from './persona-lib.mjs';
 import { calculateOfficialScores } from './official-score.mjs';
 
 const require = createRequire(import.meta.url);
@@ -90,12 +90,22 @@ test('official DP/SP entries use kernel score rate and preserve style-specific n
   let allEntries;
   const R = baseR({ patternScoreKernelLib: { computePatternScoreKernel: (es) => { allEntries = es; return kernel.computePatternScoreKernel(es); } },
     textageMeta: { songs: { test: { notes: { DA: 1000, SA: 1000 } } } },
-    featureScores: { test: { DP_ANO: { NOTES: 100, HANDS: 50 } } }, spFeatScores: { test: { SP_ANO: { NOTES: 100 } } } });
+    featScores: { test: { DP_ANO: { NOTES: 100, HANDS: 50 } } }, spFeatScores: { test: { SP_ANO: { NOTES: 100 } } } });
   const old = [{ iidx_id: 'old', play_style: 0, custom: true }];
   const out = calculateOfficialScores({ id: 'x', inputs: { dpCharts: [], dp: [{ textage_song_id: 'test', diff: 3, ex_score: 1900 }], sp: [{ textage_song_id: 'test', diff: 3, ex_score: 1900 }], spRateRows: [] }, R, previousUser: {}, previousOsPattern: old });
   assert.equal(allEntries[0].scoreRate, 0.95);
   const dp = out.osPattern.find((r) => r.play_style === 1), sp = out.osPattern.find((r) => r.play_style === 0);
   assert.equal(dp.os_hands, 47.5); assert.equal(sp.os_hands, null); assert.equal(sp.os_notes, 95); assert.equal(sp.custom, true);
+
+  // loadPersonaResources의 official 반환 객체 키를 그대로 구성한 로컬 fixture (네트워크 fetch 금지).
+  const actualR = { featScores: { test: { DP_ANO: { NOTES: 100, HANDS: 50 } } }, spFeatScores: {}, ratingJson,
+    ereterData: { charts: [], players: {} }, cpiData: [], norm, textageMeta: { songs: { test: { notes: { DA: 1000 } } } },
+    onlyOSR2eLib: { inferEreter: () => ({}) }, userRateStarLib: rating('userRateStar.js'),
+    spUserRateStarLib: rating('spUserRateStar.js'), spSkillLib: { computeSpStarGuarded: () => ({}) },
+    patternScoreKernelLib: rating('patternScoreKernel.js') };
+  assert.deepEqual(['featScores', 'spFeatScores', 'ratingJson', 'ereterData', 'cpiData', 'norm', 'textageMeta', 'onlyOSR2eLib', 'userRateStarLib', 'spUserRateStarLib', 'spSkillLib', 'patternScoreKernelLib'].filter((key) => !(key in actualR)), []);
+  const actual = calculateOfficialScores({ id: 'x', inputs: { dpCharts: [], dp: [{ textage_song_id: 'test', diff: 3, ex_score: 1900 }], sp: [], spRateRows: [] }, R: actualR, previousUser: {} });
+  assert.ok(actual.osPattern.some((r) => r.play_style === 1));
 });
 
 test('few plays preserve prior tuples/features; missing engines, invalid numbers and throws remain failures', () => {
@@ -103,11 +113,12 @@ test('few plays preserve prior tuples/features; missing engines, invalid numbers
   const oldPattern = [{ iidx_id: 'x', play_style: 1, os_notes: 7 }];
   const inputs = { dpCharts: [], dp: [], sp: [], spRateRows: [] };
   const out = calculateOfficialScores({ id: 'x', inputs, R: baseR(), previousUser: previous, previousOsPattern: oldPattern });
-  assert.deepEqual(out.userFields, previous); assert.deepEqual(out.osPattern, oldPattern);
+  assert.deepEqual(out.userFields, { ...previous, sp_r_star: null, sp_r_star_model_id: 'm2', sp_r_star_formula_version: 'v2' });
+  assert.deepEqual(out.osPattern, oldPattern);
   assert.throws(() => calculateOfficialScores({ id: 'x', inputs, R: baseR({ userRateStarLib: null }), previousUser: previous }), /required official resource/);
   assert.throws(() => calculateOfficialScores({ id: 'x', inputs, R: baseR({ onlyOSR2eLib: { inferEreter: () => { throw Error('engine'); } } }), previousUser: previous }), /engine/);
   assert.throws(() => calculateOfficialScores({ id: 'x', inputs, R: baseR({ onlyOSR2eLib: { inferEreter: () => ({ ereterStar: Infinity }) } }), previousUser: previous }), /non-finite/);
   assert.deepEqual(calculateOfficialScores({ id: 'x', inputs, R: baseR(), previousUser: null }).userFields,
-    { star: null, native_star: null, r_star: null, sp_cpi: null, sp_star: null, sp_r_star: null, sp_r_star_model_id: null, sp_r_star_formula_version: null });
+    { star: null, native_star: null, r_star: null, sp_cpi: null, sp_star: null, sp_r_star: null, sp_r_star_model_id: 'm2', sp_r_star_formula_version: 'v2' });
   const source = JSON.stringify(inputs); calculateOfficialScores({ id: 'x', inputs, R: baseR(), previousUser: previous }); assert.equal(JSON.stringify(inputs), source);
 });

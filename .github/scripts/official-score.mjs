@@ -31,7 +31,7 @@ function entries(rows, scores, songs, style) {
 
 function featureRows(id, rows, style, R, previous) {
   const kernel = required(R.patternScoreKernelLib?.computePatternScoreKernel, 'patternScoreKernelLib.computePatternScoreKernel');
-  const list = entries(rows, style === 1 ? R.featureScores : R.spFeatScores,
+  const list = entries(rows, style === 1 ? R.featScores : R.spFeatScores,
     R.textageMeta?.songs, style);
   const result = kernel(list);
   if (result.matched === 0) return null;
@@ -100,8 +100,8 @@ export function calculateOfficialScores({ id, inputs, R, previousUser, previousO
     prev: { rStar: user?.sp_r_star, modelId: user?.sp_r_star_model_id, formulaVersion: user?.sp_r_star_formula_version },
   });
   assertNumericResult(spRate?.rStar, 'inferSpUserRStar.rStar');
-  if (spRate?.status === 'ok' && finite(spRate.rStar)) {
-    userFields.sp_r_star = round(spRate.rStar, 2);
+  if (spRate?.status === 'ok' || spRate?.status === 'few_plays') {
+    userFields.sp_r_star = spRate.status === 'ok' && finite(spRate.rStar) ? round(spRate.rStar, 2) : null;
     userFields.sp_r_star_model_id = spRate.modelId;
     userFields.sp_r_star_formula_version = spRate.formulaVersion;
   }
