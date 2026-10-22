@@ -15,7 +15,7 @@ process.env.SUPABASE_URL = 'https://supabase.invalid';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-key';
 process.env.CLOUDFLARE_R2_TOKEN = 'test-r2-token';
 
-const { dumpUser, fetchUserHist, histProbe, updateHistFile, publishPreparedHist, HIST_COLS } = await import('./dump-user.mjs');
+const { dumpUser, fetchUserHist, histProbe, updateHistFile, prepareOfficialHistory, HIST_COLS } = await import('./dump-user.mjs');
 
 async function run(user) {
   const originalFetch = globalThis.fetch;
@@ -194,32 +194,40 @@ test('prepare mode fetches score ids and writes ten-column hist rows', async () 
   const calls = [];
   globalThis.fetch = async (url) => {
     const target = String(url); calls.push(target);
-    if (target.includes('/rest/v1/scores?')) return response([scoreRestRow]);
+    if (target.includes('/rest/v1/scores?')) return response([{ ...scoreRestRow, iidx_id: 'tester' }]);
     throw new Error(`Unexpected request: ${target}`);
   };
   try {
-    await withHistFile([], async ({ fs, file }) => {
-      const result = await updateHistFile('tester', file);
-      assert.deepEqual(result.restRows, [scoreRestRow]);
-      assert.equal(result.rebuilt, true);
+    await withHistFile(undefined, async ({ fs, file }) => {
+      const r2 = r2Mock({ existingHistBytes: Buffer.from('[]') });
+      const result = await prepareOfficialHistory('tester', undefined, { histFile: file, r2 });
+      assert.deepEqual(result.restRows, [{ ...scoreRestRow, iidx_id: 'tester' }]);
       assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), [scoreHistRow]);
       assert.equal(calls.length, 1);
-      assert.match(calls[0], /select=score_id,song_id,diff,lamp,ex_score,played_version,date,date_kst,play_style,bp,note_count/);
+      assert.match(calls[0], /select=score_id,iidx_id,song_id,diff,lamp,ex_score,played_version,date,date_kst,play_style,bp,note_count/);
       assert.match(calls[0], /played_version=neq\.\-10/);
     });
   } finally { globalThis.fetch = originalFetch; }
 }));
 
-function r2Mock({ downloadedBytes } = {}) {
+function r2Mock({ downloadedBytes, existingHistBytes = Buffer.from(JSON.stringify([scoreHistRow])) } = {}) {
   const calls = [];
   let histReads = 0;
   return {
     calls,
     read: async (key) => {
       calls.push(['read', key]);
+      if (key === 'songs.json') {
+        const body = Buffer.from(JSON.stringify([{ song_id: 1000 }]));
+        return { body, bytes: body };
+      }
+      if (key === 'meta/song-aliases.json') {
+        const body = Buffer.from('{"v":1,"rules":[]}');
+        return { body, bytes: body };
+      }
       if (key === 'hist/tester.json') {
         histReads += 1;
-        const bytes = histReads === 2 ? downloadedBytes : undefined;
+        const bytes = histReads === 1 ? existingHistBytes : downloadedBytes;
         if (histReads === 2 && bytes === null) return null;
         const body = bytes === undefined ? Buffer.from(JSON.stringify([scoreHistRow])) : bytes;
         return { body, etag: '"abc"', bytes: Buffer.from(body) };
@@ -231,33 +239,39 @@ function r2Mock({ downloadedBytes } = {}) {
   };
 }
 
-test('publishPreparedHist publishes hist then a candidate hashed from re-downloaded bytes', async () => {
-  const histBytes = Buffer.from(JSON.stringify([scoreHistRow]));
+test('prepareOfficialHistory publishes hist then a candidate hashed from re-downloaded bytes', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => String(url).includes('/rest/v1/scores?') ? response([{ ...scoreRestRow, iidx_id: 'tester' }]) : Promise.reject(new Error(`Unexpected request: ${url}`));
   const r2 = r2Mock();
-  const result = await publishPreparedHist('tester', { restRows: [scoreRestRow], histBytes, r2 });
+  let result;
+  try { result = await withHistFile(undefined, ({ file }) => prepareOfficialHistory('tester', undefined, { histFile: file, r2 })); }
+  finally { globalThis.fetch = originalFetch; }
   assert.deepEqual(r2.calls.map(([kind, key]) => [kind, key]), [
-    ['read', 'hist/tester.json'], ['put', 'hist/tester.json'], ['read', 'hist/tester.json'],
+    ['read', 'hist/tester.json'], ['read', 'songs.json'], ['read', 'meta/song-aliases.json'], ['put', 'hist/tester.json'], ['read', 'hist/tester.json'],
     ['read', 'meta/scores-delete-tester.json'], ['put', 'meta/scores-delete-tester.json'],
   ]);
-  assert.equal(result.candidateKey, 'meta/scores-delete-tester.json');
-  assert.deepEqual(result.candidate, {
-    score_ids: [101],
-    hist: { key: 'hist/tester.json', sha256: (await import('node:crypto')).createHash('sha256').update(histBytes).digest('hex') },
-  });
-  const candidatePut = r2.calls[4];
-  assert.deepEqual(JSON.parse(candidatePut[2].toString('utf8')), result.candidate);
+  assert.deepEqual(result.histRows, [scoreHistRow]);
+  const candidate = JSON.parse(r2.calls[6][2].toString('utf8'));
+  assert.deepEqual(candidate.score_ids, [101]);
+  assert.deepEqual(candidate.rows.map(({ score_id }) => score_id), [101]);
+  assert.equal(candidate.hist.key, 'hist/tester.json');
+  assert.equal(candidate.hist.sha256, (await import('node:crypto')).createHash('sha256').update(JSON.stringify([scoreHistRow])).digest('hex'));
 });
 
-test('publishPreparedHist rejects changed re-download bytes before candidate put', async () => {
-  const histBytes = Buffer.from(JSON.stringify([scoreHistRow]));
+test('prepareOfficialHistory rejects changed re-download bytes before candidate put', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => String(url).includes('/rest/v1/scores?') ? response([{ ...scoreRestRow, iidx_id: 'tester' }]) : Promise.reject(new Error(String(url)));
   const r2 = r2Mock({ downloadedBytes: Buffer.from('[]') });
-  await assert.rejects(publishPreparedHist('tester', { restRows: [scoreRestRow], histBytes, r2 }));
+  try { await withHistFile(undefined, ({ file }) => assert.rejects(prepareOfficialHistory('tester', undefined, { histFile: file, r2 }))); }
+  finally { globalThis.fetch = originalFetch; }
   assert.equal(r2.calls.filter(([kind, key]) => kind === 'put' && key.startsWith('meta/')).length, 0);
 });
 
-test('publishPreparedHist rejects missing re-download before candidate put', async () => {
-  const histBytes = Buffer.from(JSON.stringify([scoreHistRow]));
+test('prepareOfficialHistory rejects missing re-download before candidate put', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => String(url).includes('/rest/v1/scores?') ? response([{ ...scoreRestRow, iidx_id: 'tester' }]) : Promise.reject(new Error(String(url)));
   const r2 = r2Mock({ downloadedBytes: null });
-  await assert.rejects(publishPreparedHist('tester', { restRows: [scoreRestRow], histBytes, r2 }), /재다운로드 실패/);
+  try { await withHistFile(undefined, ({ file }) => assert.rejects(prepareOfficialHistory('tester', undefined, { histFile: file, r2 }))); }
+  finally { globalThis.fetch = originalFetch; }
   assert.equal(r2.calls.filter(([kind, key]) => kind === 'put' && key.startsWith('meta/')).length, 0);
 });
