@@ -2,86 +2,80 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildCandidate, rowsFromRest, sha256Hex, validateCandidate } from './score-buffer.mjs';
 
+const iidxId = '89388691';
 const fixtureDate = '2026-10-22T01:02:03.123456+00:00';
-const fixtureRow = [1000, 3, 4, 1234, 33, fixtureDate, '2026-10-22', 1, null, 1500];
-const fixtureRest = [{ score_id: 101, song_id: 1000, diff: 3, lamp: 4, ex_score: 1234, played_version: 33,
-  date: fixtureDate, date_kst: '2026-10-22', play_style: 1, bp: null, note_count: 1500 }];
-const bytes = (rows) => new TextEncoder().encode(JSON.stringify(rows));
-const candidateFor = (iidxId, restRows, rows) => {
-  const histBytes = bytes(rows);
-  return buildCandidate({ iidxId, restRows, publishedHistBytes: histBytes, downloadedHistBytes: histBytes });
-};
+const fixtureRow = [100, 3, 5, 2000, 33, fixtureDate, '2026-10-22', 1, null, 1500];
+const fixtureRest = [{ score_id: 12345, iidx_id: iidxId, song_id: 100, diff: 3, played_version: 33,
+  play_style: 1, ex_score: 2000, lamp: 5, bp: null, note_count: 1500, date: fixtureDate, date_kst: '2026-10-22' }];
+const songs = [100, 200, 300, 400].map((song_id) => ({ song_id }));
+const noAliases = { v: 1, rules: [] };
+const aliasesBytes = (aliases = noAliases) => Buffer.from(JSON.stringify(aliases), 'utf8');
+const rowBytes = (rows) => Buffer.from(JSON.stringify(rows), 'utf8');
+const restObject = (scoreId, overrides = {}) => ({ ...fixtureRest[0], score_id: scoreId, ...overrides });
+const candidateFor = ({ iidx = iidxId, rest = fixtureRest, previous = [], aliases = noAliases,
+  histRows, published = rowBytes(histRows ?? [...previous, ...rest.map((r) => [r.song_id, r.diff, r.lamp,
+    r.ex_score, r.played_version, r.date, r.date_kst, r.play_style, r.bp, r.note_count])]),
+  downloaded = published } = {}) => buildCandidate({ iidxId: iidx, restRows: rest, previousHistRows: previous,
+  aliases, aliasesBytes: aliasesBytes(aliases), songs, publishedHistBytes: published, downloadedHistBytes: downloaded });
 
-test('전체 REST 이력을 검증하고 입력을 변경하지 않으며 이번 ID와 실제 해시를 반환한다', () => {
-  const rests = [
-    { ...fixtureRest[0], score_id: 101 },
-    { ...fixtureRest[0], score_id: 102, date: '2026-10-22T02:02:03.123456+01:00', date_kst: '2026-10-22', played_version: 34 },
-    { ...fixtureRest[0], score_id: 103, date: '2026-10-22T01:02:03.123457+00:00', played_version: 35 },
-  ];
-  const rows = [fixtureRow, [...fixtureRow], [...fixtureRow]];
-  rows[1][5] = '2026-10-22T01:02:03.123456Z';
-  rows[1][6] = '2026-10-22';
-  rows[1][4] = 34;
-  rows[2][5] = '2026-10-22T01:02:03.123457Z';
-  rows[2][6] = '2026-10-22';
-  rows[2][4] = 35;
-  const beforeRest = structuredClone(rests);
-  const beforeRows = structuredClone(rows);
-  const out = candidateFor('u1', rests, rows);
-  assert.deepEqual(out, { score_ids: [101, 102, 103], hist: { key: 'hist/u1.json', sha256: sha256Hex(bytes(rows)) } });
-  assert.deepEqual(rests, beforeRest);
-  assert.deepEqual(rows, beforeRows);
+test('1. nullable 키 누락은 거부하고 명시 null은 허용한다', () => {
+  const missing = { ...fixtureRest[0] };
+  delete missing.bp;
+  assert.throws(() => rowsFromRest([missing], iidxId), /missing required key/);
+  assert.deepEqual(candidateFor().rows[0].bp, null);
+  assert.equal(candidateFor().rows[0].note_count, 1500);
 });
 
-test('동일 instant 표기는 허용하고 1마이크로초 차이는 거부한다', () => {
-  const equal = { ...fixtureRest[0], date: '2026-10-22T01:02:03.123456Z' };
-  assert.deepEqual(candidateFor('1234', [equal], [fixtureRow]).score_ids, [101]);
-  const different = { ...fixtureRest[0], date: '2026-10-22T01:02:03.123457+00:00' };
-  assert.throws(() => candidateFor('1234', [different], [fixtureRow]), /date differs/);
+test('2. date 마이크로초 원문, 사용자 일치, DBR 보존과 안전 정수를 검사한다', () => {
+  assert.equal(candidateFor().rows[0].date, fixtureDate);
+  assert.throws(() => candidateFor({ rest: [restObject(12345, { iidx_id: 'other' })] }), /iidx_id differs/);
+  assert.throws(() => rowsFromRest([restObject(Number.MAX_SAFE_INTEGER + 1)], iidxId), /safe integer/);
+  const dbr = [-10, 3, 5, 2000, -10, fixtureDate, '2026-10-22', 1, null, 1500];
+  const dbrHist = [dbr, fixtureRow];
+  const got = candidateFor({ previous: [dbr], histRows: dbrHist });
+  assert.equal(got.hist.sha256, sha256Hex(rowBytes(dbrHist)));
+  assert.equal(got.rows[0].song_id, 100);
+  assert.throws(() => candidateFor({ rest: [restObject(12345, { song_id: Number.MAX_SAFE_INTEGER + 1 })] }), /safe integer/);
 });
 
-test('누락, 10열 값 변조, 중복 자연키와 잘못된 REST ID 및 DBR을 거부한다', () => {
-  assert.throws(() => candidateFor('u1', [], [fixtureRow]), /absent from REST/);
-  const changed = [...fixtureRow]; changed[9] = 1501;
-  assert.throws(() => candidateFor('u1', fixtureRest, [changed]), /value differs/);
-  assert.throws(() => candidateFor('u1', fixtureRest, [fixtureRow, fixtureRow]), /duplicate natural key/);
-  assert.throws(() => rowsFromRest([{ ...fixtureRest[0], score_id: -1 }]));
-  assert.throws(() => rowsFromRest([{ ...fixtureRest[0], score_id: Number.MAX_SAFE_INTEGER + 1 }]));
-  assert.throws(() => rowsFromRest([fixtureRest[0], fixtureRest[0]]), /duplicate score_id/);
-  assert.throws(() => rowsFromRest([{ ...fixtureRest[0], played_version: -10 }]));
+test('3. 중복 ID, 순서 불일치, ID 목록 불일치와 v1 후보를 거부한다', () => {
+  assert.throws(() => rowsFromRest([fixtureRest[0], fixtureRest[0]], iidxId), /duplicate score_id/);
+  const valid = candidateFor();
+  assert.throws(() => validateCandidate({ ...valid, score_ids: [12346, 12345] }, iidxId), /ascending/);
+  assert.throws(() => validateCandidate({ ...valid, score_ids: [12346] }, iidxId), /same ascending set/);
+  assert.throws(() => validateCandidate({ ...valid, v: 1 }, iidxId), /v2/);
 });
 
-test('바이트 불일치, 잘못된 UTF-8과 잘못된 REST/hist 형태를 거부한다', () => {
-  const good = bytes([fixtureRow]);
-  assert.throws(() => buildCandidate({ iidxId: 'u1', restRows: fixtureRest, publishedHistBytes: good,
-    downloadedHistBytes: bytes([]) }), /bytes differ/);
-  assert.throws(() => buildCandidate({ iidxId: 'u1', restRows: fixtureRest, publishedHistBytes: good,
-    downloadedHistBytes: new Uint8Array([0xff]) }), /bytes differ/);
-  const badUtf8 = new Uint8Array([0xff]);
-  assert.throws(() => buildCandidate({ iidxId: 'u1', restRows: [], publishedHistBytes: badUtf8,
-    downloadedHistBytes: badUtf8 }), /UTF-8/);
-  assert.throws(() => candidateFor('u1', [fixtureRest[0]], [[...fixtureRow, 0]]), /10 columns/);
-  assert.throws(() => rowsFromRest([[101, ...fixtureRow]]));
+test('4. 무향상 ID도 수록하고 NULL 보충 및 200행 초과 과거 hist를 허용한다', () => {
+  const prior = [...fixtureRow]; prior[8] = null;
+  const rest = [restObject(12345, { bp: 12 })];
+  const completed = [...fixtureRow]; completed[8] = 12;
+  const out = candidateFor({ rest, previous: [prior], histRows: [completed] });
+  assert.deepEqual(out.score_ids, [12345]);
+  assert.equal(out.rows[0].bp, 12);
+
+  const oldRows = Array.from({ length: 205 }, (_, index) => [10000 + index, 3, 1, 100, 32,
+    fixtureDate, '2026-10-22', 1, null, 1500]);
+  const many = candidateFor({ rest: [], previous: oldRows, histRows: oldRows });
+  assert.deepEqual(many.score_ids, []);
+  assert.equal(many.hist.sha256, sha256Hex(rowBytes(oldRows)));
 });
 
-test('candidate 스키마가 정확하고 빈 목록을 허용하며 전달된 유저 ID를 강제한다', () => {
-  const empty = candidateFor('Ab12', [], []);
-  assert.deepEqual(empty, { score_ids: [], hist: { key: 'hist/Ab12.json', sha256: sha256Hex(bytes([])) } });
-  assert.equal(validateCandidate(empty, 'Ab12'), empty);
-  assert.throws(() => validateCandidate({ ...empty, extra: true }, 'Ab12'));
-  assert.throws(() => validateCandidate({ ...empty, hist: { ...empty.hist, key: 'hist/Other.json' } }, 'Ab12'));
-  assert.throws(() => validateCandidate({ ...empty, score_ids: [2, 1] }, 'Ab12'));
-  assert.deepEqual(candidateFor('u1', fixtureRest, [fixtureRow]).score_ids, [101]);
+test('5. 지문은 별칭 전 원본 song_id, 별칭 바이트 해시와 기대 병합을 검증한다', () => {
+  const aliases = { v: 1, rules: [{ from: 100, to: 200, scope: 'song' }] };
+  const expectedHist = [[200, 3, 5, 2000, 33, fixtureDate, '2026-10-22', 1, null, 1500]];
+  const out = candidateFor({ aliases, histRows: expectedHist });
+  assert.equal(out.rows[0].song_id, 100);
+  assert.equal(out.aliases_sha256, sha256Hex(aliasesBytes(aliases)));
+  assert.throws(() => candidateFor({ aliases, histRows: [fixtureRow] }), /expected normalized replay/);
 });
 
-test('기본 꺼짐: import와 순수 함수 호출은 fetch 및 파일 IO를 일으키지 않는다', async () => {
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = (...args) => { calls += 1; return originalFetch(...args); };
-  try {
-    const mod = await import(`./score-buffer.mjs?pure=${Date.now()}`);
-    const rowBytes = bytes([fixtureRow]);
-    mod.buildCandidate({ iidxId: 'u1', restRows: fixtureRest, publishedHistBytes: rowBytes, downloadedHistBytes: rowBytes });
-    assert.equal(calls, 0);
-  } finally { globalThis.fetch = originalFetch; }
+test('6. 원본 byte 불일치를 거부하고 재전송은 멱등이며 played_version 33을 받는다', () => {
+  const exact = rowBytes([fixtureRow]);
+  const pretty = Buffer.from(JSON.stringify([fixtureRow], null, 2), 'utf8');
+  assert.throws(() => candidateFor({ published: exact, downloaded: pretty }), /bytes differ/);
+  const first = candidateFor({ rest: [restObject(12345, { played_version: 33 })] });
+  const retry = candidateFor({ rest: [restObject(12345, { played_version: 33 })] });
+  assert.deepEqual(retry, first);
+  assert.equal(first.rows[0].played_version, 33);
 });
