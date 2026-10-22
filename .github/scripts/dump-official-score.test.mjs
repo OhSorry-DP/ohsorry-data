@@ -112,7 +112,7 @@ test('late33 confirmed ten-column history is published and verified before offic
     assert.deepEqual([seen.dp[0].exScore, seen.dp[0].lampNum, seen.dp[0].noteCount], [1900, 6, 1000]);
     assert.deepEqual([result.dp[0].ex_score, result.dp[0].lamp, result.dp[0].bp, result.user.star], [1900, 6, 18, 1900]);
     assert.equal(result.osPattern.find((row) => row.play_style === 1).os_notes, 7);
-    assert.equal(seen.prevStar, 8);
+    assert.equal(seen.prevStar, undefined);   // ★ 래칫은 엔진 인자가 아니라 어댑터 바깥 max(크롤러 정본)
     assert.equal(mergeScoreHistory([h34], [late33]).length, 2);
     const better = [...late33]; better[3] = 1950; better[2] = 6;
     assert.equal(mergeScoreHistory([better], [late33])[0][3], 1950);
