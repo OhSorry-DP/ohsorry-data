@@ -34,8 +34,8 @@ test('merge history → historyInputs → adapter forwards the late best and dro
   assert.equal(merged.length, 2);
   const inputs = historyInputs('12345678', merged, [song], [], { textageMeta: { songs: { test: { title: 'TEST', notes: { DA: 1000 }, levels: { DA: 12 } } } } });
   let seen;
-  const R = baseR({ onlyOSR2eLib: { inferEreter: (...args) => { seen = args[0][0]; assert.equal(args.length, 3); assert.equal(Object.hasOwn(args[2], 'prevStar'), false); return { ereterStar: 2, ohsorryStar: 1.23456 }; } },
-    userRateStarLib: { inferUserRStar: (charts, data, opts) => { assert.equal(charts[0].exScore, 1900); assert.equal(opts.prevRStar, 4); return { rStar: 4 }; } } });
+  const R = baseR({ onlyOSR2eLib: { inferEreter: (...args) => { seen = args[0][0]; assert.equal(args.length, 3); assert.equal(Object.hasOwn(args[2], 'prevStar'), false); assert.deepEqual(Object.keys(args[0][0]).filter((k) => /textage|_sid/i.test(k)), []); return { ereterStar: 2, ohsorryStar: 1.23456 }; } },
+    userRateStarLib: { inferUserRStar: (charts, data, opts) => { assert.equal(charts[0].exScore, 1900); assert.deepEqual(Object.keys(charts[0]).filter((k) => /textage|_sid/i.test(k)), []); assert.equal(opts.prevRStar, 4); return { rStar: 4 }; } } });
   const result = calculateOfficialScores({ id: '12345678', inputs, R, previousUser: { star: 3, r_star: 4 } });
   assert.equal(seen.exScore, 1900); assert.equal(seen.lampNum, 6); assert.equal(seen.noteCount, 1000);
   assert.equal(result.userFields.star, 3);
@@ -95,11 +95,13 @@ test('official DP/SP entries use kernel score rate and preserve style-specific n
   const R = baseR({ patternScoreKernelLib: { computePatternScoreKernel: (es) => { allEntries = es; return kernel.computePatternScoreKernel(es); } },
     textageMeta: { songs: { test: { notes: { DA: 1000, SA: 1000 } } } },
     featScores: { test: { DP_ANO: { NOTES: 100, HANDS: 50 } } }, spFeatScores: { test: { SP_ANO: { NOTES: 100 } } } });
-  const old = [{ iidx_id: 'old', play_style: 0, custom: true }];
+  const old = [{ iidx_id: 'old', play_style: 0, custom: true, updated_at: 'kept' }];
   const out = calculateOfficialScores({ id: 'x', inputs: { dpCharts: [], dp: [{ textage_song_id: 'test', diff: 3, ex_score: 1900 }], sp: [{ textage_song_id: 'test', diff: 3, ex_score: 1900 }], spRateRows: [] }, R, previousUser: {}, previousOsPattern: old });
   assert.equal(allEntries[0].scoreRate, 0.95);
   const dp = out.osPattern.find((r) => r.play_style === 1), sp = out.osPattern.find((r) => r.play_style === 0);
-  assert.equal(dp.os_hands, 47.5); assert.equal(sp.os_hands, null); assert.equal(sp.os_notes, 95); assert.equal(sp.custom, true);
+  assert.equal(dp.hands, 47.5); assert.equal(sp.hands, null); assert.equal(sp.notes, 95); assert.equal(sp.custom, true); assert.equal(sp.updated_at, 'kept');
+  assert.ok(!Object.keys(dp).some((key) => key.startsWith('os_')));
+  assert.ok(!Object.keys(sp).some((key) => key.startsWith('os_')));
 
   // loadPersonaResources의 official 반환 객체 키를 그대로 구성한 로컬 fixture (네트워크 fetch 금지).
   const actualR = { featScores: { test: { DP_ANO: { NOTES: 100, HANDS: 50 } } }, spFeatScores: {}, ratingJson,
@@ -117,12 +119,16 @@ test('few plays preserve prior tuples/features; missing engines, invalid numbers
   const oldPattern = [{ iidx_id: 'x', play_style: 1, os_notes: 7 }];
   const inputs = { dpCharts: [], dp: [], sp: [], spRateRows: [] };
   const out = calculateOfficialScores({ id: 'x', inputs, R: baseR(), previousUser: previous, previousOsPattern: oldPattern });
-  assert.deepEqual(out.userFields, { ...previous, sp_r_star: null, sp_r_star_model_id: 'm2', sp_r_star_formula_version: 'v2' });
+  assert.deepEqual(out.userFields, previous);
   assert.deepEqual(out.osPattern, oldPattern);
+  let spRateCalled = false;
+  const noSpCrawl = calculateOfficialScores({ id: 'x', inputs, previousUser: previous, R: baseR({ spUserRateStarLib: { inferSpUserRStar: () => { spRateCalled = true; throw Error('must not run'); } } }) });
+  assert.equal(spRateCalled, false);
+  assert.deepEqual(['sp_r_star', 'sp_r_star_model_id', 'sp_r_star_formula_version'].map((key) => noSpCrawl.userFields[key]), [6, 'm', 'v']);
   assert.throws(() => calculateOfficialScores({ id: 'x', inputs, R: baseR({ userRateStarLib: null }), previousUser: previous }), /required official resource/);
   assert.throws(() => calculateOfficialScores({ id: 'x', inputs, R: baseR({ onlyOSR2eLib: { inferEreter: () => { throw Error('engine'); } } }), previousUser: previous }), /engine/);
   assert.throws(() => calculateOfficialScores({ id: 'x', inputs, R: baseR({ onlyOSR2eLib: { inferEreter: () => ({ ereterStar: Infinity }) } }), previousUser: previous }), /non-finite/);
   assert.deepEqual(calculateOfficialScores({ id: 'x', inputs, R: baseR(), previousUser: null }).userFields,
-    { star: null, native_star: null, r_star: null, sp_cpi: null, sp_star: null, sp_r_star: null, sp_r_star_model_id: 'm2', sp_r_star_formula_version: 'v2' });
+    { star: null, native_star: null, r_star: null, sp_cpi: null, sp_star: null, sp_r_star: null, sp_r_star_model_id: null, sp_r_star_formula_version: null });
   const source = JSON.stringify(inputs); calculateOfficialScores({ id: 'x', inputs, R: baseR(), previousUser: previous }); assert.equal(JSON.stringify(inputs), source);
 });

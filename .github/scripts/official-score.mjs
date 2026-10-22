@@ -41,10 +41,9 @@ function featureRows(id, rows, style, R, previous) {
   row.play_style = style;
   const vec = result.vec;
   for (const feat of FEATS) {
-    const key = `os_${feat}`;
     const value = vec?.[feat.toUpperCase()];
     assertNumericResult(value, `computePatternScoreKernel.${feat}`);
-    row[key] = style === 0 && !SP_FEATS.has(feat) ? null : (finite(value) ? value : null);
+    row[feat] = style === 0 && !SP_FEATS.has(feat) ? null : (finite(value) ? value : null);
   }
   return row;
 }
@@ -59,7 +58,12 @@ export function calculateOfficialScores({ id, inputs, R, previousUser, previousO
   const rating = required(R?.ratingJson, 'ratingJson');
   const inferEreter = required(R?.onlyOSR2eLib?.inferEreter, 'onlyOSR2eLib.inferEreter');
   const ereterData = required(R?.ereterData, 'ereterData');
-  const er = inferEreter(inputs.dpCharts, rating, {
+  const dpEngineCharts = (inputs.dpCharts || []).map((chart) => {
+    const copy = { ...chart };
+    for (const key of ['textageSongId', 'textageId', 'textage_song_id', '__textageSongId', '_sid']) delete copy[key];
+    return copy;
+  });
+  const er = inferEreter(dpEngineCharts, rating, {
     charts: ereterData.charts || ereterData, players: ereterData.players || {},
   });
   assertNumericResult(er?.ereterStar, 'inferEreter.ereterStar');
@@ -68,7 +72,7 @@ export function calculateOfficialScores({ id, inputs, R, previousUser, previousO
   if (finite(er?.ohsorryStar)) userFields.native_star = round(er.ohsorryStar, 4);
 
   const userRate = required(R?.userRateStarLib?.inferUserRStar, 'userRateStarLib.inferUserRStar');
-  const rResult = userRate(inputs.dpCharts, rating, {
+  const rResult = userRate(dpEngineCharts, rating, {
     normFn: required(R.norm, 'norm'), scale: required(rating.rateStar?.scale, 'ratingJson.rateStar.scale'),
     prevRStar: user?.r_star,
   });
@@ -92,18 +96,20 @@ export function calculateOfficialScores({ id, inputs, R, previousUser, previousO
   if (finite(spResult?.cpiInt)) userFields.sp_cpi = spResult.cpiInt;
   if (finite(spResult?.starRounded)) userFields.sp_star = spResult.starRounded;
 
-  const inferSp = required(R?.spUserRateStarLib?.inferSpUserRStar, 'spUserRateStarLib.inferSpUserRStar');
-  const seed = required(rating.spRateStar, 'ratingJson.spRateStar');
-  const spRate = inferSp(inputs.spRateRows, seed, {
-    textageSongs: required(R.textageMeta?.songs, 'textageMeta.songs'), normFn: required(R.norm, 'norm'),
-    kernel: required(R.userRateStarLib, 'userRateStarLib'),
-    prev: { rStar: user?.sp_r_star, modelId: user?.sp_r_star_model_id, formulaVersion: user?.sp_r_star_formula_version },
-  });
-  assertNumericResult(spRate?.rStar, 'inferSpUserRStar.rStar');
-  if (spRate?.status === 'ok' || spRate?.status === 'few_plays') {
-    userFields.sp_r_star = spRate.status === 'ok' && finite(spRate.rStar) ? round(spRate.rStar, 2) : null;
-    userFields.sp_r_star_model_id = spRate.modelId;
-    userFields.sp_r_star_formula_version = spRate.formulaVersion;
+  if (Array.isArray(inputs.spRateRows) && inputs.spRateRows.length > 0) {
+    const inferSp = required(R?.spUserRateStarLib?.inferSpUserRStar, 'spUserRateStarLib.inferSpUserRStar');
+    const seed = required(rating.spRateStar, 'ratingJson.spRateStar');
+    const spRate = inferSp(inputs.spRateRows, seed, {
+      textageSongs: required(R.textageMeta?.songs, 'textageMeta.songs'), normFn: required(R.norm, 'norm'),
+      kernel: required(R.userRateStarLib, 'userRateStarLib'),
+      prev: { rStar: user?.sp_r_star, modelId: user?.sp_r_star_model_id, formulaVersion: user?.sp_r_star_formula_version },
+    });
+    assertNumericResult(spRate?.rStar, 'inferSpUserRStar.rStar');
+    if (spRate?.status === 'ok' || spRate?.status === 'few_plays') {
+      userFields.sp_r_star = spRate.status === 'ok' && finite(spRate.rStar) ? round(spRate.rStar, 2) : null;
+      userFields.sp_r_star_model_id = spRate.modelId;
+      userFields.sp_r_star_formula_version = spRate.formulaVersion;
+    }
   }
 
   const osPattern = Array.isArray(previousOsPattern) ? previousOsPattern.map((x) => ({ ...x })) : [];
