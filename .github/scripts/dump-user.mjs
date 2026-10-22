@@ -11,6 +11,8 @@ import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, sp
 import { getText } from './r2-client.mjs';
 import { conditionalR2Client } from './r2-client.mjs';
 import { buildCandidate } from './score-buffer.mjs';
+import { replayScoreBuffer } from './score-history.mjs';
+import { normalizeAliasInputs } from './song-aliases.mjs';
 import { computeDirtyCharts } from './ranking-dirty-charts.mjs';
 import { fetchDpArrange } from './dp-arrange.mjs';
 import { writeUserSliceFile } from './user-slice.mjs';
@@ -92,7 +94,7 @@ async function readPreviousDump(id, r2, official = false) {
 }
 
 export async function dumpUser(id, personaRes, opts = {}) {
-  const preparing = process.env.SCORE_BUFFER_PREPARE === '1';
+  const preparing = process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1';
   const prepared = preparing ? await prepareOfficialHistory(id, personaRes, opts) : null;
   if (preparing) personaRes = await officialResources(personaRes);
   const eid = encodeURIComponent(id);
@@ -236,27 +238,52 @@ const historyClient = () => conditionalR2Client({
   account: process.env.CLOUDFLARE_ACCOUNT_ID,
   token: process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN,
   rawBytes: true,
+  retry: false,
 });
 
 export async function prepareOfficialHistory(id, personaRes, opts = {}) {
+  if (!/^[A-Za-z0-9]+$/.test(id)) throw new Error('invalid iidx_id');
+  if (opts.histFile !== undefined && !path.isAbsolute(opts.histFile)) throw new Error('histFile must be absolute');
+  const file = path.resolve(opts.histFile ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'hist', `${id}.json`));
+  preparedFiles.delete(file);
   const r2 = opts.r2 ?? historyClient();
   const previous = await r2.read(`hist/${id}.json`);
+  if (!previous) {
+    const user = await readPreviousDump(id, r2, true);
+    if (!user.prevOk || user.prev) throw new Error(`missing hist for existing or unknown user ${id}`);
+  }
   const oldRows = previous ? JSON.parse((previous.bytes ?? previous.body).toString('utf8')) : [];
   if (!Array.isArray(oldRows)) throw new Error('R2 hist 응답이 배열이 아닙니다');
-  const { histRows, restRows } = await fetchUserHistWithScores(id);
-  if (!histRows.length && oldRows.some((row) => !Array.isArray(row) || row[4] !== -10)) {
+  const fetched = await fetchUserHistWithScores(id);
+  // Keep deletion fingerprints independent of alias normalization and replay.
+  const restRows = fetched.restRows.map((row) => ({ ...row }));
+  const cumulative = process.env.SCORE_BUFFER_CUMULATIVE === '1';
+  if (!cumulative && !fetched.histRows.length && oldRows.some((row) => !Array.isArray(row) || row[4] !== -10)) {
     throw new Error(`hist 급감(${id}): ${oldRows.length}행 → 0행 — 기존본 유지`);
   }
   const songsObject = opts.songs === undefined ? await r2.read('songs.json') : null;
   const songs = opts.songs ?? (songsObject ? JSON.parse((songsObject.bytes ?? songsObject.body).toString('utf8')) : null);
   if (!Array.isArray(songs)) throw new Error('R2 songs 응답이 배열이 아닙니다');
+  const aliasesObject = await r2.read('meta/song-aliases.json');
+  if (!aliasesObject) throw new Error('missing meta/song-aliases.json');
+  const aliasesBytes = Buffer.from(aliasesObject.bytes ?? aliasesObject.body, 'utf8');
+  const aliases = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(aliasesBytes));
+  const previousHistRows = cumulative ? oldRows : [];
+  const normalized = normalizeAliasInputs({ histRows: previousHistRows, restRows, aliases, songs });
+  const histRows = replayScoreBuffer(normalized.histRows, normalized.restRows);
   const histBytes = Buffer.from(JSON.stringify(histRows), 'utf8');
-  await publishPreparedHist(id, { restRows, histBytes, r2, previous });
-  const file = path.resolve(opts.histFile ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'hist', `${id}.json`));
+  // Validate the original fingerprints and replay evidence before any mutation.
+  buildCandidate({ iidxId: id, restRows, previousHistRows, aliases, aliasesBytes, songs,
+    publishedHistBytes: histBytes, downloadedHistBytes: histBytes });
+  if (opts.publishHist !== false) {
+    // Conflicts and uncertain PUT outcomes propagate. The next run rereads current
+    // history and aliases and recomputes from the original buffer, never stale bytes.
+    await publishPreparedHist(id, { restRows, histBytes, r2, previous, previousHistRows, aliases, aliasesBytes, songs });
+  }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, histBytes);
   const result = { histRows, histBytes, restRows, songs };
-  preparedFiles.set(file, { id, hash: bytesHash(histBytes), result });
+  if (opts.publishHist !== false) preparedFiles.set(file, { id, hash: bytesHash(histBytes), result });
   return result;
 }
 
@@ -278,7 +305,7 @@ export async function fetchUserHistWithScores(id) {
   const eid = encodeURIComponent(id);
   const histRows = [], restRows = []; let off = 0;
   while (true) {
-    const rows = await rest(`scores?iidx_id=eq.${eid}&played_version=neq.-10&select=score_id,${HIST_COLS.join(',')}`
+    const rows = await rest(`scores?iidx_id=eq.${eid}&played_version=neq.-10&select=score_id,iidx_id,${HIST_COLS.join(',')}`
       + `&order=score_id.asc&limit=1000&offset=${off}`);
     if (!Array.isArray(rows)) throw new Error('scores 응답이 배열이 아닙니다');
     for (const r of rows) {
@@ -290,20 +317,16 @@ export async function fetchUserHistWithScores(id) {
   return { histRows, restRows };
 }
 
-export async function publishPreparedHist(id, { restRows, histBytes, previous: initial, r2 = conditionalR2Client({
-  account: process.env.CLOUDFLARE_ACCOUNT_ID,
-  token: process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN,
-  rawBytes: true,
-}) }) {
+async function publishPreparedHist(id, { restRows, histBytes, previous, r2, previousHistRows, aliases, aliasesBytes, songs }) {
   if (!/^[A-Za-z0-9]+$/.test(id)) throw new Error('잘못된 iidx_id 형식');
   const histKey = `hist/${id}.json`;
-  const previous = initial === undefined ? await r2.read(histKey) : initial;
   const histEtag = previous ? previous.etag : null;
   await r2.put(histKey, histBytes, histEtag);
   const downloaded = await r2.read(histKey);
   if (!downloaded) throw new Error(`hist 재다운로드 실패(${histKey})`);
   const downloadedBytes = downloaded.bytes ?? Buffer.from(downloaded.body, 'utf8');
-  const candidate = buildCandidate({ iidxId: id, restRows, publishedHistBytes: histBytes, downloadedHistBytes: downloadedBytes });
+  const candidate = buildCandidate({ iidxId: id, restRows, previousHistRows, aliases, aliasesBytes, songs,
+    publishedHistBytes: histBytes, downloadedHistBytes: downloadedBytes });
   const candidateKey = `meta/scores-delete-${id}.json`;
   const existingCandidate = await r2.read(candidateKey);
   const candidateBody = Buffer.from(JSON.stringify(candidate), 'utf8');
@@ -341,30 +364,21 @@ export function histUnchanged(prev, probe) {
 
 // hist 파일 갱신. file 에 R2 현재본이 미리 놓여 있으면(워크플로가 받아둠) 변경 없을 때 전체 조회를 건너뛴다.
 export async function updateHistFile(id, file) {
-  const preparing = process.env.SCORE_BUFFER_PREPARE === '1';
+  const preparing = process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1';
   const normalizedFile = path.resolve(file);
   const cached = preparedFiles.get(normalizedFile);
   if (preparing && cached) {
-    preparedFiles.delete(normalizedFile);
     if (cached.id === id && fs.existsSync(normalizedFile)
       && bytesHash(fs.readFileSync(normalizedFile)) === cached.hash) {
       return { rebuilt: true, rows: cached.result.histRows.length, restRows: cached.result.restRows };
     }
   }
+  if (preparing) {
+    const result = await prepareOfficialHistory(id, undefined, { histFile: normalizedFile });
+    return { rebuilt: true, rows: result.histRows.length, restRows: result.restRows };
+  }
   let prev = null;
   try { prev = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* 없거나 깨짐 → 재생성 */ }
-  if (preparing) {
-    const { histRows, restRows } = await fetchUserHistWithScores(id);
-    if (!histRows.length && prev && prev.length) {
-      const hasNonDbr = prev.some((r) => Array.isArray(r) && r.length === HIST_COLS.length
-        && Number.isInteger(r[HIST_COLS.indexOf('played_version')]) && r[HIST_COLS.indexOf('played_version')] !== -10);
-      const allValidDbr = prev.every((r) => Array.isArray(r) && r.length === HIST_COLS.length
-        && Number.isInteger(r[HIST_COLS.indexOf('played_version')]) && r[HIST_COLS.indexOf('played_version')] === -10);
-      if (hasNonDbr || !allValidDbr) throw new Error(`hist 급감(${id}): ${prev.length}행 → 0행 — 기존본 유지`);
-    }
-    fs.writeFileSync(file, JSON.stringify(histRows));
-    return { rebuilt: true, rows: histRows.length, restRows };
-  }
   let probe = null;
   try { probe = await histProbe(id); } catch (e) { console.error('hist 프로브 실패(' + id + '):', e.message); }
   if (histUnchanged(prev, probe)) return { rebuilt: false, rows: prev.length };
@@ -392,7 +406,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   if (!ids.length) { console.error('iidx_id 인자 없음'); process.exit(1); }
   fs.mkdirSync('user', { recursive: true });
   fs.mkdirSync('hist', { recursive: true });
-  const personaRes = await loadPersonaResources({ official: process.env.SCORE_BUFFER_PREPARE === '1' });
+  const personaRes = await loadPersonaResources({ official: process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1' });
   for (const id of ids) {
     if (!/^[A-Za-z0-9]+$/.test(id)) { console.error('잘못된 iidx_id 형식:', id); process.exit(1); }
     let dirtyCharts = [];
