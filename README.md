@@ -124,6 +124,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-22 — 버퍼화 3단계 운영 대조 수정·준비 모드 덤프 누락 수정
+
+- 스위치 ON 전 운영 R2 읽기 전용 대조에서 찾은 공식 계산 결함 수정: DP 엔진 입력의 textage 키 제거(★·native★ 가 lv11floor 0.02 로 나오던 문제), `osPattern` 을 R2·DB 열 이름(`notes`…)으로, 피처 `soflan` 을 커널 키 `SOF-LAN` 에서, SP 이력 없는 유저는 SP r★ 미계산. 대조 6명 ★·native★·osPattern 37축 일치.
+- `dump-user.yml`: 준비 모드 전역 그룹(`score-buffer-prepare`, cancel-in-progress false)을 없애고 모든 모드 `dump-{id}` + cancel-in-progress true 로 복원 — 전역 그룹은 대기 run 을 취소해 다른 유저 덤프를 잃었다(10-22 ON 7분 동안 4건, 누락 유저 수동 재디스패치). 4단계 삭제 실행 전에는 hist 작성자 전체 잠금을 따로 만든다.
+- 테스트 463/463.
+
 ### 2026-10-22 — Supabase scores 버퍼화 3단계: 공식값 users 역기록(기본 꺼짐)
 
 - `SCORE_BUFFER_PREPARE=1` 일 때만. `dump-user.yml` 이 R2 user 게시에 성공한 뒤 `write-official-user.mjs` 로 공식 ★·native★·r★·SP CPI/★·SP r★ tuple 을 `upsert_user`(sql/33 14인자), `osPattern` 을 `upsert_user_feature_score` 로 다시 쓴다. 새 RPC·DDL 없음.
