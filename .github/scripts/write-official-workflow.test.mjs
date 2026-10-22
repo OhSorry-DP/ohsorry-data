@@ -49,7 +49,8 @@ test('default concurrency, hist mode gate, and list/slice sequence remain intact
   assert.match(concurrency, /^  cancel-in-progress: true$/m);
   assert.doesNotMatch(concurrency, /SCORE_BUFFER_PREPARE/);
   const upload = section('- name: Upload to R2 (data.iidx.in)', '- name: Write official user to Supabase');
-  assert.match(upload, /if \[ "\$SCORE_BUFFER_PREPARE" != "1" \]; then[\s\S]*put "hist\/\$IIDX_ID\.json"/);
+  assert.match(upload, /if \[ "\$SCORE_BUFFER_CUMULATIVE" != "1" \] && \[ "\$SCORE_BUFFER_PREPARE" != "1" \]; then[\s\S]*put "hist\/\$IIDX_ID\.json"/);
+  assert.match(workflow, /^      SCORE_BUFFER_CUMULATIVE: \$\{\{ vars\.SCORE_BUFFER_CUMULATIVE \|\| '0' \}\}$/m);
   const list = workflow.indexOf('- name: users-list 증분 병합');
   const slice = workflow.indexOf('- name: uslice 증분 PUT', list);
   const later = workflow.indexOf('  persona:', slice);
