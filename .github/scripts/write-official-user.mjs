@@ -44,7 +44,7 @@ function validate(id, dump) {
     if (seen.has(style)) throw new TypeError(`duplicate osPattern play_style ${style}`);
     seen.add(style);
     for (const feat of FEATURES) {
-      const key = `os_${feat}`;
+      const key = feat;
       if (!own(row, key)) throw new TypeError(`osPattern missing ${key}`);
       numeric(row[key], `osPattern.${key}`);
     }
@@ -148,7 +148,7 @@ export async function writeOfficialUser(id, dump, { fetchImpl = globalThis.fetch
   if (radarRows) {
     for (const row of dump.osPattern) {
       const style = Number(row.play_style), prior = radarRows.find((x) => Number(x.play_style) === style);
-      const values = Object.fromEntries(FEATURES.map((f) => [f, style === 0 && !SP_FEATURES.has(f) ? null : row[`os_${f}`]]));
+      const values = Object.fromEntries(FEATURES.map((f) => [f, style === 0 && !SP_FEATURES.has(f) ? null : row[f]]));
       const changed = prior ? FEATURES.some((f) => values[f] !== null && norm(values[f]) !== norm(prior[f])) : FEATURES.some((f) => values[f] !== null);
       if (!changed) continue;
       const args = { p_iidx_id: id, ...Object.fromEntries(FEATURES.map((f) => [`p_os_${f}`, values[f]])), p_play_style: style };

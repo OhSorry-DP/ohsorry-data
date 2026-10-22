@@ -12,7 +12,7 @@ const current = { iidx_id: id, dj_name: 'KEEP', star: 10, native_star: 9, r_star
 const feature = (style, notes, hands) => Object.fromEntries(['notes', 'chord', 'peak', 'charge', 'scratch', 'soflan', 'phrase', 'jack', 'trill', 'rand',
   'stair_up_l', 'stair_up_r', 'stair_dn_l', 'stair_dn_r', 'k1_l', 'k1_r', 'k2_l', 'k2_r', 'k3_l', 'k3_r', 'k4_l', 'k4_r', 'k5_l', 'k5_r', 'k6_l', 'k6_r',
   'k7_l', 'k7_r', 'double_stair_l', 'double_stair_r', 'keima_l', 'keima_r', 'hstair_onehand', 'hstair_sync', 'hstair_sameshape', 'hstair_diffshape', 'hands']
-  .map((f) => [`os_${f}`, f === 'notes' ? notes : f === 'hands' ? hands : null]).concat([['iidx_id', id], ['play_style', style]]));
+  .map((f) => [f, f === 'notes' ? notes : f === 'hands' ? hands : null]).concat([['iidx_id', id], ['play_style', style]]));
 const emptyRadar = (style, notes, hands) => Object.fromEntries(['notes', 'chord', 'peak', 'charge', 'scratch', 'soflan', 'phrase', 'jack', 'trill', 'rand',
   'stair_up_l', 'stair_up_r', 'stair_dn_l', 'stair_dn_r', 'k1_l', 'k1_r', 'k2_l', 'k2_r', 'k3_l', 'k3_r', 'k4_l', 'k4_r', 'k5_l', 'k5_r', 'k6_l', 'k6_r',
   'k7_l', 'k7_r', 'double_stair_l', 'double_stair_r', 'keima_l', 'keima_r', 'hstair_onehand', 'hstair_sync', 'hstair_sameshape', 'hstair_diffshape', 'hands']
@@ -154,4 +154,10 @@ test('invalid users and radar reads retain failures and never synthesize users',
     assert.ok(error instanceof AggregateError); assert.equal(error.errors.length, 1); assert.match(error.errors[0].message, /user_ohsorry_radars GET/); return true;
   });
   assert.equal(f.calls.some((x) => x.url.pathname.endsWith('/rpc/upsert_user')), true);
+  const input = structuredClone(dump);
+  input.osPattern[0] = Object.fromEntries(Object.entries(input.osPattern[0]).map(([key, value]) =>
+    ['iidx_id', 'play_style'].includes(key) ? [key, value] : [`os_${key}`, value]));
+  const invalid = fixture();
+  await assert.rejects(writeOfficialUser(id, input, opts(invalid)), /osPattern missing notes/);
+  assert.equal(invalid.calls.length, 0);
 });
