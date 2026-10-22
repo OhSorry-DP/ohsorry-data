@@ -102,6 +102,10 @@ test('official DP/SP entries use kernel score rate and preserve style-specific n
   assert.equal(dp.hands, 47.5); assert.equal(sp.hands, null); assert.equal(sp.notes, 95); assert.equal(sp.custom, true); assert.equal(sp.updated_at, 'kept');
   assert.ok(!Object.keys(dp).some((key) => key.startsWith('os_')));
   assert.ok(!Object.keys(sp).some((key) => key.startsWith('os_')));
+  const soflanR = baseR({ patternScoreKernelLib: { computePatternScoreKernel: () => ({ vec: { 'SOF-LAN': 12.5 }, matched: 1 }) },
+    featScores: { test: { DP_ANO: { NOTES: 100 } } }, textageMeta: { songs: { test: { notes: { DA: 1000 } } } } });
+  const soflanOut = calculateOfficialScores({ id: 'x', inputs: { dpCharts: [], dp: [{ textage_song_id: 'test', diff: 3, ex_score: 1900 }], sp: [], spRateRows: [] }, R: soflanR });
+  assert.equal(soflanOut.osPattern.find((row) => row.play_style === 1).soflan, 12.5);
 
   // loadPersonaResources의 official 반환 객체 키를 그대로 구성한 로컬 fixture (네트워크 fetch 금지).
   const actualR = { featScores: { test: { DP_ANO: { NOTES: 100, HANDS: 50 } } }, spFeatScores: {}, ratingJson,
