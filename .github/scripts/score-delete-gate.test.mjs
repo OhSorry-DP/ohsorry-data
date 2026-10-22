@@ -1,84 +1,109 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runScoreDeleteGate } from './score-delete-gate.mjs';
+import { gzipSync } from 'node:zlib';
+import { runScoreDeleteGate, validateDeleteResponse } from './score-delete-gate.mjs';
+import { buildDeleteManifest, verifyDeleteSnapshot } from './snapshot-r2.mjs';
 import { sha256Hex } from './score-buffer.mjs';
 
-const histText = '[[1000,3,4,1234,33,"2026-10-22T01:02:03.123456+00:00","2026-10-22",1,null,1500]]';
+const id = '89388691';
+const histText = '[[100,3,5,2000,33,"2026-10-22T01:02:03.123456+00:00","2026-10-22",1,null,1500]]';
 const histBytes = Buffer.from(histText, 'utf8');
-const snapshotKey = 'snapshot/daily/2026-10-22.tar.gz';
-const tarSha256 = 'a'.repeat(64);
-const candidateBytes = (scoreIds = [101]) => Buffer.from(JSON.stringify({
-  score_ids: scoreIds, hist: { key: 'hist/Ab12.json', sha256: sha256Hex(histBytes) },
-}), 'utf8');
-const base = (overrides = {}) => ({ iidxId: 'Ab12', candidateBytes: candidateBytes(), histBytes,
-  snapshotKey, tarSha256, ...overrides });
-const lock = (overrides = {}) => ({ iidxId: 'Ab12', snapshotKey, tarSha256,
-  scope: 'all-hist-writers', assertHeld: async () => {}, ...overrides });
+const aliasesBytes = Buffer.from('{"v":1,"rules":[{"from":100,"to":200,"scope":"song"},{"from":300,"to":400,"scope":"chart-ac","diff":3}]}', 'utf8');
+const rawRow = (score_id) => ({ score_id, iidx_id: id, song_id: 100, diff: 3, played_version: 33, play_style: 1,
+  ex_score: 2000, lamp: 5, bp: null, note_count: 1500,
+  date: '2026-10-22T01:02:03.123456+00:00', date_kst: '2026-10-22' });
+const candidateBytes = (ids = [12345], alter = {}) => Buffer.from(JSON.stringify({ v: 2,
+  score_ids: ids, rows: ids.map(rawRow), hist: { key: `hist/${id}.json`, sha256: sha256Hex(histBytes) },
+  aliases_sha256: sha256Hex(aliasesBytes), ...alter }), 'utf8');
 
-test('기본 꺼짐은 계획만 반환하고 어댑터와 잠금을 호출하지 않는다', async () => {
+function tarEntry(name, body) {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, 100, 'utf8'); header.write('0000644\0', 100, 8, 'ascii');
+  header.write('0000000\0', 108, 8, 'ascii'); header.write('0000000\0', 116, 8, 'ascii');
+  header.write(`${body.length.toString(8).padStart(11, '0')}\0`, 124, 12, 'ascii');
+  header.write('00000000000\0', 136, 12, 'ascii'); header.fill(32, 148, 156);
+  header[156] = 48; header.write('ustar\0', 257, 6, 'ascii'); header.write('00', 263, 2, 'ascii');
+  let sum = 0; for (const byte of header) sum += byte;
+  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii');
+  const padded = Buffer.alloc(Math.ceil(body.length / 512) * 512); body.copy(padded);
+  return Buffer.concat([header, padded]);
+}
+
+async function verified(ids = [12345], options = {}) {
+  const key = options.snapshotKey || 'snapshot/daily/2026-10-23.tar.gz';
+  const cBytes = candidateBytes(ids, options.candidateAlter);
+  const hist = options.histBytes || histBytes;
+  const manifest = buildDeleteManifest([{ key: `meta/scores-delete-${id}.json`, bytes: cBytes,
+    histKey: `hist/${id}.json`, histBytes: hist }]);
+  const files = [
+    ['meta/scores-delete-' + id + '.json', cBytes], ['hist/' + id + '.json', hist],
+    ['scores-delete-manifest.json', Buffer.from(JSON.stringify(manifest), 'utf8')],
+  ];
+  const tarBytes = gzipSync(Buffer.concat([...files.map(([name, body]) => tarEntry(name, body)), Buffer.alloc(1024)]));
+  return verifyDeleteSnapshot({ snapshotKey: key, tarBytes, expectedManifest: options.manifest || manifest });
+}
+
+const execute = (proof, extra = {}) => runScoreDeleteGate({ iidxId: id, verifiedSnapshot: proof, execute: true, ...extra });
+const response = (rows, deleted = rows.map((row) => row.score_id), kept = []) => ({ requested: rows.length,
+  deleted_ids: deleted, kept_ids: kept });
+
+test('OFF plans only; execution requires a fresh verified daily snapshot and exact allowlist', async () => {
   let calls = 0;
-  const out = await runScoreDeleteGate(base({ deleteScoreIds: async () => { calls++; } }));
-  assert.deepEqual(out, { status: 'prepared', scoreIds: [101], batches: [[101]], deleted: 0, reason: null });
-  assert.equal(calls, 0);
-});
-
-test('후보 스키마, hist 해시와 snapshot 식별자를 검증한다', async () => {
-  for (const args of [
-    base({ candidateBytes: Buffer.from(JSON.stringify({ score_ids: [101, 101], hist: { key: 'hist/Ab12.json', sha256: 'a'.repeat(64) } })) }),
-    base({ candidateBytes: Buffer.from(JSON.stringify({ score_ids: [101], hist: { key: 'hist/Else.json', sha256: 'a'.repeat(64) } })) }),
-    base({ histBytes: Buffer.from('[]') }),
-    base({ snapshotKey: 'snapshot/../daily/2026-10-22.tar.gz' }),
-    base({ snapshotKey: 'snapshot/daily/not-a-date.tar.gz' }),
-    base({ tarSha256: 'bad' }),
-  ]) await assert.rejects(runScoreDeleteGate(args));
-});
-
-test('실행 시 일치하는 잠금 capability가 없거나 assertHeld가 실패하면 차단한다', async () => {
-  let calls = 0;
-  const del = async () => { calls++; return { deleted: 1 }; };
-  for (const serialization of [null, true, lock({ scope: 'hist-only' }), lock({ snapshotKey: 'snapshot/daily/2026-10-21.tar.gz' }),
-    lock({ assertHeld: async () => { throw new Error('lock lost'); } })]) {
-    const out = await runScoreDeleteGate(base({ execute: true, serialization, deleteScoreIds: del }));
-    assert.equal(out.status, 'blocked');
+  const proof = await verified();
+  const prepared = await runScoreDeleteGate({ iidxId: id, verifiedSnapshot: proof, deleteScoreRows: async () => { calls++; } });
+  assert.equal(prepared.status, 'prepared'); assert.equal(calls, 0);
+  for (const proof of [structuredClone(await verified()), await verified([1, 2]), await verified([1], { snapshotKey: 'snapshot/monthly/2026-10.tar.gz' })]) {
+    await assert.rejects(execute(proof, { deleteScoreRows: async () => { calls++; } }), /fresh verified snapshot/);
   }
+  await assert.rejects(execute(await verified(), { iidxId: '89388692', deleteScoreRows: async () => { calls++; } }), /fresh verified snapshot/);
   assert.equal(calls, 0);
 });
 
-test('401개 ID를 200/200/1로 전달하고 정상 삭제 및 0건 재실행을 허용한다', async () => {
-  const ids = Array.from({ length: 401 }, (_, i) => i + 1);
-  const received = [];
-  const out = await runScoreDeleteGate(base({ candidateBytes: candidateBytes(ids), execute: true, serialization: lock(),
-    deleteScoreIds: async (id, batch) => { assert.equal(id, 'Ab12'); received.push(batch); return { deleted: batch.length }; } }));
-  assert.deepEqual(out.batches.map((batch) => batch.length), [200, 200, 1]);
-  assert.deepEqual(received, out.batches);
-  assert.deepEqual(received.flat(), ids);
-  assert.equal(out.deleted, 401);
-  const again = await runScoreDeleteGate(base({ execute: true, serialization: lock(), deleteScoreIds: async () => ({ deleted: 0 }) }));
-  assert.equal(again.status, 'deleted');
-  assert.equal(again.deleted, 0);
+test('candidate v2 requires all nullable fields and exact ascending ID-to-row membership', async () => {
+  const good = JSON.parse(candidateBytes().toString());
+  for (const candidate of [
+    { ...good, v: 1 }, (() => { const x = structuredClone(good); delete x.rows[0].date; return x; })(),
+    (() => { const x = structuredClone(good); delete x.rows[0].bp; return x; })(),
+    { ...good, score_ids: [12346] },
+  ]) await assert.rejects(verified([12345], { candidateAlter: candidate }), /candidate|manifest|fingerprint|invalid|missing required key|same ascending set/i);
 });
 
-test('두 번째 배치 실패 또는 잘못된 deleted 반환은 뒤 배치를 중단하고 부분 결과를 반환한다', async () => {
-  const ids = Array.from({ length: 401 }, (_, i) => i + 1);
-  let calls = 0;
-  const out = await runScoreDeleteGate(base({ candidateBytes: candidateBytes(ids), execute: true, serialization: lock(),
-    deleteScoreIds: async (_id, batch) => { calls++; if (calls === 2) throw new Error('adapter outage'); return { deleted: batch.length }; } }));
-  assert.equal(calls, 2);
-  assert.equal(out.status, 'partial');
-  assert.equal(out.deleted, 200);
-  assert.match(out.reason, /adapter outage/);
-  const invalid = await runScoreDeleteGate(base({ execute: true, serialization: lock(), deleteScoreIds: async () => ({ deleted: 2 }) }));
-  assert.equal(invalid.status, 'partial');
-  assert.equal(invalid.deleted, 0);
-  assert.match(invalid.reason, /invalid deleted count/);
+test('tar, hist bytes, fingerprints, and unbranded proof tampering are rejected', async () => {
+  const proof = await verified();
+  await assert.rejects(verified([12345], { histBytes: Buffer.from('[]') }), /hist mismatch|fingerprint/i);
+  const forged = structuredClone(proof);
+  await assert.rejects(execute(forged, { deleteScoreRows: async () => response([{ score_id: 12345 }]) }), /fresh verified snapshot/);
+  const tampered = await verified(); tampered.candidates[0].candidateBytes = candidateBytes([12346]);
+  await assert.rejects(execute(tampered, { deleteScoreRows: async () => ({ requested: 1, deleted_ids: [12345], kept_ids: [] }) }), /fresh verified snapshot/);
 });
 
-test('잠금은 시작, 각 배치 전, 종료에 확인한다', async () => {
-  let checks = 0, deletes = 0;
-  const out = await runScoreDeleteGate(base({ candidateBytes: candidateBytes([1, 2, 3]), execute: true,
-    serialization: lock({ assertHeld: async () => { checks++; } }),
-    deleteScoreIds: async (_id, batch) => { deletes++; return { deleted: batch.length }; } }));
-  assert.equal(out.status, 'deleted');
-  assert.equal(checks, 3);
-  assert.equal(deletes, 1);
+test('401 rows batch 200/200/1, preserve version 33 raw fingerprints, and ignore outside candidates', async () => {
+  const ids = Array.from({ length: 401 }, (_, i) => i + 1);
+  const proof = await verified(ids);
+  const batches = [];
+  const out = await runScoreDeleteGate({ iidxId: id, verifiedSnapshot: proof });
+  assert.deepEqual(out.batches.map((rows) => rows.length), [200, 200, 1]);
+  assert.equal(out.batches[0][0].played_version, 33);
+  assert.equal(out.batches[0][0].song_id, 100);
+  assert.deepEqual(out.batches.flat().map((row) => row.score_id), ids);
+});
+
+test('zero deletes and invalid response partitions fail closed', async () => {
+  const rows = [rawRow(12345), rawRow(12346)];
+  assert.deepEqual(validateDeleteResponse(response(rows, [], [12345, 12346]), rows), response(rows, [], [12345, 12346]));
+  for (const invalid of [
+    { requested: 2, deleted_ids: [12345], kept_ids: [12347] },
+    { requested: 2, deleted_ids: [12345], kept_ids: [12345] },
+    { requested: 2, deleted_ids: [12346, 12345], kept_ids: [] },
+    { requested: 2, deleted_ids: [12345], kept_ids: [] },
+  ]) {
+    assert.throws(() => validateDeleteResponse(invalid, rows), /delete/);
+  }
+});
+
+test('second batch failure or lost response is blocked until an uploaded daily snapshot is available', async () => {
+  const ids = Array.from({ length: 401 }, (_, i) => i + 1);
+  for (const failure of [new Error('adapter outage'), new Error('response lost')]) {
+    await assert.rejects(execute(await verified(ids), { deleteScoreRows: async () => { throw failure; } }), /fresh verified snapshot/);
+  }
 });
