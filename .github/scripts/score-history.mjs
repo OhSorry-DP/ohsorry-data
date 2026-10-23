@@ -131,6 +131,8 @@ export function filterScoreHistoryRows(histRows, incomingRows) {
 }
 // END SCORE_HISTORY_UPLOAD_FILTER_SYNC
 
+export { instant as historyInstant };
+
 /** Replay REST score rows in score_id order, preserving the existing history slots. */
 export function replayScoreBuffer(histRows, restRows) {
   if (!Array.isArray(histRows) || !Array.isArray(restRows)) fail('histRows and restRows must be arrays');
