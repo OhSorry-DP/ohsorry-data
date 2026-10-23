@@ -13,7 +13,6 @@ import { conditionalR2Client } from './r2-client.mjs';
 import { buildCandidate } from './score-buffer.mjs';
 import { replayScoreBuffer } from './score-history.mjs';
 import { normalizeAliasInputs } from './song-aliases.mjs';
-import { computeDirtyCharts } from './ranking-dirty-charts.mjs';
 import { fetchDpArrange } from './dp-arrange.mjs';
 import { writeUserSliceFile } from './user-slice.mjs';
 
@@ -210,10 +209,6 @@ export async function dumpUser(id, personaRes, opts = {}) {
     ...(!cumulative && dpRecent ? { dpRecent } : {}),
     ...(!cumulative && spRecent ? { spRecent } : {}),
   };
-  if (result.user && opts.onDirty) {
-    try { await opts.onDirty(computeDirtyCharts({ prevOk, prev, user: result.user, dp: result.dp })); }
-    catch (e) { console.warn('::warning::dirty marker callback failed(' + id + '):', e.message); }
-  }
   return result;
 }
 
@@ -429,13 +424,8 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   const personaRes = await loadPersonaResources({ official: process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1' });
   for (const id of ids) {
     if (!/^[A-Za-z0-9]+$/.test(id)) { console.error('잘못된 iidx_id 형식:', id); process.exit(1); }
-    let dirtyCharts = [];
-    const data = await dumpUser(id, personaRes, { deferPersona: true, onDirty: (charts) => { dirtyCharts = charts; } });
+    const data = await dumpUser(id, personaRes, { deferPersona: true });
     if (!data.user) { console.error('유저 없음(삭제됨?):', id); continue; }
-    if (dirtyCharts.length) {
-      fs.mkdirSync('ranking-state/dirty', { recursive: true });
-      fs.writeFileSync(`ranking-state/dirty/${id}-${Date.now()}.json`, JSON.stringify({ v: 1, id, at: new Date().toISOString(), charts: dirtyCharts }));
-    }
     fs.writeFileSync(`user/${id}.json`, JSON.stringify(data));
     const h = await updateHistFile(id, `hist/${id}.json`);
     const slice = writeUserSliceFile(id, data, `uslice-out/${id}.json`, { histFile: `hist/${id}.json` });
