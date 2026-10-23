@@ -1,5 +1,11 @@
 import { pathToFileURL } from 'node:url';
-import { getText, list, listEntries, md5, putText, del, pool } from './r2-client.mjs';
+import { getText, listEntries, md5, putText, del, pool, createRequestGate } from './r2-client.mjs';
+import { loadHistoryInputs } from './ranking-history-input.mjs';
+import { buildHistoryRankings } from './ranking-from-history.mjs';
+import { historyInstant } from './score-history.mjs';
+import { validateRows, toOutput } from './dump-first-place.mjs';
+
+const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 
 export function chartKey([song, diff]) { return `ranking/${song}-${diff}.json`; }
 export function normalizeCharts(charts) {
@@ -7,59 +13,105 @@ export function normalizeCharts(charts) {
     .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
 }
 export function serializeRows(rows) {
-  if (!Array.isArray(rows)) throw new Error('RPC 결과가 배열이 아님');
-  // rank 오름차순, iidx_id 오름차순으로 고정해 결정적 직렬화를 유지한다.
+  if (!Array.isArray(rows)) throw new Error('랭킹 결과가 배열이 아님');
   for (const r of rows) if (!r || !Number.isInteger(r.rank) || !Number.isInteger(r.ex_score) || typeof r.iidx_id !== 'string' || !r.iidx_id) throw new Error('랭킹 행 검증 실패');
-  return JSON.stringify([...rows].sort((a, b) => a.rank - b.rank || a.iidx_id.localeCompare(b.iidx_id)));
-}
-function chartsFromMarker(raw) {
-  const x = JSON.parse(raw);
-  return Array.isArray(x.charts) ? x.charts : [];
+  const timed = rows.map(row => ({ row, time: historyInstant(row.date) }));
+  return JSON.stringify(timed.sort((a, b) => b.row.ex_score - a.row.ex_score
+    || compare(a.time, b.time) || compare(a.row.iidx_id, b.row.iidx_id)).map(({ row }) => row));
 }
 function chartsFromWinners(raw) { const x = JSON.parse(raw); return Object.values(x.w || {}).flat(); }
 function chartsFromRanking(keys) { return keys.map((k) => /^ranking\/(\d+)-(\d+)\.json$/.exec(k)).filter(Boolean).map((m) => [+m[1], +m[2]]); }
 
-export async function run({ all = false, rpc, getText: read = getText, list: listFn = list, listEntries: listEntriesFn = listEntries, putText: put = putText, del: remove = del, log = console }) {
-  // 러너에서 CDN HEAD가 판정에 실패해 매번 전부 PUT 했다.
-  // R2 정본 etag를 본문 md5와 비교해 변경 여부를 판정한다.
-  const remote = new Map((await listEntriesFn('ranking/')).map(({ key, etag }) => [key, etag]));
-  const markerKeys = await listFn('ranking-state/dirty/');
-  const charts = [], deletable = [];
-  for (const key of markerKeys) {
-    const raw = await read(key);
-    try {
-      // 목록에만 남고 본문이 삭제된 마커는 삭제 목록에 넣지 않는다.
-      if (raw) {
-        charts.push(...chartsFromMarker(raw));
-        deletable.push(key);
-      }
-    } catch (e) {
-      log.warn(`마커 파싱 실패 ${key}: ${e.message}`);
-    }
+// all/--all are accepted by legacy callers; every execution collects all histories.
+export async function run({ mode = process.env.RANKING_HISTORY_MODE,
+  loadInputs = loadHistoryInputs, buildRankings = buildHistoryRankings,
+  getText: read = getText, listEntries: listEntriesFn = listEntries,
+  putText: put = putText, del: remove = del, pool: runPool = pool,
+  requestGate = createRequestGate(), log = console, now = () => new Date().toISOString(),
+  ...inputDeps
+} = {}) {
+  if (mode !== 'observe' && mode !== 'publish') throw new Error('RANKING_HISTORY_MODE는 observe 또는 publish여야 함');
+  const options = { ...inputDeps.r2Options, requestGate, retry: true };
+  if (inputDeps.fetchImpl) options.fetchImpl = inputDeps.fetchImpl;
+
+  // Collection and all public output preflight must finish before any mutation.
+  const inputs = await loadInputs({ ...inputDeps, getText: read, listEntries: listEntriesFn,
+    pool: runPool, requestGate, log });
+  const computed = await buildRankings({ users: inputs.users, histories: inputs.histories });
+  const current = new Map();
+  for (const { song_id, diff, rows } of computed.charts) {
+    if (!Number.isInteger(song_id) || !Number.isInteger(diff)) throw new Error('채보 검증 실패');
+    const key = chartKey([song_id, diff]);
+    if (current.has(key)) throw new Error(`중복 채보 ${key}`);
+    current.set(key, { rows, body: serializeRows(rows) });
   }
-  if (all) { const winners = await read('first-place-winners.json'); if (!winners) throw new Error('first-place-winners.json 없음'); charts.push(...chartsFromWinners(winners)); charts.push(...chartsFromRanking([...remote.keys()])); }
-  const targets = normalizeCharts(charts); let puts = 0, skips = 0, deletes = 0, failures = 0;
-  await pool(targets, 8, async (chart) => { try {
-    const rows = await rpc(chart[0], chart[1]);
-    const body = serializeRows(rows), key = chartKey(chart);
-    // 0행은 공개 파일을 삭제해 웹에서 404를 빈 랭킹으로 사용하게 한다.
-    if (rows.length === 0) {
-      if (!await remove(key)) throw new Error(`삭제 실패 ${key}`);
-      deletes++;
+  validateRows(computed.winners);
+  const output = toOutput(computed.winners, now());
+  const remote = new Map((await listEntriesFn('ranking/', options)).map(({ key, etag }) => [key, etag]));
+  const oldWinnersBody = await read('first-place-winners.json', options);
+  const oldWinners = oldWinnersBody === null ? null : JSON.parse(oldWinnersBody);
+  if (oldWinners && oldWinners.n === output.n && JSON.stringify(oldWinners.w) === JSON.stringify(output.w)) output._v = oldWinners._v;
+  const winnerBody = JSON.stringify(output);
+  const targets = normalizeCharts([
+    ...computed.charts.map(({ song_id, diff }) => [song_id, diff]),
+    ...chartsFromRanking([...remote.keys()]),
+  ]);
+  const diagnosticCharts = normalizeCharts([...targets, ...(oldWinnersBody === null ? [] : chartsFromWinners(oldWinnersBody))]);
+  const plan = [];
+  await runPool(targets, 8, async chart => {
+    const key = chartKey(chart), value = current.get(key);
+    if (!value || value.rows.length === 0) {
+      plan.push({ key, action: remote.has(key) ? 'delete' : 'skip' });
+      return;
     }
-    else if (remote.get(key) === md5(body)) skips++;
-    else { const r = await put(key, body); if (!r.ok) throw new Error(r.msg || `PUT 실패 ${key}`); puts++; }
-  } catch (e) { failures++; log.error(`차트 실패 ${chart.join('-')}: ${e.message}`); } });
-  if (!failures) for (const key of deletable) if (!await remove(key)) throw new Error(`마커 삭제 실패 ${key}`);
-  log.log(`차트 ${targets.length}, PUT ${puts}, skip ${skips}, 삭제 ${deletes}, 실패 ${failures}`);
-  return { charts: targets, puts, skips, deletes, failures, deletedMarkers: failures ? [] : deletable };
+    let digest = remote.get(key);
+    if (remote.has(key) && !/^[a-f0-9]{32}$/i.test(digest ?? '')) {
+      const body = await read(key, options);
+      if (typeof body !== 'string') throw new Error(`기존 본문 없음 ${key}`);
+      digest = md5(body);
+    }
+    plan.push({ key, action: digest?.toLowerCase() === md5(value.body) ? 'skip' : 'put', body: value.body });
+  });
+  plan.sort((a, b) => compare(a.key, b.key));
+  const firstPlace = { key: 'first-place-winners.json', action: oldWinnersBody !== null && md5(oldWinnersBody) === md5(winnerBody) ? 'skip' : 'put', body: winnerBody };
+  const expected = { puts: 0, deletes: 0, skips: 0 };
+  for (const item of [...plan, firstPlace]) expected[item.action === 'put' ? 'puts' : item.action === 'delete' ? 'deletes' : 'skips']++;
+  const result = { mode, charts: targets, diagnosticCharts,
+    counts: { users: inputs.users.length, histories: inputs.histories.size, charts: computed.charts.length, winners: computed.winners.length },
+    fingerprint: inputs.fingerprint, diagnostics: inputs.diagnostics,
+    plan, firstPlace, expected, puts: 0, deletes: 0, skips: 0, failures: 0, failedKeys: [], firstPlaceSkipped: false };
+
+  // Publication consumes only the fully validated collection and output plan.
+  const publish = async item => {
+    try {
+      if (item.action === 'skip') result.skips++;
+      else if (item.action === 'delete') {
+        if (!await remove(item.key, options)) throw new Error(`삭제 실패 ${item.key}`);
+        result.deletes++;
+      } else {
+        const response = await put(item.key, item.body, null, options);
+        if (!response?.ok) throw new Error(response?.msg || `PUT 실패 ${item.key}`);
+        result.puts++;
+      }
+    } catch (error) {
+      result.failures++;
+      result.failedKeys.push(item.key);
+      log.error(`게시 실패 ${item.key}: ${error.message}`);
+    }
+  };
+  if (mode === 'publish') {
+    await runPool(plan, 8, publish);
+    if (result.failures) result.firstPlaceSkipped = true;
+    else await publish(firstPlace);
+  }
+  log.log(`${mode}: 채보 ${targets.length}, 예상 PUT ${expected.puts}, DELETE ${expected.deletes}, skip ${expected.skips}, 실패 ${result.failures}`);
+  return result;
 }
 
 async function main() {
   const sb = process.env.SUPABASE_URL, token = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!sb || !token) throw new Error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 없음');
-  const rpc = async (song, diff) => { const r = await fetch(`${sb}/rest/v1/rpc/get_chart_ranking_v2`, { method: 'POST', headers: { apikey: token, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_song_id: song, p_diff: diff, p_played_version: null }) }); if (!r.ok) throw new Error(`RPC HTTP ${r.status}`); return r.json(); };
-  const result = await run({ all: process.argv.includes('--all'), rpc });
+  const result = await run({ mode: process.env.RANKING_HISTORY_MODE });
   process.exitCode = exitCodeForResult(result);
 }
 export function exitCodeForResult(result) {
