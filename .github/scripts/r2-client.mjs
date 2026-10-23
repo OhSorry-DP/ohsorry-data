@@ -142,9 +142,9 @@ async function restFetch(key, init, tries = 4, base = REST_BASE, options = {}) {
 //   dump-user 워크플로에 R2 토큰을 빼먹은 채로, 기존 유저가 전부 '신규 유저' 로 찍혀
 //   persona 보존 장치가 통째로 무력화된 사고가 있다(2026-09-04). 조회 실패는 값이 없는 게 아니라
 //   **모르는 것**이다 — 모르면 throw 해서 호출부가 보존 경로로 가게 한다.
-export async function getText(key, { requestGate } = {}) {
-  if (useRest) {
-    const r = await restFetch(key, { method: 'GET' }, 4, REST_BASE, { requestGate });
+export async function getText(key, options = {}) {
+  if (useRest || options.token) {
+    const r = await restFetch(key, { method: 'GET' }, 4, options.base || REST_BASE, options);
     if (r.status === 404) return null;
     if (!r.ok) throw new Error(`R2 GET ${key} — HTTP ${r.status}`);
     return await r.text();
@@ -397,15 +397,15 @@ export function s3R2Client(options = {}) {
   return { request, list, stats, now, rate: 3 };
 }
 
-export async function list(prefix) {
-  return (await listEntries(prefix)).map(({ key }) => key);
+export async function list(prefix, options = {}) {
+  return (await listEntries(prefix, options)).map(({ key }) => key);
 }
 
 // 반환 { ok, msg? } — 호출부가 부분 실패를 집계할 수 있게 throw 하지 않는다.
-export async function putText(key, body, contentType = null) {
+export async function putText(key, body, contentType = null, options = {}) {
   const ct = contentType || contentTypeOf(key);
-  if (useRest) {
-    const r = await restFetch(key, { method: 'PUT', body, headers: { 'Content-Type': ct } });
+  if (useRest || options.token) {
+    const r = await restFetch(key, { method: 'PUT', body, headers: { 'Content-Type': ct } }, 4, options.base || REST_BASE, options);
     return r.ok ? { ok: true } : { ok: false, msg: `HTTP ${r.status} ${(await r.text()).slice(0, 200)}` };
   }
   const tmp = path.join(os.tmpdir(), 'r2put-' + key.replace(/[/\\]/g, '_'));
@@ -422,9 +422,9 @@ export function putFile(key, absPath, contentType = null) {
   } catch (e) { return { ok: false, msg: String(e.stderr || e.message).slice(0, 300) }; }
 }
 
-export async function del(key) {
-  if (useRest) {
-    const r = await restFetch(key, { method: 'DELETE' });
+export async function del(key, options = {}) {
+  if (useRest || options.token) {
+    const r = await restFetch(key, { method: 'DELETE' }, 4, options.base || REST_BASE, options);
     return r.ok || r.status === 404;
   }
   try { wrangler(['r2', 'object', 'delete', `${BUCKET}/${key}`, '--remote']); return true; }
