@@ -5,9 +5,134 @@ const account = 'test-account';
 process.env.CLOUDFLARE_ACCOUNT_ID = account;
 process.env.CLOUDFLARE_API_TOKEN = 'test-token';
 
-const { getText, list, listEntries, conditionalR2Client, s3R2Client } = await import(`./r2-client.mjs?test=${Date.now()}`);
+const { getText, list, listEntries, putText, del, createRequestGate, conditionalR2Client, s3R2Client } = await import(`./r2-client.mjs?test=${Date.now()}`);
 const base = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/ohsorry-data/objects`;
 const response = (body, status = 200) => new Response(JSON.stringify(body), { status });
+const restPage = (result, cursor) => response({ success: true, result, ...(cursor ? { result_info: { cursor } } : {}) });
+
+function virtualGate({ intervalMs = 500 } = {}) {
+  let time = 0;
+  let tail = Promise.resolve();
+  let nextAt = 0;
+  let blockedUntil = 0;
+  const starts = [];
+  return {
+    starts,
+    get time() { return time; },
+    async run(fn) {
+      let release;
+      const previous = tail;
+      tail = new Promise(resolve => { release = resolve; });
+      await previous;
+      try {
+        time = Math.max(time, nextAt, blockedUntil);
+        starts.push(time);
+        nextAt = time + intervalMs;
+        return await fn();
+      } finally { release(); }
+    },
+    defer(ms) { blockedUntil = Math.max(blockedUntil, time + ms); },
+  };
+}
+
+const restOptions = (extra = {}) => ({
+  token: 'injected-token', base, fetchImpl: async () => { throw new Error('unexpected fetch'); }, ...extra,
+});
+
+test('REST GET, LIST, PUT, and DELETE share the injected 500ms request gate', async () => {
+  const gate = virtualGate();
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    const req = { url: String(url), method: init.method || 'GET', headers: new Headers(init.headers), body: init.body };
+    calls.push(req);
+    if (req.url.includes('?')) return restPage([{ key: 'listed', etag: 'etag' }]);
+    return req.method === 'PUT' ? new Response('') : new Response(null, { status: 204 });
+  };
+  const options = restOptions({ requestGate: gate, fetchImpl });
+  assert.equal(await getText('raw/key.json', options), '');
+  assert.deepEqual(await list('folder/', options), ['listed']);
+  assert.deepEqual(await putText('folder/x.json', '{"x":1}', 'application/json', options), { ok: true });
+  assert.equal(await del('folder/x.json', options), true);
+  assert.deepEqual(gate.starts, [0, 500, 1000, 1500]);
+  assert.deepEqual(calls.map(({ method }) => method), ['GET', 'GET', 'PUT', 'DELETE']);
+  assert.equal(calls[0].url, `${base}raw/key.json`);
+  assert.equal(calls[1].url, `${base}?prefix=folder%2F&per_page=1000`);
+  assert.equal(calls[1].url.includes('/objects/?'), false);
+  assert.equal(calls[2].headers.get('authorization'), 'Bearer injected-token');
+  assert.equal(calls[2].headers.get('content-type'), 'application/json');
+  assert.equal(calls[2].body, '{"x":1}');
+  assert.equal(calls[3].headers.get('authorization'), 'Bearer injected-token');
+});
+
+test('REST list follows cursor and authenticates with success/result fixture', async () => {
+  const urls = [];
+  const options = restOptions({ fetchImpl: async url => {
+    urls.push(String(url));
+    return urls.length === 1 ? restPage([{ key: 'a' }], 'C1') : restPage([{ key: 'b' }]);
+  } });
+  assert.deepEqual(await list('ranking-state/dirty/', options), ['a', 'b']);
+  assert.equal(urls[0], `${base}?prefix=ranking-state%2Fdirty%2F&per_page=1000`);
+  assert.equal(urls[1], `${base}?prefix=ranking-state%2Fdirty%2F&per_page=1000&cursor=C1`);
+});
+
+test('REST GET only maps 404 to null and DELETE treats 404 as success', async () => {
+  for (const status of [401, 403]) {
+    await assert.rejects(getText('private.json', restOptions({ fetchImpl: async () => new Response('denied', { status }) })), new RegExp(`HTTP ${status}`));
+  }
+  assert.equal(await getText('missing.json', restOptions({ fetchImpl: async () => new Response('', { status: 404 }) })), null);
+  assert.equal(await del('missing.json', restOptions({ fetchImpl: async () => new Response('', { status: 404 }) })), true);
+  const failedPut = await putText('bad.json', 'body', null, restOptions({ fetchImpl: async () => new Response('no', { status: 403 }) }));
+  assert.deepEqual(failedPut, { ok: false, msg: 'HTTP 403 no' });
+});
+
+test('REST retry shares numeric and HTTP-date 429 defer with queued requests', async () => {
+  for (const retryAfter of ['2', new Date(Date.now() + 3000).toUTCString()]) {
+    const gate = virtualGate();
+    let calls = 0;
+    const options = restOptions({ retry: true, requestGate: gate, fetchImpl: async () => {
+      calls++;
+      return calls === 1 ? new Response('throttled', { status: 429, headers: { 'retry-after': retryAfter } }) : new Response('ok');
+    } });
+    await Promise.all([getText('a', options), getText('b', options)]);
+    assert.equal(calls, 3);
+    assert.ok(gate.starts[2] - gate.starts[0] >= 2000);
+    assert.ok(gate.starts[2] - gate.starts[1] >= 500);
+  }
+});
+
+test('REST retry options cover 5xx and network errors and preserve exhaustion contracts', async () => {
+  const gate = virtualGate();
+  let calls = 0;
+  const retried = await getText('retry', restOptions({ retry: true, requestGate: gate, fetchImpl: async () => ++calls === 1 ? new Response('busy', { status: 503 }) : new Response('ok') }));
+  assert.equal(retried, 'ok');
+  assert.equal(calls, 2);
+  assert.ok(gate.starts[1] - gate.starts[0] >= 1000);
+
+  calls = 0;
+  await assert.rejects(getText('exhausted', restOptions({ retry: true, fetchImpl: async () => { calls++; return new Response('busy', { status: 503 }); } })), /HTTP 503/);
+  assert.equal(calls, 4);
+  calls = 0;
+  await assert.rejects(getText('offline', restOptions({ retry: true, fetchImpl: async () => { calls++; throw new Error('offline'); } })), /offline/);
+  assert.equal(calls, 4);
+});
+
+test('REST injection needs no environment token and legacy calls retain their default request policy', async () => {
+  const oldToken = process.env.CLOUDFLARE_API_TOKEN;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  try {
+    const seen = [];
+    assert.equal(await getText('without-env', { base, token: 'explicit', fetchImpl: async (url, init) => { seen.push([String(url), init.headers.Authorization]); return new Response('body'); } }), 'body');
+    assert.deepEqual(seen, [[`${base}without-env`, 'Bearer explicit']]);
+  } finally { if (oldToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN; else process.env.CLOUDFLARE_API_TOKEN = oldToken; }
+
+  const oldFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return new Response('ok'); };
+  try {
+    assert.equal(await getText('legacy.json'), 'ok');
+    assert.equal(calls, 1);
+  } finally { globalThis.fetch = oldFetch; }
+});
 
 test('list URL and cursor pagination', async () => {
   const urls = [];
