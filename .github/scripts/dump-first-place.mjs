@@ -1,7 +1,4 @@
-import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
-
-const PAGE_SIZE = 1000;
 
 export function validateRows(rows) {
   if (!Array.isArray(rows)) throw new Error('first-place 응답이 배열이 아님');
@@ -38,35 +35,7 @@ export function parseContentRangeTotal(contentRange) {
   return match && match[1] !== '*' ? Number(match[1]) : null;
 }
 
-export async function fetchAllFirstPlace(fetchImpl = fetch) {
-  const sb = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!sb || !key) throw new Error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 없음');
-  const headers = { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Prefer: 'count=exact' };
-  const all = [];
-  let total;
-  for (let offset = 0; ; offset += PAGE_SIZE) {
-    const url = `${sb}/rest/v1/rpc/get_first_place_winners?limit=${PAGE_SIZE}&offset=${offset}&order=song_id.asc,diff.asc`;
-    const res = await fetchImpl(url, { method: 'POST', headers, body: '{}' });
-    if (!res.ok) throw new Error(`first-place HTTP ${res.status}`);
-    if (offset === 0) total = parseContentRangeTotal(res.headers.get('Content-Range'));
-    const rows = await res.json();
-    if (!Array.isArray(rows)) throw new Error('first-place 응답이 배열이 아님');
-    all.push(...rows);
-    if (rows.length < PAGE_SIZE) break;
-  }
-  if (total === null) console.warn('first-place Content-Range 총수를 확인할 수 없음');
-  else if (total !== all.length) throw new Error(`first-place 행 수 불일치: ${all.length}/${total}`);
-  return validateRows(all);
-}
-
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  try {
-    const rows = await fetchAllFirstPlace();
-    fs.writeFileSync('first-place-winners.json', JSON.stringify(toOutput(rows)));
-    console.log('first-place-winners.json 갱신:', rows.length, '행');
-  } catch (err) {
-    console.error(err.message);
-    process.exit(1);
-  }
+  console.error('직접 실행할 수 없습니다. dump-chart-rankings.mjs를 사용하세요.');
+  process.exit(1);
 }
