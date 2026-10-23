@@ -78,9 +78,9 @@ cron은 UTC 표현이며 실행 시각·성공·운영 배포 여부는 별도 �
 
 | 워크플로 | 기동 조건 | 실행 스크립트 | R2 키 / 동작 |
 | --- | --- | --- | --- |
-| dump-user | repository_dispatch(dump-user) | dump-user.mjs · refresh-missing-songs.mjs · merge-user-into-list.mjs · user-slice.mjs | user/{ID}.json · hist/{ID}.json · users-list.json · users-list-slim.json · ranking-state/dirty/*.json · uslice/{ID}.json · uslice/{ID}-{r,h}-{dp,sp}-{NN}.json(NN=00～15); 누락 신곡이면 songs.json 갱신 |
-| dump-users-list | */30 * * * * / 5 18 * * * / 수동 | dump-users-list.mjs · dump-first-place.mjs | 30분: songs.json + first-place-winners.json; 일일(KST 03:05)·수동: users-list.json · users-list-slim.json도 생성 |
-| dump-chart-rankings | */30 * * * * / 20 18 * * * / 수동 | dump-chart-rankings.mjs | ranking/{song_id}-{diff}.json; 30분 증분, 일일(KST 03:20) --all, 수동 all 기본 false |
+| dump-user | repository_dispatch(dump-user) | dump-user.mjs · refresh-missing-songs.mjs · merge-user-into-list.mjs · user-slice.mjs | user/{ID}.json · hist/{ID}.json · users-list.json · users-list-slim.json · uslice/{ID}.json · uslice/{ID}-{r,h}-{dp,sp}-{NN}.json(NN=00～15); 누락 신곡이면 songs.json 갱신 |
+| dump-users-list | */30 * * * * / 5 18 * * * / 수동 | dump-users-list.mjs | 30분: songs.json; 일일(KST 03:05)·수동: users-list.json · users-list-slim.json · songs.json |
+| dump-chart-rankings | */30 * * * * / 수동 | dump-chart-rankings.mjs · dump-first-place.mjs | 매 30분·수동 전체 hist를 읽어 ranking/{song_id}-{diff}.json 및 first-place-winners.json 공동 생산; 출력 해시가 달라진 파일만 PUT |
 | dump-chart-dist | 35 18 * * * / 수동 | dump-chart-dist.mjs | dist/{dp,sp}/{song_id}-{diff}.json; KST 03:35, 수동 dry_run 기본 false |
 | dump-dbr-history | 수동만 | dump-dbr-history.mjs | dbr/{ID}.json에 날짜 이력 병합; dry_run 기본 true |
 | dump-song-meta | */30 * * * * / 수동 | dump-song-meta.mjs | data/song-meta-{songId}.json; cron apply, 수동 apply 기본 false, --max-writes=500 |
@@ -124,11 +124,21 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-24 — 버퍼화 5단계: hist 기반 곡별 랭킹·1위 집계
+
+- `dump-chart-rankings.yml` 이 매 30분·수동 실행마다 전체 hist를 읽어 곡별 랭킹과 `first-place-winners.json` 을 함께 생산한다. 입력 캐시는 없고 출력만 해시 비교해 변경된 ranking을 PUT하며, 1위 내용이 같으면 `_v` 를 유지한다. `dump-users-list.yml` 은 30분 songs, 일일·수동 users 관련 목록과 songs를 담당한다. `dump-user` 의 dirty marker와 `dump-chart-rankings` 의 기존 일일 18:20·증분 설명은 현행이 아니다.
+- 신규 역할: `ranking-from-history.mjs` 집계, `ranking-history-input.mjs` 전체 입력 수집, `r2-client.mjs` R2 요청, `dump-first-place.mjs` 1위 출력, `dump-chart-rankings.mjs` 게시, `compare-history-rankings.mjs` 운영 대조. 테스트는 `.github/scripts/*.test.mjs` 에 있다.
+- 채보 대표행의 최종 결정 키는 `JSON.stringify(normalized10ColumnRow)` 이며, 동률은 earliest-date·ID 순으로 정한다. 상세 규칙은 [data-serving.md](../docs/data-serving.md) 「5단계 결과 — hist 기반 랭킹·1위」를 따른다.
+- `RANKING_HISTORY_MODE` 는 repository variable 이다. 미설정은 실패, `observe` 는 공개 게시 없이 계획만 기록, `publish` 만 게시한다. users 조회를 위해 Supabase 자격증명은 남지만 scores 및 ranking/1위 RPC는 호출하지 않는다.
+- 운영 통과 기준은 전 채보 대조에서 실제 SQL 후보 행에 해당하는 `SQL 미정 일치` 이외 차이가 0인 것이다. 같은 EX 라는 이유만으로 허용하지 않는다. A 머신에서 push 전 실제 CLI `compare-history-rankings.mjs` 로 운영 읽기 전용 대조를 통과시키고, repository variable 을 `RANKING_HISTORY_MODE=publish` 로 설정한 뒤 push 한다. observe 경유는 파일 갱신 공백을 만들 수 있어 사용하지 않는다.
+- 옛 SQL 랭킹 RPC·1위 MV 예약의 은퇴는 운영 의존을 확인한 뒤 별도로 수행하며 자동 완료로 보지 않는다.
+- 부분 게시 실패와 재실행은 실패 키를 확인해 이어서 처리하고, 공개 복구 자료로 마지막 정상 파일을 보존한다. scores 삭제 후 DB 폴백은 금지한다. 전체 테스트는 `node --test .github/scripts/*.test.mjs` 로 실행하며 PowerShell glob 전달이 실패하면 `$rankingTests = @(Get-ChildItem .github/scripts -Filter *.test.mjs | ForEach-Object FullName); node --test $rankingTests` 를 쓴다. `node --test` 는 skipped가 있어도 exit 0이므로 pass/fail/skipped 수를 확인한다.
+
 ### 2026-10-23 — 버퍼화 4단계: 누적 hist·조건부 삭제·업로드 필터
 
 - 누적 hist CAS·별칭 정규화·후보/manifest v2 지문과 snapshot 검증 기반 조건부 삭제를 반영했다. append 폐기, 기존 입력 의미 유지. 업로드 필터 정본은 `score-history.mjs` `filterScoreHistoryRows`; dbConn·INF·Admin 동기 사본 패리티 시험 `.github/scripts/tests/score-upload-filter.test.mjs` 는 로컬 수동 실행이며 CI 글롭 밖이다.
 - 🔴 기존 3단계 배포 안내 대신 [data-serving.md](../docs/data-serving.md)의 「4단계 결과」를 따른다. 빈 별칭표 선게시 → data(누적 OFF) → gist → Web → Admin → INF → 구 업로더 비중 확인·SQL 03 → 01 → 누적 ON·운영 읽기 전용 대조 → 다음 daily snapshot 직후 89388691 시범 삭제 순이다. compact cron 중단으로 DB 가 증가한다. 운영 배포·삭제는 대기.
-- 랭킹·1위 R2 집계(R01~R10)·전 유저 삭제 확대·필터 O(n²) 최적화(3천 행 1.9초)·삭제 후 재유입 행 수 측정은 후속이다. 버전 bump 없음.
+- 전 유저 삭제 확대·필터 O(n²) 최적화(3천 행 1.9초)·삭제 후 재유입 행 수 측정은 후속이다. 랭킹·1위 집계는 2026-10-24 5단계 결과를 따른다. 버전 bump 없음.
 
 ### 2026-10-22 — 버퍼화 3단계 운영 대조 수정·준비 모드 덤프 누락 수정
 
