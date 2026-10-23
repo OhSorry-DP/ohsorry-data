@@ -173,9 +173,10 @@ function compareRows(expected, actual, allowSql = false, candidate = null) {
   }
   for (const row of expected) if (!seen.has(row.iidx_id)) users.push({ iidx_id: row.iidx_id, status: 'different', fields: ['missing'] });
   const sql = allowSql ? judgeSqlRanking(candidate, actual) : null;
-  const status = sql && !sql.valid ? 'different' : equal ? 'identical' : sql?.valid ? 'sql_undetermined_match' : 'different';
+  const mine = allowSql ? judgeSqlRanking(candidate, expected) : null;
+  const status = sql && !sql.valid ? 'different' : equal ? 'identical' : sql?.valid && mine.valid ? 'sql_undetermined_match' : 'different';
   if (status === 'sql_undetermined_match') for (const user of users) if (user.status === 'different') user.status = status;
-  return { status, users, dateRepresentations: dates, ...(sql ? { sql } : {}) };
+  return { status, users, dateRepresentations: dates, ...(sql ? { sql, expected_judgement: { valid: mine.valid, errors: mine.errors } } : {}) };
 }
 
 function parsePublicWinners(body) {
@@ -311,7 +312,7 @@ export async function compareHistoryRankings(deps = {}) {
       const sqlWinner = sqlWinners?.get(key) ?? null;
       const judged = judgeSqlWinner(candidates.get(key), sqlWinner);
       result.sql_winner = { ...judged, status: !sqlWinners || !computed ? 'incomparable' : !judged.valid ? 'different' :
-        sqlWinner === expectedWinner ? 'identical' : 'sql_undetermined_match' };
+        sqlWinner === expectedWinner ? 'identical' : judgeSqlWinner(candidates.get(key), expectedWinner).valid ? 'sql_undetermined_match' : 'different' };
       report.charts[index] = result;
       log(`ranking: ${++completed}/${targets.length} (${key})`);
     });
