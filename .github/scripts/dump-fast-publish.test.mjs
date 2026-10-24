@@ -274,6 +274,27 @@ test('workflow OFF bodies match fixed 89cacab16 baseline and ON sequencing is gu
   assert.match(pendingStep, /CLOUDFLARE_R2_SECRET_ACCESS_KEY:/);
 });
 
+test('repersona workflow blocks pass guard and R2 S3 credentials', () => {
+  const dumpWorkflow = readFileSync(new URL('../workflows/dump-user.yml', import.meta.url), 'utf8');
+  const repersonaWorkflow = readFileSync(new URL('../workflows/repersona-r2.yml', import.meta.url), 'utf8');
+  const personaAt = dumpWorkflow.indexOf('\n  persona:');
+  assert.ok(personaAt >= 0, 'persona job not found');
+  const nextJobAt = dumpWorkflow.indexOf('\n  dispatch-coach-user:', personaAt);
+  const personaBlock = dumpWorkflow.slice(personaAt, nextJobAt < 0 ? undefined : nextJobAt);
+  const stepAt = repersonaWorkflow.indexOf('      - name: Repersona on R2');
+  assert.ok(stepAt >= 0, 'Repersona on R2 step not found');
+  const nextStepAt = repersonaWorkflow.indexOf('      - name:', stepAt + 1);
+  const repersonaStepBlock = repersonaWorkflow.slice(stepAt, nextStepAt < 0 ? undefined : nextStepAt);
+  const expected = [
+    /^\s*FAST_DUMP_LIGHT_GUARD: \$\{\{ vars\.FAST_DUMP_LIGHT_GUARD \|\| '0' \}\}$/m,
+    /^\s*CLOUDFLARE_R2_ACCESS_KEY_ID: \$\{\{ secrets\.CLOUDFLARE_R2_ACCESS_KEY_ID \}\}$/m,
+    /^\s*CLOUDFLARE_R2_SECRET_ACCESS_KEY: \$\{\{ secrets\.CLOUDFLARE_R2_SECRET_ACCESS_KEY \}\}$/m,
+  ];
+  for (const [name, block] of [['dump-user persona job', personaBlock], ['repersona-r2 step', repersonaStepBlock]]) {
+    for (const pattern of expected) assert.match(block, pattern, `${name} missing ${pattern}`);
+  }
+});
+
 test('all workflow run blocks parse with bash -n and heredoc warnings fail', () => {
   const workflow = readFileSync(new URL('../workflows/dump-user.yml', import.meta.url), 'utf8');
   const runs = workflowRuns(workflow);

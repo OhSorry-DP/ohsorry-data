@@ -59,6 +59,9 @@ jobs:
           # §27 A-5 — r2-repersona 가 DP 배치(chart_arrange)를 실행당 1회 전량 조회한다(dump-user.yml 과 같은 시크릿).
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          FAST_DUMP_LIGHT_GUARD: ${{ vars.FAST_DUMP_LIGHT_GUARD || '0' }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "::error::CLOUDFLARE_API_TOKEN 미설정 — R2 접근 불가"; exit 1
