@@ -189,6 +189,51 @@ test('채보 키의 리터럴 퍼센트는 HTTP 경로에서 한 번 더 인코�
   assert.ok(urls[0].includes('%257C'));
 });
 
+test('pending done merge preserves marker fields and published version with conditional retry', async () => {
+  let marker = { since: '2026-01-01T00:00:00Z', done: '2026-01-02T00:00:00Z', extra: 7 };
+  let etag = '"one"';
+  const writes = [];
+  let writeConflict = true;
+  const client = conditionalR2Client({ account, token: 'test-token', fetchImpl: async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes('?prefix=')) return restPage([{ key: 'pending/u.json', etag: `"${crypto.createHash('md5').update(JSON.stringify(marker)).digest('hex')}"` }]);
+    if ((init.method || 'GET') === 'GET') return new Response(JSON.stringify(marker), { headers: { etag } });
+    writes.push({ headers: new Headers(init.headers), body: init.body });
+    if (writeConflict) { writeConflict = false; marker = { ...marker, since: '2026-01-03T00:00:00Z' }; etag = '"two"'; return new Response('', { status: 412 }); }
+    marker = JSON.parse(init.body);
+    return new Response('');
+  } });
+  const result = await client.mergePendingDone('u', '2026-01-02T12:00:00.000Z');
+  assert.deepEqual(result, { ok: true, done: '2026-01-02T12:00:00.000Z' });
+  assert.equal(marker.since, '2026-01-03T00:00:00Z');
+  assert.equal(marker.done, '2026-01-02T12:00:00.000Z');
+  assert.equal(marker.extra, 7);
+  assert.equal(writes[0].headers.get('if-match'), '"one"');
+  assert.equal(writes[1].headers.get('if-match'), '"two"');
+});
+
+test('pending done merge refuses invalid inputs and reports missing, corrupt, read, and exhausted failures', async () => {
+  for (const [body, expected] of [[null, 'missing'], ['{', 'corrupt'], ['{"since":"bad"}', 'invalid-since']]) {
+    const client = conditionalR2Client({ account, token: 'test-token', fetchImpl: async () => body === null ? new Response('', { status: 404 }) : new Response(body, { headers: { etag: '"e"' } }) });
+    assert.equal((await client.mergePendingDone('u', '2026-01-01T00:00:00Z')).reason, expected);
+  }
+  const broken = conditionalR2Client({ account, token: 'test-token', fetchImpl: async () => { throw new Error('offline'); } });
+  assert.equal((await broken.mergePendingDone('u', '2026-01-01T00:00:00Z')).reason, 'read-failed');
+  const calls = [];
+  const conflict = conditionalR2Client({ account, token: 'test-token', fetchImpl: async (url, init = {}) => {
+    if (String(url).includes('?prefix=')) return restPage([{ key: 'pending/u.json', etag: 'd41d8cd98f00b204e9800998ecf8427e' }]);
+    if ((init.method || 'GET') === 'GET') return new Response('{"since":"2026-01-01T00:00:00Z"}', { headers: { etag: '"e"' } });
+    calls.push(init);
+    return new Response('', { status: 412 });
+  } });
+  assert.equal((await conflict.mergePendingDone('u', '2026-01-02T00:00:00Z', { maxConflictRetries: 1 })).reason, 'conflict-exhausted');
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(call => new Headers(call.headers).has('if-match')));
+  const invalidVersion = await conflict.mergePendingDone('u', 'not-a-time');
+  assert.equal(invalidVersion.reason, 'invalid-published-version');
+  assert.equal(calls.length, 2);
+});
+
 const crypto = await import('node:crypto');
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const hmac = (key, value) => crypto.createHmac('sha256', key).update(value, 'utf8').digest();

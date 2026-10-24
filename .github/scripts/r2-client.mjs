@@ -231,6 +231,34 @@ export function conditionalR2Client({ account, token, fetchImpl = fetch, request
       const digest = listMd5(await currentEtag(key));
       if (!digest || digest !== md5(body)) throw new Error(`R2 PUT ${key}: 사후 목록 ETag와 본문 MD5 검증 실패`);
     },
+    async mergePendingDone(id, publishedVersion, { maxConflictRetries = 3 } = {}) {
+      const validTime = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value));
+      if (!validTime(publishedVersion)) return { ok: false, reason: 'invalid-published-version' };
+      if (!Number.isInteger(maxConflictRetries) || maxConflictRetries < 0) throw new Error('maxConflictRetries는 0 이상의 정수여야 함');
+      const key = `pending/${encodeURIComponent(String(id))}.json`;
+      for (let attempt = 0; attempt <= maxConflictRetries; attempt++) {
+        let current;
+        try { current = await this.read(key); }
+        catch (error) { return { ok: false, reason: 'read-failed', error }; }
+        if (!current) return { ok: false, reason: 'missing' };
+        let marker;
+        try { marker = JSON.parse(current.body); }
+        catch (error) { return { ok: false, reason: 'corrupt', error }; }
+        if (!marker || typeof marker !== 'object' || Array.isArray(marker)) return { ok: false, reason: 'corrupt' };
+        if (!validTime(marker.since)) return { ok: false, reason: 'invalid-since' };
+        const previousDone = validTime(marker.done) ? marker.done : null;
+        const done = previousDone && Date.parse(previousDone) > Date.parse(publishedVersion) ? previousDone : publishedVersion;
+        const merged = { ...marker, done };
+        try {
+          await this.put(key, JSON.stringify(merged), current.etag);
+          return { ok: true, done };
+        } catch (error) {
+          if (!/HTTP 412\b/.test(String(error?.message || error))) return { ok: false, reason: 'put-failed', error };
+          if (attempt === maxConflictRetries) return { ok: false, reason: 'conflict-exhausted', error };
+        }
+      }
+      return { ok: false, reason: 'conflict-exhausted' };
+    },
   };
 }
 
