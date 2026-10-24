@@ -1,3 +1,5 @@
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
 const FAST_FIELDS = ['dp', 'sp', 'dpRecent', 'spRecent'];
 const FAST_KEYS = [...FAST_FIELDS, 'fastGeneration'];
 const SLOW_FIELDS = ['_v', 'user', 'radars', 'osPattern', 'persona', 'spPersona', 'reachNps'];
@@ -67,6 +69,109 @@ function parseBody(source) {
     const value = JSON.parse(source.body);
     return object(value) ? value : null;
   } catch { return null; }
+}
+
+const ACCOUNT = '607eea1b073bea6747e6e9b76f2d7b41';
+const BUCKET = 'ohsorry-data';
+const validSince = (value) => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)
+  && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+const validGeneration = (value) => generationOf(value) !== null;
+const validEtag = (value) => typeof value === 'string' && /^"[\x21\x23-\x7e\x80-\xff]*"$/.test(value);
+
+/** Actions publisher with generation capture and bounded compare-and-swap retries. */
+export async function publishActionsUser({ r2, id, local, generation }) {
+  const key = `user/${id}.json`;
+  let source;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    source = await r2.read(key);
+    if (source === null) {
+      if (attempt !== 0) throw new Error('user disappeared during CAS');
+      const value = { ...local };
+      delete value.fastGeneration;
+      if (generation !== null) value.fastGeneration = generation;
+      try { await r2.put(key, JSON.stringify(value), null); return value; }
+      catch (error) { if (String(error?.message || error).includes('412')) continue; throw error; }
+    }
+    const current = parseBody(source);
+    if (!current) throw new Error('invalid origin user or ETag');
+    const merged = mergeActionsUser(current, local, generation);
+    try { await r2.put(key, JSON.stringify(merged), source.etag); return merged; }
+    catch (error) { if (String(error?.message || error).includes('412') && attempt < 3) continue; throw error; }
+  }
+  throw new Error('user CAS conflict exhausted');
+}
+
+export async function runCli(argv, dependencies = {}) {
+  const [command, id, ...extra] = argv;
+  if (!['capture-generation', 'publish-actions-user', 'complete-actions-pending'].includes(command)
+    || !id || extra.length || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return 2;
+  const env = dependencies.env || process.env;
+  if (!env.CLOUDFLARE_R2_ACCESS_KEY_ID || !env.CLOUDFLARE_R2_SECRET_ACCESS_KEY) return 2;
+  const append = dependencies.appendFile || ((file, data) => import('node:fs/promises').then(m => m.appendFile(file, data)));
+  const readFile = dependencies.readFile || ((file) => import('node:fs/promises').then(m => m.readFile(file, 'utf8')));
+  const createClient = dependencies.createClient || (async () => {
+    const { s3R2Client } = await import('./r2-client.mjs');
+    return s3R2Client({ account: ACCOUNT, bucket: BUCKET, accessKeyId: env.CLOUDFLARE_R2_ACCESS_KEY_ID,
+      secretAccessKey: env.CLOUDFLARE_R2_SECRET_ACCESS_KEY, retries: 0 });
+  });
+  const r2 = await createClient({ account: ACCOUNT, bucket: BUCKET,
+    accessKeyId: env.CLOUDFLARE_R2_ACCESS_KEY_ID, secretAccessKey: env.CLOUDFLARE_R2_SECRET_ACCESS_KEY, retries: 0 });
+  const pendingKey = `pending/${id}.json`;
+  const get = async (key) => {
+    const response = await r2.request(key);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`R2 GET HTTP ${response.status}`);
+    return { body: await response.text(), etag: response.headers.get('etag') };
+  };
+  const put = async (key, body, etag) => {
+    const response = await r2.request(key, { method: 'PUT', body,
+      headers: { 'Content-Type': 'application/json', ...(etag === null ? { 'If-None-Match': '*' } : { 'If-Match': etag }) } });
+    if (response.status !== 412 && !response.ok) throw new Error(`R2 PUT HTTP ${response.status}`);
+    if (response.status === 412) throw new Error('HTTP 412');
+  };
+  if (command === 'capture-generation') {
+    if (!env.GITHUB_ENV) return 2;
+    const source = await get(pendingKey);
+    let generation = '', since = '', captured = '0';
+    if (source !== null) {
+      let marker;
+      try { marker = JSON.parse(source.body); } catch { return 2; }
+      if (!object(marker) || (own(marker, 'generation') && !validGeneration(marker.generation))
+        || (own(marker, 'since') && !validSince(marker.since))) return 2;
+      captured = '1'; generation = marker.generation || ''; since = marker.since || '';
+    }
+    await append(env.GITHUB_ENV, `FAST_DUMP_MARKER_CAPTURED=${captured}\nFAST_DUMP_GENERATION=${generation}\nFAST_DUMP_SINCE=${since}\n`);
+    return 0;
+  }
+  if (command === 'publish-actions-user') {
+    let local;
+    try { local = JSON.parse(await readFile(`user/${id}.json`)); } catch { return 2; }
+    if (!object(local)) return 2;
+    const generation = env.FAST_DUMP_MARKER_CAPTURED === '1' && validGeneration(env.FAST_DUMP_GENERATION) ? env.FAST_DUMP_GENERATION : null;
+    await publishActionsUser({ r2: { read: get, put }, id, local, generation });
+    return 0;
+  }
+  if (env.FAST_DUMP_MARKER_CAPTURED !== '1' || !validSince(env.FAST_DUMP_SINCE)) return 0;
+  const source = await get(pendingKey);
+  if (!source) return 0;
+  if (!validEtag(source.etag)) throw new Error('pending ETag missing');
+  let marker;
+  try { marker = JSON.parse(source.body); } catch { throw new Error('invalid pending JSON'); }
+  if (!object(marker) || (own(marker, 'generation') && !validGeneration(marker.generation)) || !validSince(marker.since)) throw new Error('invalid pending marker');
+  const capturedG = env.FAST_DUMP_GENERATION || null;
+  if (marker.generation !== (capturedG || undefined) || marker.since !== env.FAST_DUMP_SINCE) return 0;
+  const now = (dependencies.now || (() => new Date().toISOString()))();
+  if (!validSince(now)) throw new Error('invalid completion time');
+  const old = validSince(marker.done) ? marker.done : '';
+  const done = Date.parse(old) > Date.parse(now) ? old : (Date.parse(now) > Date.parse(marker.since) ? now : marker.since);
+  await put(pendingKey, JSON.stringify({ ...marker, done }), source.etag);
+  return 0;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  runCli(process.argv.slice(2)).then((code) => { process.exitCode = code; }).catch((error) => {
+    console.error(error?.message || String(error)); process.exitCode = 1;
+  });
 }
 
 /** Publish against injected read/put primitives. Each object receives at most one PUT. */
