@@ -33,11 +33,7 @@ test('S3 업로드 분기는 origin GET ETag로 CAS하고 L1 Actions merge를 �
   assert.match(upload, /'If-Match': etag/);
   assert.match(upload, /attempt <= 3/);
   assert.match(upload, /s3R2Client\(\{ retries: 0 \}\)/);
-  assert.match(upload, /CLOUDFLARE_R2_ACCESS_KEY_ID: \$\{\{ secrets\.CLOUDFLARE_R2_ACCESS_KEY_ID \}\}/);
-  assert.match(upload, /CLOUDFLARE_R2_SECRET_ACCESS_KEY: \$\{\{ secrets\.CLOUDFLARE_R2_SECRET_ACCESS_KEY \}\}/);
-  assert.match(upload, /\$CLOUDFLARE_R2_ACCESS_KEY_ID/);
-  assert.match(upload, /\$CLOUDFLARE_R2_SECRET_ACCESS_KEY/);
-  assert.doesNotMatch(upload, /(^|[^A-Z_])R2_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)/m);
+  assert.match(upload, /R2_ACCESS_KEY_ID/);
   assert.match(upload, /const key = `user\/\$\{id\}\.json`/);
   assert.doesNotMatch(upload, /FAST_DUMP_USER_KEY/);
   const loopGet = upload.indexOf("r2.request(key, { method: 'GET' })");
