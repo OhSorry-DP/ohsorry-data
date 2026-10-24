@@ -1,4 +1,4 @@
-import { mergeScoreHistory } from './score-history.mjs';
+import { mergeScoreHistory, replayScoreBuffer } from './score-history.mjs';
 
 const fail = (message) => { throw new TypeError(message); };
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -114,8 +114,13 @@ export function normalizeAliasInputs({ histRows, restRows, aliases, songs }) {
   const replayed = new Map();
   for (const [key, group] of groups) {
     group.sort((a, b) => a.time < b.time ? -1 : a.time > b.time ? 1 : a.ordinal - b.ordinal);
-    // Intermediate history in collision groups is reduced by the existing best rules.
-    replayed.set(key, group.reduce((acc, { row }) => mergeScoreHistory(acc, [row]), []));
+    const syntheticRest = group.map(({ row }, score_id) => ({
+      score_id,
+      song_id: row[0], diff: row[1], lamp: row[2], ex_score: row[3],
+      played_version: row[4], date: row[5], date_kst: row[6],
+      play_style: row[7], bp: row[8], note_count: row[9],
+    }));
+    replayed.set(key, replayScoreBuffer([], syntheticRest));
   }
   const result = [];
   for (const row of normalized) {

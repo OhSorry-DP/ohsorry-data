@@ -88,3 +88,49 @@ test('6. 非衝突slot・既存best/grid・8列→10列を保つ', () => {
   assert.equal(normalized.histRows[0].length, 10);
   assert.deepEqual(hist[0], legacy);
 });
+
+test('alias collision replays in time order and preserves the winning timestamp spelling', () => {
+  const hist = [
+    row(100, 3, 4, 2100, 33, '2026-10-22T10:00:00.000001Z'),
+    row(200, 3, 6, 2100, 33, '2026-10-22T19:00:00.000002+09:00'),
+  ];
+  const result = normalizeAliasInputs({ histRows: hist, restRows: [], aliases, songs });
+  assert.deepEqual(result.histRows, [row(200, 3, 6, 2100, 33, '2026-10-22T19:00:00.000002+09:00')]);
+});
+
+test('collision chart history is inserted at its first original slot', () => {
+  const hist = [
+    row(100, 3, 4, 2100, 33, '2026-10-21T10:00:00Z', '2026-10-21'),
+    row(400, 1, 4, 800, 30, '2026-10-20T10:00:00Z', '2026-10-20'),
+    row(200, 3, 6, 2200, 33, '2026-10-22T10:00:00Z', '2026-10-22'),
+    row(100, 3, 5, 2150, 33, '2026-10-23T10:00:00Z', '2026-10-23'),
+  ];
+  const result = normalizeAliasInputs({ histRows: hist, restRows: [], aliases, songs });
+  assert.deepEqual(result.histRows.map((r) => [r[0], r[6]]), [
+    [200, '2026-10-21'], [400, '2026-10-20'], [200, '2026-10-22'], [200, '2026-10-23'],
+  ]);
+});
+
+test('microsecond ties retain ordinal order and fill null BP and notes with zero', () => {
+  const hist = [
+    row(100, 3, 5, 2000, 33, '2026-10-22T01:02:03.123456Z', undefined, 1, null, null),
+    row(200, 3, 5, 2000, 33, '2026-10-22T10:02:03.123456+09:00', undefined, 1, 0, 0),
+  ];
+  const result = normalizeAliasInputs({ histRows: hist, restRows: [], aliases, songs });
+  assert.deepEqual(result.histRows, [row(200, 3, 5, 2000, 33,
+    '2026-10-22T01:02:03.123456Z', '2026-10-22', 1, 0, 0)]);
+});
+
+test('original natural duplicates fail before aliasing and DBR, legacy rows, and inputs stay intact', () => {
+  const hist = [row(100, 3, 5, 2000, 33, undefined, undefined, 1, null, null),
+    row(200, 1, 4, 800, 30, '2026-10-21T01:02:03Z', '2026-10-21', 1),
+    row(400, 2, 3, 500, -10, '2026-10-20T01:02:03Z', '2026-10-20', 1, 7, 8),
+    row(100).slice(0, 8), row(100)];
+  const before = structuredClone(hist);
+  assert.throws(() => normalizeAliasInputs({ histRows: hist, restRows: [], aliases, songs }),
+    { name: 'TypeError', message: 'duplicate natural key in hist at row 3: [100,3,33,1,"2026-10-22"]' });
+  assert.deepEqual(hist, before);
+  const valid = normalizeAliasInputs({ histRows: hist.slice(0, 3), restRows: [], aliases, songs });
+  assert.deepEqual(valid.histRows[1], hist[1]);
+  assert.deepEqual(valid.histRows[2], hist[2]);
+});
