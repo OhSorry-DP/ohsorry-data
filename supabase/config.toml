@@ -1,2 +1,2 @@
-[functions.fastpath-bench]
+[functions.dump-fast]
 verify_jwt = true

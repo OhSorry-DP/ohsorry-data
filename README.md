@@ -124,6 +124,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-24 — Edge 빠른 경로 1단계: 운영 읽기 전용 그림자 대조
+
+- `dump-fast-core.mjs` 에 `prepareFastDump` 추가 — 별칭 정규화 → replay → 후보 검증 → DP/SP 그리드·Recent 를 기존 덤프와 같은 순서로 계산하고 `fastPatch`(dp·sp·dpRecent·spRecent·fastGeneration·histRevision)를 만든다. 입력은 전부 주입(env·네트워크 없음).
+- `supabase/functions/dump-fast`(Edge, `verify_jwt`) — `FAST_DUMP_MODE=shadow` + `x-fast-dump-shadow-secret` 일 때만 동작. iidxId 하나를 받아 R2 hist·user·별칭·songs 를 GET 하고 버퍼를 1000행 페이징(최대 50페이지)으로 SELECT 해 계산한 뒤, Actions 가 게시한 hist 바이트·user 빠른 필드와 해시로 대조한다. 계산 뒤 입력을 다시 읽어 바뀌었으면 판정 보류. 쓰기 능력(PUT·DELETE·RPC·pending)은 처리기에 넘기지 않는다.
+- 측정 함수 `fastpath-bench` 코드·테스트·설정 제거(운영 함수는 별도 삭제).
+
 ### 2026-10-24 — 날짜 파싱 메모·Edge 측정 함수·dump-fast-core
 
 - `score-history.mjs`(업로더 동기화 블록 정본)·`score-buffer.mjs` 의 `day`·`instant` 가 성공한 파싱 결과만 `Map` 에 메모한다(각 상한 32,768개, 넘으면 비움, 실패 입력 비저장 — 예외 동일). CPU 프로파일상 날짜 파싱이 병합·후보 검증 CPU 의 약 57%였다. 6,259행 normalize+replay+buildCandidate 0.41~0.45초 → 0.14~0.15초(A머신), 옛/새 대조 불일치 0, 실패 입력 캐시 변이 검출 확인. 크롤러 `dbConn.js`·Admin `batchAcUsers.js`·INF `supabaseSync.ts` 사본도 같은 줄로 맞췄다.
