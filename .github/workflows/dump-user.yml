@@ -30,6 +30,7 @@ jobs:
       IIDX_ID: ${{ github.event.client_payload.iidx_id }}
       SCORE_BUFFER_PREPARE: ${{ vars.SCORE_BUFFER_PREPARE || '0' }}
       SCORE_BUFFER_CUMULATIVE: ${{ vars.SCORE_BUFFER_CUMULATIVE || '0' }}
+      FAST_DUMP_LIGHT_GUARD: ${{ vars.FAST_DUMP_LIGHT_GUARD || '0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -101,6 +102,32 @@ jobs:
             rm -f "$F"; echo "R2 hist 없음/무효 — 전체 생성"
           fi
 
+      # 보호 게이트가 켜진 경우에만 점수 입력 조회 전에 pending 세대를 캡처한다.
+      - name: Capture fast dump generation
+        id: fast_generation
+        if: ${{ env.FAST_DUMP_LIGHT_GUARD == '1' }}
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          node --input-type=module <<'JS'
+          import { s3R2Client } from './.github/scripts/r2-client.mjs';
+          const id = process.env.IIDX_ID || '';
+          if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error('invalid iidx_id');
+          const r2 = s3R2Client({ retries: 0 });
+          const response = await r2.request(`pending/${encodeURIComponent(id)}.json`, { method: 'GET' });
+          if (response.status === 404) process.exit(0);
+          if (!response.ok) throw new Error(`pending GET HTTP ${response.status}`);
+          const marker = JSON.parse(await response.text());
+          if (!marker || typeof marker !== 'object' || Array.isArray(marker)) throw new Error('invalid pending marker');
+          if (marker.generation !== undefined && (typeof marker.generation !== 'string' || !/^[1-9][0-9]*$/.test(marker.generation))) throw new Error('invalid pending generation');
+          if (marker.since !== undefined && (typeof marker.since !== 'string'
+            || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(marker.since)
+            || !Number.isFinite(Date.parse(marker.since)))) throw new Error('invalid pending since');
+          const fs = await import('node:fs/promises');
+          await fs.appendFile(process.env.GITHUB_ENV, `FAST_DUMP_MARKER_CAPTURED=1\nFAST_DUMP_GENERATION=${marker.generation || ''}\nFAST_DUMP_SINCE=${marker.since || ''}\n`);
+          JS
+
       - name: Dump user from supabase
         id: dump
         # 🔴 CLOUDFLARE_* 는 필수다 — 덤프 스크립트가 persona/spPersona 보존을 위해
@@ -127,6 +154,8 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "::warning::CLOUDFLARE_API_TOKEN 미설정 — R2 업로드 skip"
@@ -138,6 +167,55 @@ jobs:
           #   (종전 `... || { echo warning; return 1; }` 은 기본 셸 `bash -e` 의 errexit 에 걸려
           #    첫 실패에서 스텝이 죽고 users-list.json PUT 이 아예 실행되지 않았다.)
           rc=0
+          if [ "$FAST_DUMP_LIGHT_GUARD" = "1" ]; then
+            if [ -z "$R2_ACCESS_KEY_ID" ] || [ -z "$R2_SECRET_ACCESS_KEY" ]; then
+              echo "::error::FAST_DUMP_LIGHT_GUARD 게시 실패: R2 S3 key 미설정"; exit 1
+            fi
+            node --input-type=module <<'JS'
+            import { readFile } from 'node:fs/promises';
+            import { s3R2Client } from './.github/scripts/r2-client.mjs';
+            import { mergeActionsUser } from './.github/scripts/dump-fast-publish.mjs';
+            const id = process.env.IIDX_ID;
+            const local = JSON.parse(await readFile(`user/${id}.json`, 'utf8'));
+            const key = `user/${id}.json`;
+            const r2 = s3R2Client({ retries: 0 });
+            let published = false;
+            for (let attempt = 0; attempt <= 3; attempt++) {
+              const originResponse = await r2.request(key, { method: 'GET' });
+              if (originResponse.status === 404) {
+                const response = await r2.request(key, { method: 'PUT', body: JSON.stringify({
+                  ...local,
+                  ...(process.env.FAST_DUMP_GENERATION ? { fastGeneration: process.env.FAST_DUMP_GENERATION } : {}),
+                }), headers: { 'Content-Type': 'application/json; charset=utf-8', 'If-None-Match': '*' } });
+                if (response.ok) { published = true; break; }
+                if (response.status === 412) continue;
+                throw new Error(`R2 user create CAS HTTP ${response.status}`);
+              }
+              if (!originResponse.ok) throw new Error(`R2 GET HTTP ${originResponse.status}`);
+              const etag = originResponse.headers.get('etag');
+              if (!etag || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) throw new Error('R2 ETag missing');
+              const merged = mergeActionsUser(JSON.parse(await originResponse.text()), local, process.env.FAST_DUMP_GENERATION || null);
+              const response = await r2.request(key, { method: 'PUT', body: JSON.stringify(merged),
+                headers: { 'Content-Type': 'application/json; charset=utf-8', 'If-Match': etag } });
+              if (response.ok) { published = true; break; }
+              if (response.status !== 412) throw new Error(`R2 user CAS HTTP ${response.status}`);
+            }
+            if (!published) throw new Error('R2 user CAS conflict exhausted');
+            JS
+            R2_URL="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/ohsorry-data/objects"
+            if [ "$SCORE_BUFFER_CUMULATIVE" != "1" ] && [ "$SCORE_BUFFER_PREPARE" != "1" ]; then
+              if [ ! -f "hist/$IIDX_ID.json" ]; then echo "::error::hist 파일 없음 — 보호 게시 실패"; exit 1; fi
+              status=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H "Content-Type: application/json; charset=utf-8" --data-binary "@hist/$IIDX_ID.json" "$R2_URL/hist/$IIDX_ID.json") || status=000
+              if [[ "$status" != 2?? ]]; then echo "::error::R2 업로드 실패: hist/$IIDX_ID.json"; exit 1; fi
+              echo "hist=success" >> "$GITHUB_OUTPUT"
+            else
+              echo "hist=published-by-dump" >> "$GITHUB_OUTPUT"
+            fi
+            echo "user=success" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           R2_URL="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/ohsorry-data/objects"
           put() {
             local status
@@ -177,6 +255,8 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "::error::pending 완료 게시 실패: R2 토큰 없음"; exit 1
@@ -187,6 +267,33 @@ jobs:
           import { readFile } from 'node:fs/promises';
           import { conditionalR2Client } from './.github/scripts/r2-client.mjs';
 
+          if (process.env.FAST_DUMP_LIGHT_GUARD === '1') {
+            const { s3R2Client } = await import('./.github/scripts/r2-client.mjs');
+            const r2 = s3R2Client({ retries: 0 });
+            const key = `pending/${encodeURIComponent(process.env.IIDX_ID)}.json`;
+            const current = await r2.request(key, { method: 'GET' });
+            if (!current.ok) throw new Error(`pending 재조회 HTTP ${current.status}`);
+            const etag = current.headers.get('etag');
+            const marker = JSON.parse(await current.text());
+            const generationChanged = process.env.FAST_DUMP_GENERATION
+              && marker.generation !== process.env.FAST_DUMP_GENERATION;
+            const sinceChanged = process.env.FAST_DUMP_GENERATION
+              && marker.since !== process.env.FAST_DUMP_SINCE;
+            const sameCapturedMarker = process.env.FAST_DUMP_MARKER_CAPTURED === '1'
+              && (process.env.FAST_DUMP_GENERATION
+                ? !generationChanged && !sinceChanged
+                : marker.generation === undefined && marker.since === process.env.FAST_DUMP_SINCE);
+            if (!etag || !sameCapturedMarker || !process.env.FAST_DUMP_SINCE) {
+              console.log('pending 세대 변경 — 완료 표식 생략');
+              process.exit(0);
+            }
+            const done = new Date(Math.max(Date.now(), Date.parse(process.env.FAST_DUMP_SINCE))).toISOString();
+            const response = await r2.request(key, { method: 'PUT', body: JSON.stringify({ ...marker, done }),
+              headers: { 'Content-Type': 'application/json; charset=utf-8', 'If-Match': etag } });
+            if (!response.ok) throw new Error(`pending 완료 CAS HTTP ${response.status}`);
+            console.log(`pending 완료 게시 성공: ${done}`);
+            process.exit(0);
+          }
           const user = JSON.parse(await readFile(`user/${process.env.IIDX_ID}.json`, 'utf8'));
           const version = user?._v;
           if (typeof version !== 'string' || !Number.isFinite(Date.parse(version))) {
