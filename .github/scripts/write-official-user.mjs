@@ -139,7 +139,7 @@ export async function writeOfficialUser(id, dump, { fetchImpl = globalThis.fetch
       ? !equal(desired[k], current[k]) : norm(desired[k]) !== norm(current[k]));
     if (changed) {
       try {
-        await request(fetchImpl, `${base}/rest/v1/rpc/upsert_user`, { method: 'POST', headers, body: JSON.stringify(payload) }, 'upsert_user');
+        await request(fetchImpl, `${base}/rest/v1/rpc/upsert_user_official`, { method: 'POST', headers, body: JSON.stringify(payload) }, 'upsert_user_official');
         usersWritten = true;
       } catch (error) { errors.push(error); }
     }

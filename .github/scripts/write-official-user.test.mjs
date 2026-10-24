@@ -30,7 +30,7 @@ function fixture({ users = [current], radars = initialRadars, failUsers = false,
     const u = new URL(url); calls.push({ url: u, init });
     if (u.pathname.endsWith('/users')) return failUsers ? fail() : response(users?.length === 1 ? [db.user] : users);
     if (u.pathname.endsWith('/user_ohsorry_radars')) return radarError ? fail() : response(db.radars);
-    if (u.pathname.endsWith('/rpc/upsert_user')) {
+    if (u.pathname === '/rest/v1/rpc/upsert_user_official') {
       if (failUserPost) return fail();
       const p = JSON.parse(init.body);
       for (const [arg, key] of [['p_star', 'star'], ['p_native_star', 'native_star'], ['p_r_star', 'r_star'], ['p_sp_cpi', 'sp_cpi'], ['p_sp_star', 'sp_star']]) if (p[arg] !== null) db.user[key] = p[arg];
@@ -69,7 +69,7 @@ test('sends exact users and 39 feature arguments, preserving protected values an
   input.user.ereter_star = 99;
   const result = await writeOfficialUser(id, input, opts(f));
   const posts = f.calls.filter((x) => x.init.method === 'POST');
-  const user = JSON.parse(posts.find((x) => x.url.pathname.endsWith('/upsert_user')).init.body);
+  const user = JSON.parse(posts.find((x) => x.url.pathname === '/rest/v1/rpc/upsert_user_official').init.body);
   assert.deepEqual(Object.keys(user), ['p_iidx_id', 'p_dj_name', 'p_star', 'p_ereter_star', 'p_sp_rank', 'p_dp_rank', 'p_native_star', 'p_sp_cpi', 'p_sp_star', 'p_r_star', 'p_plays', 'p_sp_r_star', 'p_sp_r_star_model_id', 'p_sp_r_star_formula_version']);
   assert.equal(user.p_dj_name, 'KEEP'); assert.equal(user.p_ereter_star, 7); assert.equal(user.p_sp_rank, 6); assert.deepEqual(user.p_plays, [34]);
   assert.equal(user.p_dp_rank, 5);
@@ -91,7 +91,7 @@ test('effective RPC state prevents repeat writes after the first successful appl
     input.user[nullable] = null;
     input.osPattern = [];
     const result = await writeOfficialUser(id, input, opts(f));
-    assert.equal(f.calls.filter((x) => x.init.method === 'POST' && x.url.pathname.endsWith('/rpc/upsert_user')).length, 0,
+    assert.equal(f.calls.filter((x) => x.init.method === 'POST' && x.url.pathname === '/rest/v1/rpc/upsert_user_official').length, 0,
       `${nullable}: COALESCE 보존 시 users POST 생략`);
     assert.equal(result.usersWritten, false);
   }
@@ -102,7 +102,7 @@ test('effective RPC state prevents repeat writes after the first successful appl
     sp_r_star_model_id: null, sp_r_star_formula_version: null });
   input.osPattern = [];
   const result = await writeOfficialUser(id, input, opts(f));
-  assert.equal(f.calls.filter((x) => x.init.method === 'POST' && x.url.pathname.endsWith('/rpc/upsert_user')).length, 0,
+  assert.equal(f.calls.filter((x) => x.init.method === 'POST' && x.url.pathname === '/rest/v1/rpc/upsert_user_official').length, 0,
     'all-null SP tuple preserves the stored tuple and skips users POST');
   assert.equal(result.usersWritten, false);
 });
@@ -123,7 +123,7 @@ test('null, zero, COALESCE, same-model ratchet and model tuple transitions are c
     d.user.sp_r_star = c.incoming; d.user.sp_r_star_model_id = c.model; d.user.sp_r_star_formula_version = c.formula;
     const f = fixture({ users: [old], radars: [] });
     const result = await writeOfficialUser(id, d, opts(f));
-    assert.equal(f.calls.filter((x) => x.url.pathname.endsWith('/rpc/upsert_user')).length, c.changed ? 1 : 0, c.label);
+    assert.equal(f.calls.filter((x) => x.url.pathname === '/rest/v1/rpc/upsert_user_official').length, c.changed ? 1 : 0, c.label);
   }
 });
 
@@ -133,7 +133,7 @@ test('writes are independent and AggregateError retains both RPC failures; CLI e
     assert.ok(error instanceof AggregateError); assert.equal(error.errors.length, 2);
     assert.match(error.errors[0].message, /upsert_user/); assert.match(error.errors[1].message, /style 1/); return true;
   });
-  assert.equal(f.calls.filter((x) => x.init.method === 'POST' && x.url.pathname.endsWith('/rpc/upsert_user')).length, 1);
+  assert.equal(f.calls.filter((x) => x.init.method === 'POST' && x.url.pathname === '/rest/v1/rpc/upsert_user_official').length, 1);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'write-official-'));
   const dumpPath = path.join(dir, 'dump.json'); fs.writeFileSync(dumpPath, JSON.stringify(dump));
   const child = spawnSync(process.execPath, [new URL('./write-official-user.mjs', import.meta.url).pathname, id, dumpPath], {
@@ -147,13 +147,13 @@ test('invalid users and radar reads retain failures and never synthesize users',
   for (const users of [[], null, [{ ...current, star: 'NaN' }]]) {
     const f = fixture({ users, radars: [] });
     await assert.rejects(writeOfficialUser(id, dump, opts(f)), AggregateError);
-    assert.equal(f.calls.some((x) => x.url.pathname.endsWith('/rpc/upsert_user')), false, JSON.stringify(users));
+    assert.equal(f.calls.some((x) => x.url.pathname === '/rest/v1/rpc/upsert_user_official'), false, JSON.stringify(users));
   }
   const f = fixture({ radarError: true });
   await assert.rejects(writeOfficialUser(id, dump, opts(f)), (error) => {
     assert.ok(error instanceof AggregateError); assert.equal(error.errors.length, 1); assert.match(error.errors[0].message, /user_ohsorry_radars GET/); return true;
   });
-  assert.equal(f.calls.some((x) => x.url.pathname.endsWith('/rpc/upsert_user')), true);
+  assert.equal(f.calls.some((x) => x.url.pathname === '/rest/v1/rpc/upsert_user_official'), true);
   const input = structuredClone(dump);
   input.osPattern[0] = Object.fromEntries(Object.entries(input.osPattern[0]).map(([key, value]) =>
     ['iidx_id', 'play_style'].includes(key) ? [key, value] : [`os_${key}`, value]));
