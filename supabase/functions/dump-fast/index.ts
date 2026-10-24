@@ -63,12 +63,58 @@ function parse(bytes: Uint8Array) { return JSON.parse(new TextDecoder('utf-8', {
 export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Omit<Deps, 'getEnv'>> & { loadReads?: () => Promise<Omit<Deps, 'getEnv'>> }) {
   return async (request: Request): Promise<Response> => {
     const { getEnv } = options;
-    if (getEnv('FAST_DUMP_MODE') !== 'shadow') return response(503, { mode: 'shadow', status: 'unavailable', reason: 'mode_unavailable' });
+    const mode = getEnv('FAST_DUMP_MODE');
+    const publish = mode === 'publish';
+    const responseMode = publish ? 'publish' : 'shadow';
+    if (mode !== 'shadow' && !publish) return response(503, { mode: 'shadow', status: 'unavailable', reason: 'mode_unavailable' });
+    if (publish) {
+      const secret = getEnv('FAST_DUMP_LIGHT_SECRET');
+      if (!secret || secret.length < 32) return response(503, { mode: responseMode, status: 'unavailable', reason: 'configuration_unavailable' });
+      if (request.headers.get('x-fast-dump-light-secret') !== secret) return response(401, { mode: responseMode, status: 'unauthorized', reason: 'unauthorized' });
+      if (request.method !== 'POST') return response(405, { mode: responseMode, status: 'rejected', reason: 'method_not_allowed' });
+      if ((request.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') return response(415, { mode: responseMode, status: 'rejected', reason: 'unsupported_media_type' });
+      let bytes: Uint8Array;
+      try {
+        const reader = request.body?.getReader(), chunks: Uint8Array[] = [];
+        let size = 0;
+        if (reader) while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.length;
+          if (size > 4096) { await reader.cancel(); return response(413, { mode: responseMode, status: 'rejected', reason: 'body_too_large' }); }
+          chunks.push(value);
+        }
+        bytes = new Uint8Array(size);
+        let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+      } catch { return response(400, { mode: responseMode, status: 'rejected', reason: 'invalid_body' }); }
+      let body: any;
+      try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return response(400, { mode: responseMode, status: 'rejected', reason: 'invalid_json' }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 3 || !Object.hasOwn(body, 'iidxId') || !Object.hasOwn(body, 'generation') || !Object.hasOwn(body, 'since') || typeof body.iidxId !== 'string' || !/^[A-Za-z0-9]+$/.test(body.iidxId) || typeof body.generation !== 'string' || !/^[1-9][0-9]*$/.test(body.generation) || typeof body.since !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(body.since) || !Number.isFinite(Date.parse(body.since)) || new Date(Date.parse(body.since)).toISOString() !== body.since) return response(400, { mode: responseMode, status: 'rejected', reason: 'invalid_request' });
+      let deps: Deps;
+      try { deps = { getEnv, ...(options.loadReads ? await options.loadReads() : options) } as Deps; }
+      catch { return response(503, { mode: responseMode, status: 'unavailable', reason: 'configuration_unavailable' }); }
+      try {
+        const [{ runLightDump }, { createR2S3Adapter }] = await Promise.all([import('../_shared/dump-fast-worker.ts'), import('../_shared/r2-s3.ts')]);
+        const r2 = createR2S3Adapter({ accountId: getEnv('R2_ACCOUNT_ID')!, accessKeyId: getEnv('R2_ACCESS_KEY_ID')!, secretAccessKey: getEnv('R2_SECRET_ACCESS_KEY')!, bucket: getEnv('R2_BUCKET')!, fetchImpl: fetch });
+        const read = async (key: string) => {
+          if (!R2_KEYS(body.iidxId).includes(key) && key !== `pending/${body.iidxId}.json`) throw new Error('invalid R2 key');
+          const result = await r2.get(key);
+          return { body: new TextDecoder('utf-8', { fatal: true }).decode(result.value!), etag: result.etag ?? null };
+        };
+        const put = async (key: string, value: string, etag: string) => {
+          if (key !== `user/${body.iidxId}.json` && key !== `pending/${body.iidxId}.json`) throw new Error('invalid R2 write key');
+          await r2.put(key, new TextEncoder().encode(value), { ifMatch: etag });
+        };
+        const result = await runLightDump({ id: body.iidxId, G: body.generation, since: body.since, deps: { readBuffer: id => readBuffer(deps, id), read, put, prepareFastDump: deps.prepareFastDump } });
+        return response(result.ok ? 200 : 409, { mode: responseMode, status: result.ok ? 'complete' : 'skipped', ...result, value: undefined });
+      } catch { return response(502, { mode: responseMode, status: 'error', reason: 'publication_failed' }); }
+    }
     const secret = getEnv('FAST_DUMP_SHADOW_SECRET');
-    if (!secret || secret.length < 32) return response(503, { mode: 'shadow', status: 'unavailable', reason: 'configuration_unavailable' });
-    if (request.headers.get('x-fast-dump-shadow-secret') !== secret) return response(401, { mode: 'shadow', status: 'unauthorized', reason: 'unauthorized' });
+    if (!secret || secret.length < 32) return response(503, { mode: responseMode, status: 'unavailable', reason: 'configuration_unavailable' });
+    if (request.headers.get('x-fast-dump-shadow-secret') !== secret) return response(401, { mode: responseMode, status: 'unauthorized', reason: 'unauthorized' });
     if (request.method !== 'POST') return response(405, { mode: 'shadow', status: 'rejected', reason: 'method_not_allowed' });
-    if ((request.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') return response(415, { mode: 'shadow', status: 'rejected', reason: 'unsupported_media_type' });
+    if ((request.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') return response(415, { mode: responseMode, status: 'rejected', reason: 'unsupported_media_type' });
     let bytes: Uint8Array;
     try {
       const reader = request.body?.getReader(), chunks: Uint8Array[] = [];
@@ -77,16 +123,16 @@ export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Om
         const { done, value } = await reader.read();
         if (done) break;
         size += value.length;
-        if (size > 4096) { await reader.cancel(); return response(413, { mode: 'shadow', status: 'rejected', reason: 'body_too_large' }); }
+        if (size > 4096) { await reader.cancel(); return response(413, { mode: responseMode, status: 'rejected', reason: 'body_too_large' }); }
         chunks.push(value);
       }
       bytes = new Uint8Array(size);
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-    } catch { return response(400, { mode: 'shadow', status: 'rejected', reason: 'invalid_body' }); }
-    if (bytes.length > 4096) return response(413, { mode: 'shadow', status: 'rejected', reason: 'body_too_large' });
+    } catch { return response(400, { mode: responseMode, status: 'rejected', reason: 'invalid_body' }); }
+    if (bytes.length > 4096) return response(413, { mode: responseMode, status: 'rejected', reason: 'body_too_large' });
     let body: any;
-    try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return response(400, { mode: 'shadow', status: 'rejected', reason: 'invalid_json' }); }
+    try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return response(400, { mode: responseMode, status: 'rejected', reason: 'invalid_json' }); }
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || !Object.hasOwn(body, 'iidxId') || typeof body.iidxId !== 'string' || !/^[A-Za-z0-9]+$/.test(body.iidxId)) return response(400, { mode: 'shadow', status: 'rejected', reason: 'invalid_request' });
     const id = body.iidxId;
     let deps: Deps;

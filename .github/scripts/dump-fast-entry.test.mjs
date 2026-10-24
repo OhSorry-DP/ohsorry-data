@@ -81,3 +81,38 @@ test('lazy import and Buffer order; read adapters expose only GET and constraine
   for(const [range,body] of [['0-0/0',[]],['1-1/1',[row(1)]],['0-2/1',[row(1)]],['*/1',{}],['0-0/*',[row(1)]],['',[]]]){const a=createReadAdapters({getEnv:env,fetchImpl:async()=>new Response(JSON.stringify(body),{headers:{'content-range':range}}),r2Get:async()=>enc([])});await assert.rejects(a.selectBuffer('u1',0));}
   await check({handler:createDumpFastHandler({getEnv:k=>f.env[k],loadReads:()=>loadDefaultReads(()=>undefined)})},503,'configuration_unavailable');
 });
+
+test('publish validates its independent secret and exact generation request before loading adapters',async()=>{
+  const publishSecret='p'.repeat(32), env={FAST_DUMP_MODE:'publish',FAST_DUMP_LIGHT_SECRET:publishSecret};
+  for(const [headers,status] of [[{'x-fast-dump-light-secret':'wrong'},401],[{'x-fast-dump-light-secret':publishSecret},400]]) {
+    let loaded=0;
+    const handler=createDumpFastHandler({getEnv:k=>env[k],loadReads:async()=>{loaded++;throw Error('should not load');}});
+    const input=status===401?{iidxId:'u1',generation:'1',since:'2026-10-24T00:00:00.000Z'}:{iidxId:'u1',generation:'1',since:'2026-10-24T00:00:00.000Z',extra:true};
+    const r=await handler(new Request('https://local.invalid',{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify(input)}));
+    const b=await r.json();assert.equal(r.status,status);assert.equal(b.mode,'publish');assert.equal(loaded,0);assert.doesNotMatch(JSON.stringify(b),/secret|Bearer|Authorization/i);
+  }
+  assert.match(readFileSync(url,'utf8'),/FAST_DUMP_LIGHT_SECRET/);assert.match(readFileSync(url,'utf8'),/x-fast-dump-light-secret/);
+});
+
+test('publish injects the shared worker and constrains S3 writes to user and pending with ETag CAS',async()=>{
+  const publishSecret='p'.repeat(32), env={FAST_DUMP_MODE:'publish',FAST_DUMP_LIGHT_SECRET:publishSecret,R2_ACCOUNT_ID:'acct',R2_ACCESS_KEY_ID:'key',R2_SECRET_ACCESS_KEY:'secret',R2_BUCKET:'bucket'};
+  const user={_v:'2026-10-24T03:00:00.000Z',dp:[],sp:[],dpRecent:[],spRecent:[]};
+  const pending={generation:'2',since:'2026-10-24T02:00:00.000Z'};
+  const store=new Map([['pending/u1.json',{body:JSON.stringify(pending),etag:'"p1"'}],['user/u1.json',{body:JSON.stringify(user),etag:'"u1"'}],['hist/u1.json',{body:'[]',etag:'"h1"'}],['meta/song-aliases.json',{body:'{"v":1,"rules":[]}',etag:'"a1"'}],['songs.json',{body:'[]',etag:'"s1"'}]]);
+  const writes=[], reads=[];
+  const handler=createDumpFastHandler({getEnv:k=>env[k],loadReads:async()=>({selectBuffer:async()=>({rows:[],total:0}),getR2:async()=>new Uint8Array(),prepareFastDump:()=>({histBytes:enc([]),fastPatch:{dp:[1],sp:[],dpRecent:[],spRecent:[]}})})});
+  const realFetch=globalThis.fetch;
+  globalThis.fetch=async(input,init)=>{
+    const req=input instanceof Request?input:new Request(input,init), path=new URL(req.url).pathname;
+    const key=decodeURIComponent(path.slice(path.indexOf('/bucket/')+8)); reads.push([req.method,key,req.headers.get('if-match')]);
+    if(req.method==='GET') {const item=store.get(key);if(!item)return new Response('',{status:404});return new Response(item.body,{headers:{etag:item.etag}});}
+    writes.push([req.method,key,req.headers.get('if-match')]);
+    const item=store.get(key);if(!item||req.headers.get('if-match')!==item.etag)return new Response('',{status:412});
+    store.set(key,{body:await req.text(),etag:'"next"'});return new Response('',{status:200});
+  };
+  try {
+    const request=new Request('https://local.invalid',{method:'POST',headers:{'content-type':'application/json','x-fast-dump-light-secret':publishSecret},body:JSON.stringify({iidxId:'u1',generation:'2',since:pending.since})});
+    const r=await handler(request), b=await r.json();assert.equal(r.status,200,JSON.stringify(b));assert.equal(b.done,true);assert.deepEqual(writes.map(x=>x.slice(0,2)),[['PUT','user/u1.json'],['PUT','pending/u1.json']]);assert.deepEqual(writes.map(x=>x[2]),['"u1"','"p1"']);assert.ok(reads.some(x=>x[0]==='GET'&&x[1]==='user/u1.json'));
+  } finally {globalThis.fetch=realFetch;}
+  const source=readFileSync(url,'utf8');assert.match(source,/dump-fast-worker\.ts/);assert.match(source,/r2\.put\(key, new TextEncoder\(\)\.encode\(value\), \{ ifMatch: etag \}\)/);
+});
