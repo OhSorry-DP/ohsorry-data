@@ -36,16 +36,28 @@ function valid(body: any) {
 }
 const times = () => performance.now();
 const measure = async <T>(fn: () => T | Promise<T>) => { const t = times(); const value = await fn(); return { value, elapsedMs: times() - t }; };
+const publicUrlsFor = (fixture: string) => ({ hist: `https://data.iidx.in/hist/${fixture}.json`, songs: "https://data.iidx.in/songs.json" });
 let isolateFirstRequest = true;
 const isolateId = crypto.randomUUID();
 const region = Deno.env.get("SB_REGION") ?? Deno.env.get("FLY_REGION") ?? "unknown";
 
-async function cpu(fixture: string, r: number | "all", adapter: ReturnType<typeof createR2S3Adapter>) {
+async function cpu(fixture: string, r: number | "all", adapter?: ReturnType<typeof createR2S3Adapter>) {
   const keys = [`bench/hist-${fixture}.json`, "bench/songs.json"];
-  const [h, s] = await Promise.all(keys.map(async (key) => {
-    const t = times(); const response = await adapter.get(key); const downloadMs = times() - t;
-    const parse = await measure(() => JSON.parse(new TextDecoder().decode(response.value!)));
-    return { key, bytes: response.value!.length, downloadMs, parseMs: parse.elapsedMs, value: parse.value as any };
+  const publicUrls = [publicUrlsFor(fixture).hist, publicUrlsFor(fixture).songs];
+  const [h, s] = await Promise.all(keys.map(async (key, index) => {
+    const t = times();
+    let bytes: Uint8Array;
+    if (adapter) {
+      const response = await adapter.get(key);
+      bytes = response.value!;
+    } else {
+      const response = await fetch(publicUrls[index]);
+      if (!response.ok) throw new Error(`public input fetch failed (${response.status})`);
+      bytes = new Uint8Array(await response.arrayBuffer());
+    }
+    const downloadMs = times() - t;
+    const parse = await measure(() => JSON.parse(new TextDecoder().decode(bytes)));
+    return { key, bytes: bytes.length, downloadMs, parseMs: parse.elapsedMs, value: parse.value as any };
   }));
   const previousHistRows = h.value;
   const songs = s.value;
@@ -124,8 +136,11 @@ Deno.serve(async (request) => {
     const body = await request.json(); valid(body);
     const env = ["R2_BENCH_ACCOUNT_ID", "R2_BENCH_ACCESS_KEY_ID", "R2_BENCH_SECRET_ACCESS_KEY", "R2_BENCH_BUCKET"];
     const [accountId, accessKeyId, secretAccessKey, bucket] = env.map((k) => Deno.env.get(k) ?? "");
-    const adapter = createR2S3Adapter({ accountId, accessKeyId, secretAccessKey, bucket, fetchImpl: fetch });
-    const result = body.mode === "cpu" ? await cpu(body.fixture, body.r, adapter) : await r2(body.fixture, body.n, adapter, runId);
+    const configured = [accountId, accessKeyId, secretAccessKey, bucket].every((value) => value.length > 0);
+    if (body.mode === "r2" && !configured) return Response.json({ ok: false, error: "r2 credentials not configured" }, { status: 400 });
+    const adapter = configured ? createR2S3Adapter({ accountId, accessKeyId, secretAccessKey, bucket, fetchImpl: fetch }) : undefined;
+    const result = body.mode === "cpu" ? await cpu(body.fixture, body.r, adapter) : await r2(body.fixture, body.n, adapter!, runId);
+    if (body.mode === "cpu") Object.assign(result, { inputSource: configured ? "r2" : "public", inputUrls: publicUrlsFor(body.fixture) });
     const ok = (result as any).ok !== false;
     return Response.json({ requestId, runId, isolateId, isolateFirstRequest: first, region, revision: PROVENANCE.revision, dirty: PROVENANCE.dirty, moduleSha256: PROVENANCE.hashes, dependencies: PROVENANCE.npm, mode: body.mode, ...result, requestElapsedMs: times() - started, ok }, { status: ok ? 200 : 500 });
   } catch (error) {
