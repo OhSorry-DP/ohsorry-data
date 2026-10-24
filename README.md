@@ -124,6 +124,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-24 — hist 병합 O(n²) 제거
+
+- `replayScoreBuffer` 가 REST 행마다 누적 hist 전체를 `mergeScoreHistory` 로 재검증·복사하던 구조를 호출별 인덱스(naturalKey→슬롯, chartKey→best·NULL 보충 대기)로 바꿨다. 첫 행은 기존 `mergeScoreHistory` 로 처리해 검증 순서·예외 메시지를 보존한다. 별칭 충돌 그룹 재생(`normalizeAliasInputs`)도 같은 replay 를 쓴다. 업로더 공유 동기화 블록과 `buildCandidate` 검증은 변경 없음.
+- 운영 실측(10-24, C200074777849 hist 6,259행)에서 normalizeReplay 203초·buildCandidate 408초 뒤 R2 PUT `EPIPE` 로 덤프가 실패했다. 옛/새 대조(84713c014 사본 vs 현재; 기존 테스트 호출 fixture 665건·공개 hist 6명 기반 합성 68건) 불일치 0, 예외 41건 메시지까지 일치. 6,259행 normalize+replay+buildCandidate 합계 836.6초 → 0.41~0.45초(A머신). 변이 3종(best 센티널·BP 보충·차단 등호) 검출 확인.
+
 ### 2026-10-24 — dump-user 단계별 시간 로그
 
 - `dump-user.mjs` 를 CLI 로 실행할 때 첫 로그 「이전 덤프 읽음」 전까지의 단계별 경과시간을 `[timing] <단계> <ms>ms` 로 출력한다(리소스 로드·준비 단계 R2/Supabase 읽기·페이지별 scores 조회·hist/후보 PUT·병렬 조회 9항목·공식 계산·전체). 업로드 후 그리드·리센트 반영 지연(중앙값 약 2분·최대 약 6분)의 원인 측정용이며 동작 변경은 없다. 모듈 import·테스트에서는 출력하지 않는다.
