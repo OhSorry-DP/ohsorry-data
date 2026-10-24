@@ -17,8 +17,51 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { calculateOfficialScores } from './official-score.mjs';
 import { mergeScoreHistory } from './score-history.mjs';
+import { mergeSlowUser } from './dump-fast-publish.mjs';
+import { s3R2Client } from './r2-client.mjs';
 
 const validId = (value) => /^[A-Za-z0-9]+$/.test(String(value || ''));
+const lightGuardOn = () => process.env.FAST_DUMP_LIGHT_GUARD === '1';
+
+function s3ResponseEtag(response) {
+  const value = response.headers?.get?.('etag');
+  return typeof value === 'string' && /^"[\x21\x23-\x7e\x80-\xff]*"$/.test(value) ? value : null;
+}
+
+async function s3ReadUser(s3, key) {
+  const response = await s3.request(key, { method: 'GET' });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`S3 user GET HTTP ${response.status}`);
+  const etag = s3ResponseEtag(response);
+  if (!etag) return null;
+  return { body: await response.text(), etag };
+}
+
+export async function guardedSlowUserPut({ client, key, source, local, s3 }) {
+  if (!lightGuardOn()) {
+    await client.put(key, JSON.stringify(local), source.etag);
+    return true;
+  }
+  try { s3 ||= s3R2Client({ retries: 0 }); } catch { return false; }
+  if (!s3) return false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let latest, current;
+    try { latest = await s3ReadUser(s3, key); } catch { return false; }
+    if (!latest) return false;
+    try { current = JSON.parse(latest.body); } catch { return false; }
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return false;
+    const merged = mergeSlowUser(current, local);
+    try {
+      const response = await s3.request(key, { method: 'PUT', body: JSON.stringify(merged),
+        headers: { 'Content-Type': 'application/json; charset=utf-8', 'If-Match': latest.etag } });
+      if (response.ok) return true;
+      if (response.status !== 412) return false;
+    } catch (error) {
+      if (!/HTTP 412\b/.test(String(error?.message || error))) return false;
+    }
+  }
+  return false;
+}
 
 export function parseArgs(args) {
   const options = { dry: false, coachOnly: false, limit: Infinity, concurrency: 4 };
@@ -70,7 +113,7 @@ const officialSnapshot = (data) => JSON.stringify([
   [Object.hasOwn(data, 'osPattern'), data.osPattern],
 ]);
 
-export async function updateSinglePersona(id, { client, calculate, official = false, dry = false } = {}) {
+export async function updateSinglePersona(id, { client, calculate, official = false, dry = false, s3 } = {}) {
   if (!validId(id)) throw new Error('Invalid single-user id');
   const key = `user/${id}.json`;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -101,7 +144,10 @@ export async function updateSinglePersona(id, { client, calculate, official = fa
     if (after === before) return dry ? { dry: true, changed: false } : { unchanged: true };
     if (dry) return { dry: true, changed: true };
     try {
-      await client.put(key, JSON.stringify(data), source.etag);
+      if (!await guardedSlowUserPut({ client, key, source, local: data, s3 })) {
+        if (lightGuardOn()) return { conflicted: true };
+        throw new Error('user PUT rejected');
+      }
       return { updated: true };
     } catch (error) {
       if (!/HTTP 412\b/.test(error.message)) throw error;
@@ -139,7 +185,7 @@ export function historyPersonaFields(id, data, histRows, songs, arrange, R, engi
   };
 }
 
-export async function runHistoryBatch({ ids, client, R, songs, engine, arrangeFor, dry = false, concurrency = 4 }) {
+export async function runHistoryBatch({ ids, client, R, songs, engine, arrangeFor, dry = false, concurrency = 4, s3 }) {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error('concurrency must be a positive integer');
   const results = new Array(ids.length);
   let next = 0;
@@ -149,7 +195,7 @@ export async function runHistoryBatch({ ids, client, R, songs, engine, arrangeFo
       const id = ids[index];
       try {
         let firstArrange;
-        const result = await updateSinglePersona(id, { client, official: true, dry,
+        const result = await updateSinglePersona(id, { client, official: true, dry, s3,
           calculate: async (data, { histRows }) => {
             const arrange = firstArrange === undefined ? (firstArrange = await arrangeFor(id)) : await arrangeFor(id);
             return historyPersonaFields(id, data, histRows, songs, arrange, R, engine);
@@ -299,6 +345,10 @@ export async function main(args = process.argv.slice(2), deps = {}) {
     wrangler(['r2', 'object', 'put', `${BUCKET}/${key}`, `--file=${f}`,
       '--content-type=application/json; charset=utf-8', '--remote']);
   }
+  async function guardedR2UserPut(id, local, source) {
+    if (!lightGuardOn()) { await r2PutText(`user/${id}.json`, JSON.stringify(local)); return true; }
+    return guardedSlowUserPut({ client: null, key: `user/${id}.json`, source, local, s3: deps.s3 });
+  }
   // 동시 실행 풀 — 순서 무관(유저별 독립)이라 단순 워커 N개로 충분.
   async function pool(items, n, fn) {
     let i = 0;
@@ -371,6 +421,7 @@ export async function main(args = process.argv.slice(2), deps = {}) {
     if (text == null) {
       // R2 에 없는 유저 — git 본을 그대로 올린다(신규/누락 보정). 롤백 위험 없음(R2 가 비어 있으므로).
       const gp = path.join('user', `${id}.json`);
+      if (lightGuardOn()) { fail++; console.error('GUARD: user 원본 없음', id); return; }
       if (!fs.existsSync(gp)) { miss++; return; }
       if (DRY) { put++; return; }
       try { await r2PutText(key, fs.readFileSync(gp, 'utf8')); put++; }
@@ -395,7 +446,10 @@ export async function main(args = process.argv.slice(2), deps = {}) {
     } catch (e) { fail++; console.error('persona 실패', id, e.message); return; }
     if (snap() === before) { same++; return; }   // 변화 없으면 PUT 생략
     if (DRY) { put++; return; }
-    try { await r2PutText(key, JSON.stringify(data)); put++; }
+    try {
+      if (!await guardedR2UserPut(id, data, { etag: null })) { fail++; console.error('GUARD: S3 CAS user PUT 실패', id); return; }
+      put++;
+    }
     catch (e) { fail++; console.error('PUT 실패', id, e.message); }
     if (++done % 50 === 0) console.log(`  ${done}/${ids.length} 처리 (PUT ${put} / 무변화 ${same} / 실패 ${fail})`);
   });

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mergeScoreHistory } from './score-history.mjs';
 import { historyInputs } from './persona-lib.mjs';
-import { updateSinglePersona, historyPersonaFields } from './r2-repersona.mjs';
+import { updateSinglePersona, historyPersonaFields, guardedSlowUserPut, runHistoryBatch } from './r2-repersona.mjs';
 
 const id = '12345678';
 const h34 = [101, 3, 6, 1800, 34, '2026-10-21T01:02:03.123456+00:00', '2026-10-21', 1, 20, 1000];
@@ -48,6 +48,19 @@ function makeClient(data, histRows = [h34, late33], etag = '"e1"') {
       return null;
     },
     async put(key, body, condition) { puts.push({ key, data: JSON.parse(body), condition }); } };
+}
+
+function makeS3(data, conflictStatuses = []) {
+  let current = structuredClone(data), puts = 0, gets = 0;
+  return { state: () => ({ current, puts, gets }), async request(key, init) {
+    assert.equal(key, `user/${id}.json`);
+    if (init.method === 'GET') { gets++; return new Response(JSON.stringify(current), { headers: { etag: `"s${gets}"` } }); }
+    puts++;
+    if (conflictStatuses.length) return new Response('', { status: conflictStatuses.shift() });
+    assert.equal(init.headers['If-Match'], `"s${gets}"`);
+    current = JSON.parse(init.body);
+    return new Response('', { status: 200 });
+  } };
 }
 
 test('공식 계산은 병합 hist grid의 늦은 33 EX와 lamp를 사용하고 user dp를 읽지 않는다', () => {
@@ -189,4 +202,73 @@ test('legacy는 hist를 읽지 않고 기존 calculate 인자를 유지하며 dr
   assert.equal(dryPuts, 0);
   assert.deepEqual(await updateSinglePersona(id, { client: dryClient, official: true, dry: true,
     calculate: async () => ({}) }), { dry: true, changed: false });
+});
+
+test('GUARD OFF는 기존 본문과 PUT 횟수 및 ETag를 유지한다', async () => {
+  const old = process.env.FAST_DUMP_LIGHT_GUARD;
+  delete process.env.FAST_DUMP_LIGHT_GUARD;
+  try {
+    const data = baseData(), client = makeClient(data);
+    assert.deepEqual(await updateSinglePersona(id, { client, calculate: async () => ({ persona: { next: 1 } }) }), { updated: true });
+    assert.equal(client.puts.length, 1);
+    assert.equal(client.puts[0].condition, '"e1"');
+    assert.equal(client.puts[0].data.persona.next, 1);
+  } finally { if (old === undefined) delete process.env.FAST_DUMP_LIGHT_GUARD; else process.env.FAST_DUMP_LIGHT_GUARD = old; }
+});
+
+test('GUARD ON S3 If-Match PUT은 최신 fast4와 generation 및 미지 필드를 보존한다', async () => {
+  const old = process.env.FAST_DUMP_LIGHT_GUARD; process.env.FAST_DUMP_LIGHT_GUARD = '1';
+  try {
+    const local = baseData(), latest = { ...baseData(), dp: [{ newest: 1 }], sp: [{ newest: 2 }],
+      dpRecent: [3], spRecent: [4], fastGeneration: '9', unknown: { retained: true } };
+    const s3 = makeS3(latest), client = makeClient(local);
+    assert.deepEqual(await updateSinglePersona(id, { client, s3, official: true, calculate: async () => ({ persona: { fresh: true } }) }), { updated: true });
+    const { current, puts } = s3.state();
+    for (const key of ['dp', 'sp', 'dpRecent', 'spRecent', 'fastGeneration']) assert.deepEqual(current[key], latest[key]);
+    assert.deepEqual(current.unknown, { retained: true }); assert.deepEqual(current.persona, { fresh: true });
+    assert.equal(puts, 1);
+  } finally { if (old === undefined) delete process.env.FAST_DUMP_LIGHT_GUARD; else process.env.FAST_DUMP_LIGHT_GUARD = old; }
+});
+
+test('GUARD ON S3 CAS는 412 두 번 뒤 최신 원본 재병합 후 성공한다', async () => {
+  const old = process.env.FAST_DUMP_LIGHT_GUARD; process.env.FAST_DUMP_LIGHT_GUARD = '1';
+  try {
+    const data = baseData(), s3 = makeS3(data, [412, 412]);
+    assert.equal(await guardedSlowUserPut({ client: null, key: `user/${id}.json`, source: {}, local: { ...data, persona: { next: 1 } }, s3 }), true);
+    assert.deepEqual(s3.state().current.persona, { next: 1 });
+    assert.equal(s3.state().gets, 3); assert.equal(s3.state().puts, 3);
+  } finally { if (old === undefined) delete process.env.FAST_DUMP_LIGHT_GUARD; else process.env.FAST_DUMP_LIGHT_GUARD = old; }
+});
+
+test('GUARD ON S3 CAS 412 세 번이면 실패하고 무조건 PUT은 없다', async () => {
+  const old = process.env.FAST_DUMP_LIGHT_GUARD; process.env.FAST_DUMP_LIGHT_GUARD = '1';
+  try {
+    const data = baseData(), s3 = makeS3(data, [412, 412, 412]);
+    assert.equal(await guardedSlowUserPut({ client: null, key: `user/${id}.json`, source: {}, local: { ...data, persona: { next: 1 } }, s3 }), false);
+    assert.equal(s3.state().gets, 3); assert.equal(s3.state().puts, 3);
+  } finally { if (old === undefined) delete process.env.FAST_DUMP_LIGHT_GUARD; else process.env.FAST_DUMP_LIGHT_GUARD = old; }
+});
+
+test('GUARD ON 배치 경로도 공유 S3 CAS 함수를 사용한다', async () => {
+  const old = process.env.FAST_DUMP_LIGHT_GUARD; process.env.FAST_DUMP_LIGHT_GUARD = '1';
+  try {
+    const h = makeClient(baseData()), s3 = makeS3(baseData());
+    const r = await runHistoryBatch({ ids: [id], client: h, s3, R: officialResources(), songs: [song],
+      engine: historyEngine({}), arrangeFor: async () => [], concurrency: 1 });
+    assert.equal(r[0].updated, true); assert.equal(s3.state().puts, 1);
+  } finally { if (old === undefined) delete process.env.FAST_DUMP_LIGHT_GUARD; else process.env.FAST_DUMP_LIGHT_GUARD = old; }
+});
+
+test('GUARD ON S3 자격 누락은 유저 실패이며 REST PUT fallback을 하지 않는다', async () => {
+  const old = process.env.FAST_DUMP_LIGHT_GUARD, access = process.env.R2_ACCESS_KEY_ID, secret = process.env.R2_SECRET_ACCESS_KEY;
+  process.env.FAST_DUMP_LIGHT_GUARD = '1'; delete process.env.R2_ACCESS_KEY_ID; delete process.env.R2_SECRET_ACCESS_KEY;
+  try {
+    const data = baseData(), client = makeClient(data);
+    assert.deepEqual(await updateSinglePersona(id, { client, calculate: async () => ({ persona: { next: 1 } }) }), { conflicted: true });
+    assert.equal(client.puts.length, 0);
+  } finally {
+    if (old === undefined) delete process.env.FAST_DUMP_LIGHT_GUARD; else process.env.FAST_DUMP_LIGHT_GUARD = old;
+    if (access === undefined) delete process.env.R2_ACCESS_KEY_ID; else process.env.R2_ACCESS_KEY_ID = access;
+    if (secret === undefined) delete process.env.R2_SECRET_ACCESS_KEY; else process.env.R2_SECRET_ACCESS_KEY = secret;
+  }
 });
