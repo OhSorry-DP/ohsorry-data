@@ -15,7 +15,7 @@ const full = (rows) => normalizeDbrHistory(rows, { complete: true, revision: 7 }
 const later = (extra = {}) => row({ date: '2026-09-02T10:00:00Z', date_kst: '2026-09-02', score_id: 2, ...extra });
 
 test('계약 앞 10열은 실제 HIST_COLS와 일치하며 import 부작용이 없다', () => {
-  const source = readFileSync(new URL('./dump-user.mjs', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('./dump-fast-core.mjs', import.meta.url), 'utf8');
   const match = source.match(/export const HIST_COLS = (\[[^;]+\]);/);
   assert.ok(match);
   const cols = [...match[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);

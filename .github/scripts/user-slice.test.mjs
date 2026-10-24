@@ -124,7 +124,7 @@ test('hist 모드 전부 없으면 경고·DP만, 일부 없거나 잘못된 모
   assert.throws(() => buildUserSlice('A1', data(), [[1, 3, 5, 200, 33, '날짜', 'KST', 2]]));
 });
 test('hist 필드 위치는 dump-user 정본과 일치한다', () => {
-  const source = fs.readFileSync(new URL('./dump-user.mjs', import.meta.url), 'utf8');
+  const source = fs.readFileSync(new URL('./dump-fast-core.mjs', import.meta.url), 'utf8');
   const cols = JSON.parse(source.match(/export const HIST_COLS = (\[[^;]+\]);/)[1].replace(/'/g, '"'));
   assert.equal(cols[0], 'song_id'); assert.equal(cols[7], 'play_style');
 });

@@ -15,6 +15,9 @@ import { replayScoreBuffer } from './score-history.mjs';
 import { normalizeAliasInputs } from './song-aliases.mjs';
 import { fetchDpArrange } from './dp-arrange.mjs';
 import { writeUserSliceFile } from './user-slice.mjs';
+import { assembleUserDump, HIST_COLS, recentHistoryFromRows, slimRow } from './dump-fast-core.mjs';
+const HIST_DATE_I = HIST_COLS.indexOf('date');
+export { HIST_COLS } from './dump-fast-core.mjs';
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -50,9 +53,6 @@ async function rpcGrid(id, ps) {
   return out;
 }
 // score row 슬림 — 곡메타는 공유 songs.json 으로 분리(웹이 song_id 조인). dump-data-repo.js 와 동일 유지.
-const SCORE_KEEP = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'bp', 'note_count'];
-const slimRow = (r) => { const o = {}; for (const k of SCORE_KEEP) if (r[k] !== undefined) o[k] = r[k]; return o; };
-
 // ⚠️ 단일 정본 — ohSorryAdmin/scripts/dump-data-repo.js(전체·증분 덤프)가 이 함수를 import 해서 쓴다.
 //   과거 dump-data-repo.js 가 같은 스키마를 따로 구현하다 persona/spPersona/dpRecent/spRecent 를 누락해,
 //   수동 덤프한 유저의 리포트가 통째로 사라진 사고가 있었다(2026-08-04, 37명). 필드 추가는 여기만 고칠 것.
@@ -225,20 +225,8 @@ export async function dumpUser(id, personaRes, opts = {}) {
       spPersona = (prev && prev.spPersona) || null;
     }
   }
-  const result = {
-    _v: new Date().toISOString(), user: user[0] ? {
-      ...user[0],
-      sp_r_star: user[0].sp_r_star ?? null,
-      sp_r_star_model_id: user[0].sp_r_star_model_id ?? null,
-      sp_r_star_formula_version: user[0].sp_r_star_formula_version ?? null,
-    } : null, radars, osPattern, persona, spPersona, reachNps,
-    dp: dp.map(slimRow), sp,
-    // 최근 92일 갱신 이력 [{song_id,diff,date_kst}] — ④/SP연습 피처 recency. null 이면 키 생략(웹이 RPC fallback).
-    ...(cumulative ? { dpRecent: dpRecent ?? [], spRecent: spRecent ?? [] } : {}),
-    ...(!cumulative && dpRecent ? { dpRecent } : {}),
-    ...(!cumulative && spRecent ? { spRecent } : {}),
-  };
-  return result;
+  return assembleUserDump({ timestamp: new Date().toISOString(), userRows: user, radars, osPattern,
+    persona, spPersona, reachNps, dpRows: dp, sp, cumulative, dpRecent, spRecent });
 }
 
 // ─── 무손실 이력 hist/{id}.json (CF 통합 §1) ──────────────────────────────────
@@ -249,27 +237,6 @@ export async function dumpUser(id, personaRes, opts = {}) {
 // - user/{id}.json 에 합치지 않는다 — 히스토리는 랭킹모달을 열 때만 필요한데 카드 첫 로딩에
 //   매번 딸려오면 응답이 느려진다.
 // - DBR(played_version=-10)은 dbr 문서에서 공급한다. 일반 hist 에는 포함하지 않는다.
-export const HIST_COLS = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'date_kst', 'play_style', 'bp', 'note_count'];
-const HIST_DATE_I = HIST_COLS.indexOf('date');
-
-function recentHistoryFromRows(rows, playStyle) {
-  const todayKst = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const cutoff = new Date(`${todayKst}T00:00:00+09:00`);
-  cutoff.setUTCDate(cutoff.getUTCDate() - 92);
-  const cutoffKst = cutoff.toISOString().slice(0, 10);
-  const distinct = new Map();
-  for (const row of rows) {
-    if (!Array.isArray(row) || row.length !== HIST_COLS.length) continue;
-    const [song_id, diff, , , played_version, , date_kst, style] = row;
-    if (style !== playStyle || played_version === -10 || typeof date_kst !== 'string'
-      || date_kst < cutoffKst || date_kst > todayKst) continue;
-    const key = `${song_id}\u0000${diff}\u0000${date_kst}`;
-    if (!distinct.has(key)) distinct.set(key, { song_id, diff, date_kst });
-  }
-  return [...distinct.values()].sort((a, b) => b.date_kst.localeCompare(a.date_kst)
-    || a.song_id - b.song_id || a.diff - b.diff);
-}
-
 let officialResourcePromise;
 function officialResources(resources) {
   if (resources?.onlyOSR2eLib && resources?.spUserRateStarLib && resources?.patternScoreKernelLib) return resources;
