@@ -191,7 +191,7 @@ export function replayScoreBuffer(histRows, restRows) {
       bestByChart.set(ck, { ex: ex(r), lamp: lamp(r) });
     }
     if (r[9] === null) addWaiting(notesWaitingByChart, ck, slot);
-    if (r[8] === null) addWaiting(bpWaitingByChart, JSON.stringify([ck, r[3]]), slot);
+    if (r[8] === null && r[3] !== null) addWaiting(bpWaitingByChart, JSON.stringify([ck, r[3]]), slot);
   };
   // Rebuild indices from already canonicalized rows. mergeScoreHistory validated
   // the complete history; its unique non-DBR natural keys make these maps lossless.
@@ -239,6 +239,31 @@ export function replayScoreBuffer(histRows, restRows) {
           }
           if (waiting.size === 0) bpWaitingByChart.delete(bpKey);
         }
+      }
+    }
+  }
+
+  for (const item of ordered) {
+    const row = item.row;
+    if (row[4] === -10) continue;
+    const ck = chartKey(row);
+    const notes = notesWaitingByChart.get(ck);
+    if (notes && row[9] !== null) {
+      for (const slot of notes) {
+        result[slot][9] = row[9];
+        notes.delete(slot);
+      }
+      if (notes.size === 0) notesWaitingByChart.delete(ck);
+    }
+    if (row[3] !== null && row[8] !== null) {
+      const bpKey = JSON.stringify([ck, row[3]]);
+      const waiting = bpWaitingByChart.get(bpKey);
+      if (waiting) {
+        for (const slot of waiting) {
+          result[slot][8] = row[8];
+          waiting.delete(slot);
+        }
+        if (waiting.size === 0) bpWaitingByChart.delete(bpKey);
       }
     }
   }

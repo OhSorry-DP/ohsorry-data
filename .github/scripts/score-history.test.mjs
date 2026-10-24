@@ -271,6 +271,53 @@ test('replay long same-chart sequence matches sequential merge and preserves inp
   assert.deepEqual(rows, beforeRows);
 });
 
+test('replay final NULL fill follows score_id order, separates chart and EX, and preserves known values', () => {
+  const mk = (id, date, exScore, bp, notes, overrides = {}) => rest(id, {
+    song_id: 1, diff: 0, played_version: 30, play_style: 1, lamp: id === 30 ? 5 : 2,
+    date: `${date}T00:00:00Z`, date_kst: date, ex_score: exScore, bp, note_count: notes, ...overrides,
+  });
+  const pairs = [
+    [mk(1, '2026-10-09', 1862, 115, 1400), mk(2, '2026-10-23', 1862, null, null, { lamp: 3 })],
+    [mk(3, '2026-10-11', 2072, 100, 1500), mk(4, '2026-10-23', 2072, null, null, { lamp: 3 })],
+  ];
+  for (const [older, later] of pairs) {
+    const result = replayScoreBuffer([], [later, older]);
+    assert.deepEqual(result.map((r) => r.slice(0, 8)), [older, later].map((r) => [
+      r.song_id, r.diff, r.lamp, r.ex_score, r.played_version, r.date, r.date_kst, r.play_style,
+    ]));
+    assert.deepEqual(result.map((r) => r[8]), [older.bp, older.bp]);
+    assert.deepEqual(replayScoreBuffer(result, [older, later]), result);
+  }
+
+  const split = replayScoreBuffer([], [mk(5, '2026-10-09', 100, 7, 1000),
+    mk(6, '2026-10-23', 110, null, null)]);
+  assert.deepEqual(split.map((r) => r.slice(8)), [[7, 1000], [null, 1000]]);
+
+  const candidates = [mk(10, '2026-10-09', 100, 9, 1000), mk(20, '2026-10-10', 200, 7, 1200),
+    mk(30, '2026-10-23', 200, null, null, { lamp: 5 })];
+  const expected = replayScoreBuffer([], candidates);
+  assert.deepEqual(expected.map((r) => r.slice(8)), [[9, 1000], [7, 1200], [7, 1000]]);
+  assert.deepEqual(replayScoreBuffer([], [...candidates].reverse()), expected);
+
+  const isolated = replayScoreBuffer([row(1, 0, 4, 100, 30, d, '2026-10-20', 1, 0, 0),
+    row(2, 0, 4, null, 30, d, '2026-10-20', 1, null, null)], [
+    mk(40, '2026-10-21', 100, 9, 900, { played_version: 31 }),
+    mk(41, '2026-10-21', 100, 8, 800, { play_style: 0 }),
+    mk(42, '2026-10-21', null, 6, 700, { song_id: 2, lamp: 5 }),
+  ]);
+  assert.deepEqual(isolated[0].slice(8), [0, 0]);
+  assert.deepEqual(isolated[1].slice(8), [null, 700]);
+  assert.deepEqual(isolated.slice(2).map((r) => r.slice(8)), [[9, 900], [8, 800], [6, 700]]);
+  const sameEx = mergeScoreHistory([row(2, 0, 2, 100, 30, d, '2026-10-20', 1, null, 500)], [
+    row(2, 0, 5, 100, 30, d2, '2026-10-20', 1, 8, null),
+  ]);
+  assert.deepEqual(sameEx[0].slice(8), [8, 500]);
+  const changedEx = mergeScoreHistory([row(3, 0, 2, 100, 30, d, '2026-10-20', 1, 8, 500)], [
+    row(3, 0, 5, 110, 30, d2, '2026-10-20', 1, null, null),
+  ]);
+  assert.deepEqual(changedEx[0].slice(8), [null, 500]);
+});
+
 function assertUploadFilter(hist, incoming, expected) {
   const baseline = mergeScoreHistory(hist, []);
   const selected = filterScoreHistoryRows(hist, incoming);

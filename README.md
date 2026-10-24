@@ -124,6 +124,10 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-24 — replay 잔여 NULL 보충(71317103 비멱등 해결)
+
+- `replayScoreBuffer` 순차 처리 뒤 버퍼를 score_id 순으로 한 번 더 훑어 남은 NULL 만 채운다(note_count 는 같은 채보, BP 는 같은 채보·같은 non-NULL EX, 첫 non-NULL 우선). 날짜를 넘는 보충은 옛 SQL 16번부터 이어진 정본 규칙인데, 뒤에 새로 생긴 행(같은 EX·램프 상승·BP 없음)은 첫 replay 에서 못 채워져 재적용 때 값이 바뀌었다. 71317103 운영 입력: 5,472행·멱등·buildCandidate 통과·10-23 행 BP 115·100. 업로더 동기화 블록은 변경 없음.
+
 ### 2026-10-24 — Edge 빠른 경로 1단계: 운영 읽기 전용 그림자 대조
 
 - `dump-fast-core.mjs` 에 `prepareFastDump` 추가 — 별칭 정규화 → replay → 후보 검증 → DP/SP 그리드·Recent 를 기존 덤프와 같은 순서로 계산하고 `fastPatch`(dp·sp·dpRecent·spRecent·fastGeneration·histRevision)를 만든다. 입력은 전부 주입(env·네트워크 없음).
