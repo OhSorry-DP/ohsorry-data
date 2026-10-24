@@ -149,9 +149,89 @@ export function replayScoreBuffer(histRows, restRows) {
       row.date, row.date_kst, row.play_style, row.bp, row.note_count] };
   }).sort((a, b) => a.id - b.id);
 
-  let acc = histRows;
-  for (const { row } of ordered) acc = mergeScoreHistory(acc, [row]);
-  return acc;
+  // Preserve the historical empty-REST fast path, including its lack of validation.
+  if (ordered.length === 0) return histRows;
+
+  // The first merge preserves canonical validation order and exact error messages.
+  let result = mergeScoreHistory(histRows, [ordered[0].row]);
+  const slotsByNatural = new Map();
+  const bestByChart = new Map();
+  const notesWaitingByChart = new Map();
+  const bpWaitingByChart = new Map();
+  const addWaiting = (map, key, slot) => {
+    const slots = map.get(key) ?? new Set();
+    slots.add(slot);
+    map.set(key, slots);
+  };
+  const removeWaiting = (map, key, slot) => {
+    const slots = map.get(key);
+    if (!slots) return;
+    slots.delete(slot);
+    if (slots.size === 0) map.delete(key);
+  };
+  const register = (slot) => {
+    const r = result[slot];
+    if (r[4] === -10) return;
+    const ck = chartKey(r);
+    const nk = naturalKey(r);
+    slotsByNatural.set(nk, slot);
+    const best = bestByChart.get(ck);
+    if (!best || ex(r) > best.ex || (ex(r) === best.ex && lamp(r) > best.lamp)) {
+      bestByChart.set(ck, { ex: ex(r), lamp: lamp(r) });
+    }
+    if (r[9] === null) addWaiting(notesWaitingByChart, ck, slot);
+    if (r[8] === null) addWaiting(bpWaitingByChart, JSON.stringify([ck, r[3]]), slot);
+  };
+  // Rebuild indices from already canonicalized rows. mergeScoreHistory validated
+  // the complete history; its unique non-DBR natural keys make these maps lossless.
+  for (let i = 0; i < result.length; i += 1) register(i);
+
+  for (let n = 1; n < ordered.length; n += 1) {
+    const row = normalize(ordered[n].row, 'incoming', 0).row;
+    if (row[4] !== -10) {
+      const ck = chartKey(row);
+      const best = bestByChart.get(ck);
+      if (!best || !(best.ex > ex(row) || (best.ex === ex(row) && best.lamp >= lamp(row)))) {
+        const nk = naturalKey(row);
+        const slot = slotsByNatural.get(nk);
+        if (slot === undefined) {
+          const appended = [...row];
+          result.push(appended);
+          register(result.length - 1);
+        } else {
+          const old = result[slot];
+          const oldChart = chartKey(old);
+          removeWaiting(notesWaitingByChart, oldChart, slot);
+          removeWaiting(bpWaitingByChart, JSON.stringify([oldChart, old[3]]), slot);
+          const replacement = [...row];
+          replacement[8] = row[8] ?? (row[3] !== null && row[3] === old[3] ? old[8] : null);
+          replacement[9] = row[9] ?? old[9];
+          result[slot] = replacement;
+          register(slot);
+        }
+      }
+      const notes = notesWaitingByChart.get(ck);
+      if (notes && row[9] !== null) {
+        for (const slot of notes) {
+          result[slot][9] = row[9];
+          notes.delete(slot);
+        }
+        if (notes.size === 0) notesWaitingByChart.delete(ck);
+      }
+      if (row[3] !== null && row[8] !== null) {
+        const bpKey = JSON.stringify([ck, row[3]]);
+        const waiting = bpWaitingByChart.get(bpKey);
+        if (waiting) {
+          for (const slot of waiting) {
+            result[slot][8] = row[8];
+            waiting.delete(slot);
+          }
+          if (waiting.size === 0) bpWaitingByChart.delete(bpKey);
+        }
+      }
+    }
+  }
+  return result;
 }
 
 /** Build the SQL make_grid_data shape from history rows without mutating inputs. */

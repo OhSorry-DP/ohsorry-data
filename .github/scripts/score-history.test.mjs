@@ -104,6 +104,25 @@ test('누적 재생은 여러 요청의 동일 채보를 허용하고 단일 요
   assert.throws(() => replayScoreBuffer([], [rest(10), rest(10)]), /duplicate score_id/);
 });
 
+test('첫 슬롯이 센티널 이하인 chart도 동점 incoming을 차단하고 순차 merge와 일치', () => {
+  const mk = (id, date, exScore, lampValue) => ({
+    score_id: id, iidx_id: 'x', song_id: 1000, diff: 3, lamp: lampValue,
+    ex_score: exScore, played_version: 34, date: `${date}T00:00:00+00:00`,
+    date_kst: date, play_style: 1, bp: null, note_count: null,
+  });
+  for (const [exScore, lampValue] of [[null, 0], [null, null], [null, -1]]) {
+    const older = mk(1, '2026-10-01', exScore, lampValue);
+    const incoming = mk(2, '2026-10-02', exScore, lampValue);
+    const replayed = replayScoreBuffer([], [older, incoming]);
+    const sequential = [older, incoming].reduce((history, item) => mergeScoreHistory(history, [[
+      item.song_id, item.diff, item.lamp, item.ex_score, item.played_version, item.date,
+      item.date_kst, item.play_style, item.bp, item.note_count,
+    ]]), []);
+    assert.equal(replayed.length, 1);
+    assert.equal(JSON.stringify(replayed), JSON.stringify(sequential));
+  }
+});
+
 test('누적 재생은 같은 날 개선 결과로 슬롯을 교체하고 NULL BP·notes를 보충', () => {
   const hist = [row(100, 3, 5, 2000, 33, '2026-10-22T01:02:03.123456+00:00', '2026-10-22', 1, null, null)];
   const result = replayScoreBuffer(hist, [rest(12, { ex_score: 2100, lamp: 6, bp: 0, note_count: 1500 })]);
@@ -155,6 +174,65 @@ test('기존 저점 이력·슬롯 순서·8열 확장·DBR 행을 보존', () =
   const result = replayScoreBuffer(hist, [rest(44)]);
   assert.deepEqual(result, [low, [...legacy, null, null], dbr, row(100, 3, 5, 2000, 33,
     rest(44).date, '2026-10-22', 1, null, 1500)]);
+});
+
+test('replay empty REST preserves invalid and legacy history by identity', () => {
+  for (const hist of [[[1]], [[1, 0, 4, 100, 30, d, '2026-10-20', 1, null, null]]]) {
+    assert.equal(replayScoreBuffer(hist, []), hist);
+  }
+});
+
+test('replay preserves REST and history validation order and incoming index zero', () => {
+  assert.throws(() => replayScoreBuffer([[1]], [{ score_id: -1 }]), /score_id must be a safe integer/);
+  assert.throws(() => replayScoreBuffer([[1]], [rest(1)]), /hist row at index 0/);
+  assert.throws(() => replayScoreBuffer([], [rest(1), rest(2, { song_id: NaN })]), /column 0 must be a finite integer/);
+});
+
+test('replay BP fill targets current same-day slot after EX replacement', () => {
+  const hist = [row(1, 0, 4, 100, 30, d, '2026-10-20', 1, null, null)];
+  const result = replayScoreBuffer(hist, [
+    rest(1, { song_id: 1, diff: 0, played_version: 30, date: d, date_kst: '2026-10-20', ex_score: 200, bp: null }),
+    rest(2, { song_id: 1, diff: 0, played_version: 30, date: d2, date_kst: '2026-10-20', ex_score: 100, bp: 7 }),
+  ]);
+  assert.equal(result[0][3], 200);
+  assert.equal(result[0][8], null);
+});
+
+test('replay preserves same EX BP and lets ignored incoming rows fill NULLs with zero', () => {
+  const hist = [row(1, 0, 4, 100, 30, d, '2026-10-20', 1, 5, null)];
+  const result = replayScoreBuffer(hist, [
+    rest(1, { song_id: 1, diff: 0, played_version: 30, ex_score: 100, lamp: 7, bp: 9, note_count: 0 }),
+    rest(2, { song_id: 1, diff: 0, played_version: 30, ex_score: 90, lamp: 7, bp: 4, note_count: 120 }),
+  ]);
+  assert.deepEqual(result[0].slice(8), [5, 0]);
+});
+
+test('replay preserves DBR, seasons, styles, slot order and source timestamps', () => {
+  const dbr = row(7, 0, 7, 500, -10, d, '2026-10-20', 1);
+  const legacy = row(1, 0, 4, 100, 33, d, '2026-10-20', 1).slice(0, 8);
+  const hist = [dbr, legacy, row(1, 0, 4, 100, 34, d, '2026-10-20', 1),
+    row(1, 0, 4, 100, 0, d, '2026-10-20', 1), row(1, 0, 4, 100, 33, d, '2026-10-20', 0)];
+  const result = replayScoreBuffer(hist, [rest(1, { song_id: 2 }), rest(2, { song_id: 3 })]);
+  assert.deepEqual(result.slice(0, 5), [dbr, [...legacy, null, null], ...hist.slice(2)]);
+  assert.equal(result[1][5], d);
+});
+
+test('replay long same-chart sequence matches sequential merge and preserves inputs', () => {
+  const hist = [row(1, 0, 4, 10, 30, d, '2026-10-20', 1, null, null)];
+  const rows = Array.from({ length: 80 }, (_, i) => rest(i + 1, {
+    song_id: 1, diff: 0, played_version: 30, play_style: 1,
+    date: `2026-10-${String(20 + Math.floor(i / 20)).padStart(2, '0')}T03:12:45Z`,
+    date_kst: `2026-10-${String(20 + Math.floor(i / 20)).padStart(2, '0')}`,
+    ex_score: 10 + i, lamp: i % 8, bp: i % 3 === 0 ? i : null, note_count: i % 5 === 0 ? i : null,
+  }));
+  const beforeHist = structuredClone(hist);
+  const beforeRows = structuredClone(rows);
+  let expected = hist;
+  for (const item of rows) expected = mergeScoreHistory(expected, [[item.song_id, item.diff, item.lamp,
+    item.ex_score, item.played_version, item.date, item.date_kst, item.play_style, item.bp, item.note_count]]);
+  assert.deepEqual(replayScoreBuffer(hist, rows), expected);
+  assert.deepEqual(hist, beforeHist);
+  assert.deepEqual(rows, beforeRows);
 });
 
 function assertUploadFilter(hist, incoming, expected) {
