@@ -124,6 +124,10 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-24 — dump-user 단계별 시간 로그
+
+- `dump-user.mjs` 를 CLI 로 실행할 때 첫 로그 「이전 덤프 읽음」 전까지의 단계별 경과시간을 `[timing] <단계> <ms>ms` 로 출력한다(리소스 로드·준비 단계 R2/Supabase 읽기·페이지별 scores 조회·hist/후보 PUT·병렬 조회 9항목·공식 계산·전체). 업로드 후 그리드·리센트 반영 지연(중앙값 약 2분·최대 약 6분)의 원인 측정용이며 동작 변경은 없다. 모듈 import·테스트에서는 출력하지 않는다.
+
 ### 2026-10-24 — 버퍼화 5단계: hist 기반 곡별 랭킹·1위 집계
 
 - `dump-chart-rankings.yml` 이 매 30분·수동 실행마다 전체 hist를 읽어 곡별 랭킹과 `first-place-winners.json` 을 함께 생산한다. 입력 캐시는 없고 출력만 해시 비교해 변경된 ranking을 PUT하며, 1위 내용이 같으면 `_v` 를 유지한다. `dump-users-list.yml` 은 30분 songs, 일일·수동 users 관련 목록과 songs를 담당한다. `dump-user` 의 dirty marker와 `dump-chart-rankings` 의 기존 일일 18:20·증분 설명은 현행이 아니다.

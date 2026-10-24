@@ -68,9 +68,12 @@ const slimRow = (r) => { const o = {}; for (const k of SCORE_KEEP) if (r[k] !== 
 //   그게 곧 데이터 삭제다(users.star 사고와 같은 구조, 2026-09-04).
 async function readPreviousDump(id, r2, official = false) {
   try {
+    const sourceStarted = performance.now();
     const object = r2 ? await r2.read(`user/${id}.json`) : undefined;
     const text = r2 ? (object ? (object.bytes ?? object.body).toString('utf8') : null) : await getText(`user/${id}.json`);
+    logTiming('readPreviousDumpSource', sourceStarted);
     if (text === null) {
+      logTiming('beforePreviousDumpLog', cliStarted, 'missing=1');
       console.log('이전 덤프 없음(신규 유저, ' + id + ')');
       return { prevOk: true, prev: null };
     }
@@ -80,6 +83,7 @@ async function readPreviousDump(id, r2, official = false) {
         || !prev.user || typeof prev.user !== 'object' || Array.isArray(prev.user))) {
         throw new Error('이전 공식 user 덤프 형식 오류');
       }
+      logTiming('beforePreviousDumpLog', cliStarted);
       console.log('이전 덤프 읽음(' + id + ')');
       return { prevOk: true, prev };
     } catch (e) {
@@ -92,33 +96,58 @@ async function readPreviousDump(id, r2, official = false) {
   }
 }
 
+let cliStarted = null;
+function logTiming(stage, started, detail = '') {
+  if (cliStarted === null) return;
+  console.log(`[timing] ${stage} ${(performance.now() - started).toFixed(1)}ms${detail ? ` ${detail}` : ''}`);
+}
+
 export async function dumpUser(id, personaRes, opts = {}) {
   const preparing = process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1';
   const cumulative = process.env.SCORE_BUFFER_CUMULATIVE === '1';
-  const prepared = preparing ? await prepareOfficialHistory(id, personaRes, opts) : null;
-  if (preparing) personaRes = await officialResources(personaRes);
+  let prepared = null;
+  if (preparing) {
+    const started = performance.now();
+    prepared = await prepareOfficialHistory(id, personaRes, opts);
+    logTiming('prepareOfficialHistory', started);
+  } else logTiming('prepareOfficialHistory', performance.now(), 'skipped=1');
+  if (preparing) {
+    const started = performance.now();
+    personaRes = await officialResources(personaRes);
+    logTiming('officialResources', started);
+  }
   const eid = encodeURIComponent(id);
+  const parallelStart = performance.now();
+  const observe = (name, promise) => {
+    if (promise === null) { logTiming(name, parallelStart, 'elapsedFrom=parallelStart skipped=1'); return promise; }
+    if (!promise || typeof promise.then !== 'function') { logTiming(name, parallelStart, 'elapsedFrom=parallelStart'); return promise; }
+    promise.then(() => logTiming(name, parallelStart, 'elapsedFrom=parallelStart'), () => logTiming(name, parallelStart, 'elapsedFrom=parallelStart'));
+    return promise;
+  };
   let [user, radars, osPattern, dp, spResult, dpRecent, spRecent, prevResult, dpArrange] = await Promise.all([
     // dbr_pw 는 비밀(공개 repo·anon 노출 금지) → 명시 컬럼만 select(select=* 금지).
-    rest(`users?iidx_id=eq.${eid}&select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,date,native_star,sp_cpi,sp_star,sp_r_star,sp_r_star_model_id,sp_r_star_formula_version,plays`),
-    rest(`user_radars?iidx_id=eq.${eid}&select=*`),
+    observe('users', rest(`users?iidx_id=eq.${eid}&select=iidx_id,dj_name,star,r_star,ereter_star,sp_rank,dp_rank,date,native_star,sp_cpi,sp_star,sp_r_star,sp_r_star_model_id,sp_r_star_formula_version,plays`)),
+    observe('userRadars', rest(`user_radars?iidx_id=eq.${eid}&select=*`)),
     // SP(play_style=0)/DP(1) 두 행 모두 — SP 분석탭 피처별 랭킹용. 소비처(웹 osPatternFromRows·
     //   merge-user-into-list)는 반드시 play_style 로 골라 쓸 것(순서에 기대면 SP↔DP 혼입).
-    rest(`user_ohsorry_radars?iidx_id=eq.${eid}&select=*`),
-    preparing ? null : rpcGrid(id, 1),
-    preparing ? null : rpcGrid(id, 0).then((rows) => ({ ok: true, rows })).catch((error) => ({ ok: false, error })),
-    cumulative ? recentHistoryFromRows(prepared.histRows, 1) : rpcUpdateHistory(id, 1).catch(() => null),
-    cumulative ? recentHistoryFromRows(prepared.histRows, 0) : rpcUpdateHistory(id, 0).catch(() => null),
-    readPreviousDump(id, opts.r2, preparing),
-    fetchDpArrange(id),   // 실패는 DP grid와 같이 덤프 전체 중단 — 배치 없음으로 대체하지 않는다.
+    observe('userOhsorryRadars', rest(`user_ohsorry_radars?iidx_id=eq.${eid}&select=*`)),
+    observe('rpcGridDp', preparing ? null : rpcGrid(id, 1)),
+    observe('rpcGridSp', preparing ? null : rpcGrid(id, 0).then((rows) => ({ ok: true, rows })).catch((error) => ({ ok: false, error }))),
+    observe('recentDp', cumulative ? recentHistoryFromRows(prepared.histRows, 1) : rpcUpdateHistory(id, 1).catch(() => null)),
+    observe('recentSp', cumulative ? recentHistoryFromRows(prepared.histRows, 0) : rpcUpdateHistory(id, 0).catch(() => null)),
+    observe('readPreviousDump', readPreviousDump(id, opts.r2, preparing)),
+    observe('fetchDpArrange', fetchDpArrange(id)),   // 실패는 DP grid와 같이 덤프 전체 중단 — 배치 없음으로 대체하지 않는다.
   ]);
+  logTiming('parallelTotal', parallelStart);
   const { prevOk, prev } = prevResult;
   let inputs = null;
   if (preparing) {
     if (!prevOk) throw new Error(`이전 공식 덤프 상태 모름(${id})`);
     inputs = historyInputs(id, prepared.histRows, prepared.songs, dpArrange, personaRes);
+    const officialStarted = performance.now();
     const official = calculateOfficialScores({ id, inputs, R: personaRes,
       previousUser: prev ? prev.user : user[0], previousOsPattern: prev ? prev.osPattern : osPattern });
+    logTiming('calculateOfficialScores', officialStarted);
     if (user[0]) user = [{ ...user[0], ...official.userFields }];
     osPattern = official.osPattern;
     dp = inputs.dp;
@@ -262,9 +291,13 @@ export async function prepareOfficialHistory(id, personaRes, opts = {}) {
   const file = path.resolve(opts.histFile ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'hist', `${id}.json`));
   preparedFiles.delete(file);
   const r2 = opts.r2 ?? historyClient();
+  let started = performance.now();
   const previous = await r2.read(`hist/${id}.json`);
+  logTiming('readHist', started);
   if (!previous) {
+    started = performance.now();
     const user = await readPreviousDump(id, r2, true);
+    logTiming('readPreviousDumpMissingHist', started);
     if (!user.prevOk || user.prev) throw new Error(`missing hist for existing or unknown user ${id}`);
   }
   const oldRows = previous ? JSON.parse((previous.bytes ?? previous.body).toString('utf8')) : [];
@@ -276,24 +309,34 @@ export async function prepareOfficialHistory(id, personaRes, opts = {}) {
   if (!cumulative && !fetched.histRows.length && oldRows.some((row) => !Array.isArray(row) || row[4] !== -10)) {
     throw new Error(`hist 급감(${id}): ${oldRows.length}행 → 0행 — 기존본 유지`);
   }
+  started = performance.now();
   const songsObject = opts.songs === undefined ? await r2.read('songs.json') : null;
+  logTiming('readSongs', started, opts.songs === undefined ? '' : 'skipped=1');
   const songs = opts.songs ?? (songsObject ? JSON.parse((songsObject.bytes ?? songsObject.body).toString('utf8')) : null);
   if (!Array.isArray(songs)) throw new Error('R2 songs 응답이 배열이 아닙니다');
+  started = performance.now();
   const aliasesObject = await r2.read('meta/song-aliases.json');
+  logTiming('readSongAliases', started);
   if (!aliasesObject) throw new Error('missing meta/song-aliases.json');
   const aliasesBytes = Buffer.from(aliasesObject.bytes ?? aliasesObject.body, 'utf8');
   const aliases = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(aliasesBytes));
   const previousHistRows = cumulative ? oldRows : [];
+  started = performance.now();
   const normalized = normalizeAliasInputs({ histRows: previousHistRows, restRows, aliases, songs });
   const histRows = replayScoreBuffer(normalized.histRows, normalized.restRows);
+  logTiming('normalizeReplay', started, `rows=${histRows.length}`);
   const histBytes = Buffer.from(JSON.stringify(histRows), 'utf8');
   // Validate the original fingerprints and replay evidence before any mutation.
+  started = performance.now();
   buildCandidate({ iidxId: id, restRows, previousHistRows, aliases, aliasesBytes, songs,
     publishedHistBytes: histBytes, downloadedHistBytes: histBytes });
+  logTiming('buildCandidate', started);
   if (opts.publishHist !== false) {
     // Conflicts and uncertain PUT outcomes propagate. The next run rereads current
     // history and aliases and recomputes from the original buffer, never stale bytes.
+    started = performance.now();
     await publishPreparedHist(id, { restRows, histBytes, r2, previous, previousHistRows, aliases, aliasesBytes, songs });
+    logTiming('publishPreparedHist', started);
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, histBytes);
@@ -317,11 +360,15 @@ export async function fetchUserHist(id) {
 }
 
 export async function fetchUserHistWithScores(id) {
+  const started = performance.now();
   const eid = encodeURIComponent(id);
-  const histRows = [], restRows = []; let off = 0;
+  const histRows = [], restRows = []; let off = 0, pages = 0;
   while (true) {
+    const pageStarted = performance.now();
     const rows = await rest(`scores?iidx_id=eq.${eid}&played_version=neq.-10&select=score_id,iidx_id,${HIST_COLS.join(',')}`
       + `&order=score_id.asc&limit=1000&offset=${off}`);
+    pages++;
+    logTiming('fetchUserHistPage', pageStarted, `rows=${Array.isArray(rows) ? rows.length : 'invalid'} pages=${pages}`);
     if (!Array.isArray(rows)) throw new Error('scores 응답이 배열이 아닙니다');
     for (const r of rows) {
       restRows.push(r);
@@ -329,6 +376,7 @@ export async function fetchUserHistWithScores(id) {
     }
     if (rows.length < 1000) break; off += 1000;
   }
+  logTiming('fetchUserHistWithScores', started, `rows=${histRows.length} pages=${pages}`);
   return { histRows, restRows };
 }
 
@@ -336,16 +384,26 @@ async function publishPreparedHist(id, { restRows, histBytes, previous, r2, prev
   if (!/^[A-Za-z0-9]+$/.test(id)) throw new Error('잘못된 iidx_id 형식');
   const histKey = `hist/${id}.json`;
   const histEtag = previous ? previous.etag : null;
+  let started = performance.now();
   await r2.put(histKey, histBytes, histEtag);
+  logTiming('publishHistPut', started);
+  started = performance.now();
   const downloaded = await r2.read(histKey);
+  logTiming('publishHistReadback', started);
   if (!downloaded) throw new Error(`hist 재다운로드 실패(${histKey})`);
   const downloadedBytes = downloaded.bytes ?? Buffer.from(downloaded.body, 'utf8');
+  started = performance.now();
   const candidate = buildCandidate({ iidxId: id, restRows, previousHistRows, aliases, aliasesBytes, songs,
     publishedHistBytes: histBytes, downloadedHistBytes: downloadedBytes });
+  logTiming('buildPublishedCandidate', started);
   const candidateKey = `meta/scores-delete-${id}.json`;
+  started = performance.now();
   const existingCandidate = await r2.read(candidateKey);
+  logTiming('readExistingCandidate', started);
   const candidateBody = Buffer.from(JSON.stringify(candidate), 'utf8');
+  started = performance.now();
   await r2.put(candidateKey, candidateBody, existingCandidate ? existingCandidate.etag : null);
+  logTiming('publishCandidatePut', started);
   return { candidateKey, candidate };
 }
 
@@ -417,11 +475,14 @@ export { loadPersonaResources };
 
 // CLI 로 직접 실행할 때만 동작 — import 시엔 아래 블록을 타지 않는다(dump-data-repo.js 가 import 함).
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  cliStarted = performance.now();
   const ids = process.argv.slice(2).filter(Boolean);
   if (!ids.length) { console.error('iidx_id 인자 없음'); process.exit(1); }
   fs.mkdirSync('user', { recursive: true });
   fs.mkdirSync('hist', { recursive: true });
+  const resourcesStarted = performance.now();
   const personaRes = await loadPersonaResources({ official: process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1' });
+  logTiming('loadPersonaResources', resourcesStarted);
   for (const id of ids) {
     if (!/^[A-Za-z0-9]+$/.test(id)) { console.error('잘못된 iidx_id 형식:', id); process.exit(1); }
     const data = await dumpUser(id, personaRes, { deferPersona: true });
@@ -433,4 +494,5 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     console.log('덤프:', id, '| dp', data.dp.length, 'sp', data.sp.length, '| persona', data.persona ? 'OK' : '없음', '| spPersona', data.spPersona ? 'OK' : '없음',
       '| hist', h.rows + '행', h.rebuilt ? '(재생성)' : '(변경없음)');
   }
+  logTiming('mainTotal', cliStarted);
 }
