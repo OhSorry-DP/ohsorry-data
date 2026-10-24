@@ -39,6 +39,16 @@ test('date memo: 성공값 재사용, 실패 비저장, day와 instant 상한 �
     assert.equal(second.constructor, first.constructor);
     assert.equal(second.message, first.message);
   }
+  const invalidDayCapture = () => {
+    try { mergeScoreHistory([], [row(1, 0, 1, 1, 1, validInstant, '2026-02-30')]); }
+    catch (error) { return error; }
+    assert.fail('expected invalid date_kst to throw');
+  };
+  const firstInvalidDay = invalidDayCapture();
+  const secondInvalidDay = invalidDayCapture();
+  assert.equal(firstInvalidDay.constructor, secondInvalidDay.constructor);
+  assert.equal(firstInvalidDay.message, 'invalid date_kst');
+  assert.equal(secondInvalidDay.message, 'invalid date_kst');
   const validDays = Array.from({ length: 32769 }, (_, index) =>
     new Date(Date.UTC(2000, 0, 1 + index)).toISOString().slice(0, 10));
   for (const value of validDays) assert.equal(historyInstant(`${value}T00:00:00Z`) >= 0n, true);
