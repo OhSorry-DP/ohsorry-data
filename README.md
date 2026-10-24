@@ -124,6 +124,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-24 — 덤프 완료 마커·역기록 중복 덤프 제거
+
+- `dump-user.yml`: user·hist 게시가 성공하면(누적 모드는 덤프 스텝의 hist 게시·검증을 인정) `pending/{id}.json` 에 `done`(게시한 user `_v` 원문)을 기록한다. `r2-client.mjs` `mergePendingDone` 이 기존 `since` 를 보존하고 `done` 을 뒤로 돌리지 않으며 ETag 조건부 PUT·충돌 시 재읽기(최대 3회). 마커 스텝은 실패해도 잡을 깨지 않는다(`continue-on-error`). 웹은 대기 중 이 작은 마커만 2초 간격으로 본다.
+- `write-official-user.mjs`: 공식값 역기록을 `upsert_user_official`(Admin `sql/37`, service_role 전용 래퍼)로 호출한다. users 트리거가 이 표지가 있는 쓰기만 웹훅을 건너뛰어, 역기록이 같은 유저 덤프를 한 번 더 띄워 앞 실행을 취소하던 문제가 없어진다. 업로더 쓰기는 그대로 덤프를 띄운다.
+- `cf/test/pending-poll.test.mjs`: pending 경로가 열거 감속 대상이 아니고 fresh 가 허용됨을 고정.
+
 ### 2026-10-24 — replay 잔여 NULL 보충(71317103 비멱등 해결)
 
 - `replayScoreBuffer` 순차 처리 뒤 버퍼를 score_id 순으로 한 번 더 훑어 남은 NULL 만 채운다(note_count 는 같은 채보, BP 는 같은 채보·같은 non-NULL EX, 첫 non-NULL 우선). 날짜를 넘는 보충은 옛 SQL 16번부터 이어진 정본 규칙인데, 뒤에 새로 생긴 행(같은 EX·램프 상승·BP 없음)은 첫 replay 에서 못 채워져 재적용 때 값이 바뀌었다. 71317103 운영 입력: 5,472행·멱등·buildCandidate 통과·10-23 행 BP 115·100. 업로더 동기화 블록은 변경 없음.
