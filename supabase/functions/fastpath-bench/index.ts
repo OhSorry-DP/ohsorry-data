@@ -3,6 +3,8 @@ import { replayScoreBuffer, gridFromHistory } from "../../../.github/scripts/sco
 import { buildCandidate } from "../../../.github/scripts/score-buffer.mjs";
 import { assembleUserDump, recentHistoryFromRows, HIST_COLS } from "../../../.github/scripts/dump-fast-core.mjs";
 import { createR2S3Adapter } from "../_shared/r2-s3.ts";
+import { Buffer } from "node:buffer";
+(globalThis as { Buffer?: typeof Buffer }).Buffer ??= Buffer; // score-buffer.mjs:133 이 Node 전역 Buffer 를 쓴다
 
 // Generated from the checked-in source bytes; node tests reject stale values.
 export const PROVENANCE = {
