@@ -124,6 +124,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-24 — Edge 경량안 L3 재작업: dump-user user 게시 세대 캡처·S3 CAS (기본 OFF)
+
+- `dump-fast-publish.mjs` 에 CLI 하위명령 `capture-generation`·`publish-actions-user`·`complete-actions-pending` 추가. `dump-user.yml` 은 `vars.FAST_DUMP_LIGHT_GUARD=1` 일 때만 dump 직전 pending 세대를 캡처하고, user 를 R2 S3 `If-Match`(신규 유저는 `If-None-Match: *`)로 게시해 Edge 가 먼저 올린 빠른 4필드를 되돌리지 않는다. 키는 `CLOUDFLARE_R2_ACCESS_KEY_ID`·`CLOUDFLARE_R2_SECRET_ACCESS_KEY`, 미설정이면 실패(REST 폴백 없음).
+- 1차 L3(aee0e37bc)는 if 블록 안 들여쓴 heredoc 종료 표지로 GUARD OFF 에서도 전 유저 bash 문법 오류를 내 되돌렸다. 재작업은 새 heredoc·인라인 JS 를 쓰지 않고, OFF 경로 본문은 89cacab16 과 같다.
+- `dump-fast-publish.test.mjs`: CLI 6건 + workflow 3건(OFF 본문 고정 대조·ON 순서, 모든 `run:` 블록 `bash -n` 실검사 — here-document 경고도 실패, WSL bash 거부·bash 없으면 실패). 변이 5종(들여쓴 heredoc·OFF 본문 1글자·capture id·If-None-Match·pending R2 키) 검출 확인.
+
 ### 2026-10-24 — 덤프 완료 마커·역기록 중복 덤프 제거
 
 - `dump-user.yml`: user·hist 게시가 성공하면(누적 모드는 덤프 스텝의 hist 게시·검증을 인정) `pending/{id}.json` 에 `done`(게시한 user `_v` 원문)을 기록한다. `r2-client.mjs` `mergePendingDone` 이 기존 `since` 를 보존하고 `done` 을 뒤로 돌리지 않으며 ETag 조건부 PUT·충돌 시 재읽기(최대 3회). 마커 스텝은 실패해도 잡을 깨지 않는다(`continue-on-error`). 웹은 대기 중 이 작은 마커만 2초 간격으로 본다.
