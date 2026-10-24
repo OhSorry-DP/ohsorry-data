@@ -12,8 +12,8 @@ export const PROVENANCE = {
   dirty: true,
   hashes: {
     songAliases: "b1b8f38b0e1a00fb992de4ca30d5f2941f8b394fe5e9154a184847eebb55859d",
-    scoreHistory: "1ad1e34c9a08b6a0b20b1d231283660766fcf79141c213f2d6d70896198e0079",
-    scoreBuffer: "3e03ababebf893b756278814d9cdde54c001e957f0e4b9d5b5e70d38dc3b95ea",
+    scoreHistory: "de73b9c44592b7d243a6c172d2d7196aae717c651a94bf0a6742dc6257dc97d3",
+    scoreBuffer: "27a51fbed4f84bbb115688c35fae6a85bbd5c0eae081400a671d0a21f8c2ceb6",
     dumpFastCore: "8363bdb08e08b90d1f113a6d2ac03a7a029fc99f7bc9fa283b6512fec5e6db57",
     r2S3: "cc103c84e6747549284d2c25282f52fb6de9e27643527d38b7942c1dbc707890",
     denoJson: "fc2f55ef8479de38a49d702230d5a9759e1bc43fee68e5a62024c30cf2735d1d",

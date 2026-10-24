@@ -26,6 +26,33 @@ test('1. nullable 키 누락은 거부하고 명시 null은 허용한다', () =>
   assert.equal(candidateFor().rows[0].note_count, 1500);
 });
 
+test('score buffer date memo: 성공값 재사용, 실패 비저장, 각 캐시 상한 퇴출', async () => {
+  const { historyInstant } = await import('./score-history.mjs');
+  const validDay = '2026-10-23';
+  const validInstant = `${validDay}T03:12:45.123456+00:00`;
+  const expected = historyInstant(validInstant);
+  assert.equal(historyInstant(validInstant), expected);
+  for (const value of ['invalid-date', '2026-10-24T25:00:00Z']) {
+    const capture = () => {
+      try { rowsFromRest([restObject(1, { date: value })], iidxId); }
+      catch (error) { return error; }
+      assert.fail('expected invalid date input to throw');
+    };
+    const first = capture();
+    const second = capture();
+    assert.equal(second.constructor, first.constructor);
+    assert.equal(second.message, first.message);
+  }
+  const validDays = Array.from({ length: 32769 }, (_, index) =>
+    new Date(Date.UTC(2000, 0, 1 + index)).toISOString().slice(0, 10));
+  for (const value of validDays) {
+    const date = `${value}T00:00:00Z`;
+    assert.equal(rowsFromRest([restObject(1, { date, date_kst: value })], iidxId)[0].row[5], date);
+  }
+  assert.equal(historyInstant(validInstant), expected);
+  assert.equal(rowsFromRest([restObject(1, { date: validInstant, date_kst: validDay })], iidxId)[0].row[5], validInstant);
+});
+
 test('2. date 마이크로초 원문, 사용자 일치, DBR 보존과 안전 정수를 검사한다', () => {
   assert.equal(candidateFor().rows[0].date, fixtureDate);
   assert.throws(() => candidateFor({ rest: [restObject(12345, { iidx_id: 'other' })] }), /iidx_id differs/);

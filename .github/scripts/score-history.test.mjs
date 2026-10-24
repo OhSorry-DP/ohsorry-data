@@ -22,6 +22,32 @@ test('8열 확장, 빈 입력, 입력 불변, 10열 유지 및 DBR 슬롯 보존
   assert.notEqual(result, hist);
 });
 
+test('date memo: 성공값 재사용, 실패 비저장, day와 instant 상한 퇴출', async () => {
+  const { historyInstant } = await import('./score-history.mjs');
+  const validDay = '2026-10-23';
+  const validInstant = `${validDay}T03:12:45.123456+00:00`;
+  const expected = historyInstant(validInstant);
+  assert.equal(historyInstant(validInstant), expected);
+  for (const value of ['invalid-date', '2026-10-24T25:00:00Z']) {
+    const capture = () => {
+      try { historyInstant(value); }
+      catch (error) { return error; }
+      assert.fail('expected invalid date input to throw');
+    };
+    const first = capture();
+    const second = capture();
+    assert.equal(second.constructor, first.constructor);
+    assert.equal(second.message, first.message);
+  }
+  const validDays = Array.from({ length: 32769 }, (_, index) =>
+    new Date(Date.UTC(2000, 0, 1 + index)).toISOString().slice(0, 10));
+  for (const value of validDays) assert.equal(historyInstant(`${value}T00:00:00Z`) >= 0n, true);
+  assert.equal(historyInstant(validInstant), expected);
+  for (const value of validDays) assert.equal(mergeScoreHistory([], [row(1, 0, 1, 1, 1,
+    `${value}T00:00:00Z`, value)]).length, 1);
+  assert.equal(mergeScoreHistory([], [row(1, 0, 1, 1, 1, validInstant, validDay)]).length, 1);
+});
+
 test('최초 append, 열등·동점 무시, EX 우선 및 같은 EX의 램프 향상', () => {
   const hist = [row(1, 0, 4, 100)];
   const first = mergeScoreHistory(hist, [row(2, 0, 2, 50)]);
