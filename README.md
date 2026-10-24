@@ -124,6 +124,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-24 — 날짜 파싱 메모·Edge 측정 함수·dump-fast-core
+
+- `score-history.mjs`(업로더 동기화 블록 정본)·`score-buffer.mjs` 의 `day`·`instant` 가 성공한 파싱 결과만 `Map` 에 메모한다(각 상한 32,768개, 넘으면 비움, 실패 입력 비저장 — 예외 동일). CPU 프로파일상 날짜 파싱이 병합·후보 검증 CPU 의 약 57%였다. 6,259행 normalize+replay+buildCandidate 0.41~0.45초 → 0.14~0.15초(A머신), 옛/새 대조 불일치 0, 실패 입력 캐시 변이 검출 확인. 크롤러 `dbConn.js`·Admin `batchAcUsers.js`·INF `supabaseSync.ts` 사본도 같은 줄로 맞췄다.
+- `dump-fast-core.mjs`: `slimRow`·`recentHistoryFromRows`·user 조립을 env 없는 순수 모듈로 옮겼다(dump-user 출력 동일). Edge 빠른 경로와 Actions 가 같은 코드를 쓰기 위한 정본.
+- `supabase/functions/fastpath-bench`·`_shared/r2-s3.ts`: Supabase Edge 측정 전용 함수(DB 미접근·`verify_jwt`). 10-24 도쿄 실측(메모 전) 6,460행 계산 p50 0.80~1.35초, buildCandidate 2회가 75%, 48회 중 1회 CPU 2초 초과. 측정 후 삭제 예정. Deno 에는 Node 전역 `Buffer` 가 없어 진입점에서 `node:buffer` 를 공급한다.
+
 ### 2026-10-24 — hist 병합 O(n²) 제거
 
 - `replayScoreBuffer` 가 REST 행마다 누적 hist 전체를 `mergeScoreHistory` 로 재검증·복사하던 구조를 호출별 인덱스(naturalKey→슬롯, chartKey→best·NULL 보충 대기)로 바꿨다. 첫 행은 기존 `mergeScoreHistory` 로 처리해 검증 순서·예외 메시지를 보존한다. 별칭 충돌 그룹 재생(`normalizeAliasInputs`)도 같은 replay 를 쓴다. 업로더 공유 동기화 블록과 `buildCandidate` 검증은 변경 없음.
