@@ -46,7 +46,7 @@ export function createR2S3Adapter(options: R2S3Options, AwsClientImpl: typeof Aw
   const signer = new AwsClientImpl({ accessKeyId, secretAccessKey, region: "auto", service: "s3" });
   const endpoint = `https://${accountId}.r2.cloudflarestorage.com`;
 
-  async function request(operation: "GET" | "HEAD" | "PUT", key: string, init: RequestInit = {}, consume?: (response: Response) => Promise<unknown>) {
+  async function request(operation: "GET" | "HEAD" | "PUT", key: string, init: RequestInit = {}): Promise<Response> {
     const path = [bucket, ...key.split("/")].map(encodePathPart).join("/");
     const url = `${endpoint}/${path}`;
     const headers = new Headers(init.headers);
@@ -54,11 +54,11 @@ export function createR2S3Adapter(options: R2S3Options, AwsClientImpl: typeof Aw
     const timer = setTimeout(() => controller.abort(new DOMException("Request timed out", "TimeoutError")), timeoutMs);
     onRequest?.({ operation, attempt: 1 });
     try {
-      const signed = await signer.sign(url, { ...init, method: operation, headers, signal: controller.signal });
+      // aws4fetch's declarations omit some standard RequestInit fields. Keep
+      // the runtime RequestInit intact while adapting only its static type.
+      const signed = await signer.sign(url, { ...init, method: operation, headers, signal: controller.signal } as Parameters<typeof signer.sign>[1]);
       const requestWithTimeout = new Request(signed, { signal: controller.signal });
-      const response = await fetchImpl(requestWithTimeout);
-      if (consume) return { response, value: await consume(response) };
-      return response;
+      return await fetchImpl(requestWithTimeout);
     } catch (error) {
       throw new R2S3TransportError(operation, operation === "PUT", error);
     } finally {
@@ -74,9 +74,9 @@ export function createR2S3Adapter(options: R2S3Options, AwsClientImpl: typeof Aw
 
   return {
     async get(key: string): Promise<R2S3Result<Uint8Array>> {
-    const result = await request("GET", key, {}, response => response.arrayBuffer()) as { response: Response; value: ArrayBuffer };
-      const { response, value } = result;
+      const response = await request("GET", key);
       if (!response.ok) throw new R2S3HttpError(response.status, "GET");
+      const value = await response.arrayBuffer();
       return { status: response.status, value: new Uint8Array(value), etag: response.headers.get("etag") };
     },
     async head(key: string): Promise<R2S3Result<Headers>> {
