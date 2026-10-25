@@ -127,6 +127,7 @@ https://data.iidx.in/version.json
 ### 2026-10-26 — dump-fast publish 건너뜀 사유 로그
 
 - `dump-fast/index.ts`: publish 모드에서 `runLightDump` 가 `ok:false` 이거나 `done:false` 면 `console.warn('dump-fast skipped', {id, generation, ok, done, reason})` 를 남긴다. 운영 Edge 가 10-25 13:32Z 이후 모든 깨우기에 409 를 냈지만 사유가 응답 본문에만 있어 어디에도 남지 않았다. 응답·게시 동작은 그대로다.
+- 🔴 원인 수정 — `_shared/r2-s3.ts` GET 에 `accept-encoding: identity`. Deno fetch 가 압축을 요청하면 R2 가 약한 ETag(`W/"…"`)를 돌려줘, 워커 `parse` 가 strong ETag 검사에서 pending 마커를 null 로 보고 매번 `pending-changed` 로 건너뛰었다(빠른 게시 전면 미동작, 느린 Actions 경로만 반영). `r2-client.mjs` 는 이미 identity 로 받고 있었다. Deno 에서 같은 어댑터로 pending·user·hist·aliases·songs 5키 모두 strong ETag 확인.
 
 ### 2026-10-24 — Edge 경량안 L3 재작업: dump-user user 게시 세대 캡처·S3 CAS (기본 OFF)
 

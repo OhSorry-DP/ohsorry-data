@@ -74,7 +74,8 @@ export function createR2S3Adapter(options: R2S3Options, AwsClientImpl: typeof Aw
 
   return {
     async get(key: string): Promise<R2S3Result<Uint8Array>> {
-      const response = await request("GET", key);
+      // 압축 응답은 약한 ETag(W/"…")를 돌려줘 If-Match CAS 를 깨뜨린다 — r2-client.mjs 와 같이 identity 로 받는다.
+      const response = await request("GET", key, { headers: { "accept-encoding": "identity" } });
       if (!response.ok) throw new R2S3HttpError(response.status, "GET");
       const value = await response.arrayBuffer();
       return { status: response.status, value: new Uint8Array(value), etag: response.headers.get("etag") };
