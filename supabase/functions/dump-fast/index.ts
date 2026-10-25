@@ -107,6 +107,7 @@ export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Om
           await r2.put(key, new TextEncoder().encode(value), { ifMatch: etag });
         };
         const result = await runLightDump({ id: body.iidxId, G: body.generation, since: body.since, deps: { readBuffer: id => readBuffer(deps, id), read, put, prepareFastDump: deps.prepareFastDump } });
+        if (!result.ok || !result.done) console.warn('dump-fast skipped', JSON.stringify({ id: body.iidxId, generation: body.generation, ok: result.ok, done: result.done ?? null, reason: result.reason ?? null }));
         return response(result.ok ? 200 : 409, { mode: responseMode, status: result.ok ? 'complete' : 'skipped', ...result, value: undefined });
       } catch { return response(502, { mode: responseMode, status: 'error', reason: 'publication_failed' }); }
     }

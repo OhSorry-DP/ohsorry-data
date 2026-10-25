@@ -124,6 +124,10 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-10-26 — dump-fast publish 건너뜀 사유 로그
+
+- `dump-fast/index.ts`: publish 모드에서 `runLightDump` 가 `ok:false` 이거나 `done:false` 면 `console.warn('dump-fast skipped', {id, generation, ok, done, reason})` 를 남긴다. 운영 Edge 가 10-25 13:32Z 이후 모든 깨우기에 409 를 냈지만 사유가 응답 본문에만 있어 어디에도 남지 않았다. 응답·게시 동작은 그대로다.
+
 ### 2026-10-24 — Edge 경량안 L3 재작업: dump-user user 게시 세대 캡처·S3 CAS (기본 OFF)
 
 - `dump-fast-publish.mjs` 에 CLI 하위명령 `capture-generation`·`publish-actions-user`·`complete-actions-pending` 추가. `dump-user.yml` 은 `vars.FAST_DUMP_LIGHT_GUARD=1` 일 때만 dump 직전 pending 세대를 캡처하고, user 를 R2 S3 `If-Match`(신규 유저는 `If-None-Match: *`)로 게시해 Edge 가 먼저 올린 빠른 4필드를 되돌리지 않는다. 키는 `CLOUDFLARE_R2_ACCESS_KEY_ID`·`CLOUDFLARE_R2_SECRET_ACCESS_KEY`, 미설정이면 실패(REST 폴백 없음).
