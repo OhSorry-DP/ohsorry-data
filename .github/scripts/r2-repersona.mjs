@@ -17,11 +17,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { calculateOfficialScores } from './official-score.mjs';
 import { mergeScoreHistory } from './score-history.mjs';
-import { mergeSlowUser } from './dump-fast-publish.mjs';
+import { mergeSlowUser, histGuardEnabled } from './dump-fast-publish.mjs';
 import { s3R2Client } from './r2-client.mjs';
 
 const validId = (value) => /^[A-Za-z0-9]+$/.test(String(value || ''));
 const lightGuardOn = () => process.env.FAST_DUMP_LIGHT_GUARD === '1';
+const guardEnabled = () => lightGuardOn() || histGuardEnabled(process.env);
 
 function s3ResponseEtag(response) {
   const value = response.headers?.get?.('etag');
@@ -38,7 +39,7 @@ async function s3ReadUser(s3, key) {
 }
 
 export async function guardedSlowUserPut({ client, key, source, local, s3 }) {
-  if (!lightGuardOn()) {
+  if (!guardEnabled()) {
     await client.put(key, JSON.stringify(local), source.etag);
     return true;
   }
@@ -145,7 +146,7 @@ export async function updateSinglePersona(id, { client, calculate, official = fa
     if (dry) return { dry: true, changed: true };
     try {
       if (!await guardedSlowUserPut({ client, key, source, local: data, s3 })) {
-        if (lightGuardOn()) return { conflicted: true };
+        if (guardEnabled()) return { conflicted: true };
         throw new Error('user PUT rejected');
       }
       return { updated: true };
@@ -346,7 +347,7 @@ export async function main(args = process.argv.slice(2), deps = {}) {
       '--content-type=application/json; charset=utf-8', '--remote']);
   }
   async function guardedR2UserPut(id, local, source) {
-    if (!lightGuardOn()) { await r2PutText(`user/${id}.json`, JSON.stringify(local)); return true; }
+    if (!guardEnabled()) { await r2PutText(`user/${id}.json`, JSON.stringify(local)); return true; }
     return guardedSlowUserPut({ client: null, key: `user/${id}.json`, source, local, s3: deps.s3 });
   }
   // 동시 실행 풀 — 순서 무관(유저별 독립)이라 단순 워커 N개로 충분.
@@ -421,7 +422,7 @@ export async function main(args = process.argv.slice(2), deps = {}) {
     if (text == null) {
       // R2 에 없는 유저 — git 본을 그대로 올린다(신규/누락 보정). 롤백 위험 없음(R2 가 비어 있으므로).
       const gp = path.join('user', `${id}.json`);
-      if (lightGuardOn()) { fail++; console.error('GUARD: user 원본 없음', id); return; }
+      if (guardEnabled()) { fail++; console.error('GUARD: user 원본 없음', id); return; }
       if (!fs.existsSync(gp)) { miss++; return; }
       if (DRY) { put++; return; }
       try { await r2PutText(key, fs.readFileSync(gp, 'utf8')); put++; }

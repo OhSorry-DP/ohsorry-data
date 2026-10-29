@@ -272,3 +272,122 @@ test('GUARD ON S3 자격 누락은 유저 실패이며 REST PUT fallback을 하�
     if (secret === undefined) delete process.env.R2_SECRET_ACCESS_KEY; else process.env.R2_SECRET_ACCESS_KEY = secret;
   }
 });
+
+test('hist guard only preserves verified revision and fast fields', async () => {
+  const old = process.env.FAST_DUMP_HIST_GUARD;
+  process.env.FAST_DUMP_HIST_GUARD = '1';
+  try {
+    const local = { ...baseData(), fastGeneration: '8', histRevision: 'a'.repeat(64), persona: { new: true } };
+    const latest = { ...baseData(), dp: [{ newest: 1 }], sp: [{ newest: 2 }],
+      dpRecent: [3], spRecent: [4], fastGeneration: '9', histRevision: 'b'.repeat(64), unknown: { retained: true } };
+    const s3 = makeS3(latest), client = makeClient(local);
+    assert.deepEqual(await updateSinglePersona(id, { client, s3, official: true, calculate: async () => ({ persona: { fresh: true } }) }), { updated: true });
+    const { current } = s3.state();
+    for (const key of ['dp', 'sp', 'dpRecent', 'spRecent', 'fastGeneration']) assert.deepEqual(current[key], latest[key]);
+    assert.equal(current.histRevision, 'b'.repeat(64));
+    assert.deepEqual(current.unknown, { retained: true }); assert.deepEqual(current.persona, { fresh: true });
+  } finally { if (old === undefined) delete process.env.FAST_DUMP_HIST_GUARD; else process.env.FAST_DUMP_HIST_GUARD = old; }
+});
+
+test('hist guard CAS rebases after 412', async () => {
+  const old = process.env.FAST_DUMP_HIST_GUARD;
+  process.env.FAST_DUMP_HIST_GUARD = '1';
+  try {
+    const data = baseData();
+    const s3State = { current: { ...data }, puts: 0, gets: 0 };
+    const s3 = {
+      async request(key, init) {
+        assert.equal(key, `user/${id}.json`);
+        if (init.method === 'GET') {
+          s3State.gets++;
+          if (s3State.gets === 1) return new Response(JSON.stringify(s3State.current), { headers: { etag: '"s1"' } });
+          s3State.current.fastGeneration = '10';
+          s3State.current.histRevision = 'c'.repeat(64);
+          return new Response(JSON.stringify(s3State.current), { headers: { etag: '"s2"' } });
+        }
+        s3State.puts++;
+        if (s3State.puts === 1) return new Response('', { status: 412 });
+        assert.equal(init.headers['If-Match'], '"s2"');
+        s3State.current = JSON.parse(init.body);
+        return new Response('', { status: 200 });
+      },
+    };
+    const client = makeClient(data);
+    assert.deepEqual(await updateSinglePersona(id, { client, s3, official: true, calculate: async () => ({ persona: { next: 1 } }) }), { updated: true });
+    assert.equal(s3State.gets, 2); assert.equal(s3State.puts, 2);
+  } finally { if (old === undefined) delete process.env.FAST_DUMP_HIST_GUARD; else process.env.FAST_DUMP_HIST_GUARD = old; }
+});
+
+test('hist guard failure never uses REST fallback', async () => {
+  const old = process.env.FAST_DUMP_HIST_GUARD;
+  process.env.FAST_DUMP_HIST_GUARD = '1';
+  try {
+    for (const failure of ['403', '500', 'throw', 'weak-etag']) {
+      const data = baseData();
+      const s3 = {
+        async request(key, init) {
+          if (init.method === 'GET') {
+            if (failure === 'weak-etag') return new Response(JSON.stringify(data), { headers: { etag: 'W/"weak"' } });
+            if (failure === 'throw') throw new Error('network error');
+            return new Response('', { status: Number(failure) });
+          }
+          throw new Error('unexpected PUT when failure=' + failure);
+        },
+      };
+      const client = makeClient(data);
+      assert.deepEqual(await updateSinglePersona(id, { client, s3, official: true, calculate: async () => ({ persona: { next: 1 } }) }), { conflicted: true });
+      assert.equal(client.puts.length, 0);
+    }
+  } finally { if (old === undefined) delete process.env.FAST_DUMP_HIST_GUARD; else process.env.FAST_DUMP_HIST_GUARD = old; }
+});
+
+test('hist guard contention stops after three attempts', async () => {
+  const old = process.env.FAST_DUMP_HIST_GUARD;
+  process.env.FAST_DUMP_HIST_GUARD = '1';
+  try {
+    const data = baseData();
+    const s3 = {
+      gets: 0, puts: 0,
+      async request(key, init) {
+        if (init.method === 'GET') { this.gets++; return new Response(JSON.stringify(data), { headers: { etag: `"s${this.gets}"` } }); }
+        this.puts++;
+        return new Response('', { status: 412 });
+      },
+    };
+    assert.equal(await guardedSlowUserPut({ client: null, key: `user/${id}.json`, source: {}, local: { ...data, persona: { next: 1 } }, s3 }), false);
+    assert.equal(s3.gets, 3); assert.equal(s3.puts, 3);
+  } finally { if (old === undefined) delete process.env.FAST_DUMP_HIST_GUARD; else process.env.FAST_DUMP_HIST_GUARD = old; }
+});
+
+test('both guards OFF preserve original bytes and IO', async () => {
+  const old = process.env.FAST_DUMP_LIGHT_GUARD, hist = process.env.FAST_DUMP_HIST_GUARD;
+  delete process.env.FAST_DUMP_LIGHT_GUARD;
+  delete process.env.FAST_DUMP_HIST_GUARD;
+  try {
+    const data = baseData(), client = makeClient(data);
+    assert.deepEqual(await updateSinglePersona(id, { client, calculate: async () => ({ persona: { next: 1 } }) }), { updated: true });
+    assert.equal(client.puts.length, 1);
+    assert.equal(client.puts[0].condition, '"e1"');
+    assert.equal(client.puts[0].data.persona.next, 1);
+    assert.deepEqual(client.puts[0].data.dp, data.dp);
+  } finally {
+    if (old === undefined) delete process.env.FAST_DUMP_LIGHT_GUARD; else process.env.FAST_DUMP_LIGHT_GUARD = old;
+    if (hist === undefined) delete process.env.FAST_DUMP_HIST_GUARD; else process.env.FAST_DUMP_HIST_GUARD = hist;
+  }
+});
+
+test('hist guard covers default and official entry paths', async () => {
+  const old = process.env.FAST_DUMP_HIST_GUARD;
+  process.env.FAST_DUMP_HIST_GUARD = '1';
+  try {
+    const data = baseData(), s3 = makeS3(data);
+    const h = makeClient(data);
+    const r = await runHistoryBatch({ ids: [id], client: h, s3, R: officialResources(), songs: [song],
+      engine: historyEngine({}), arrangeFor: async () => [], concurrency: 1, dry: false });
+    assert.equal(r[0].updated, true); assert.equal(s3.state().puts, 1);
+    const dryS3 = makeS3(data);
+    const dryR = await runHistoryBatch({ ids: [id], client: makeClient(data), s3: dryS3, R: officialResources(), songs: [song],
+      engine: historyEngine({}), arrangeFor: async () => [], concurrency: 1, dry: true });
+    assert.equal(dryR[0].dry, true); assert.equal(dryS3.state().puts, 0);
+  } finally { if (old === undefined) delete process.env.FAST_DUMP_HIST_GUARD; else process.env.FAST_DUMP_HIST_GUARD = old; }
+});
