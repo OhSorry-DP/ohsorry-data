@@ -429,7 +429,11 @@ export async function publishGuardedActions(id, local, { r2, env = process.env }
     await verify();
     const source = await r2.read(userKey);
     const current = source ? JSON.parse(source.body) : {};
-    const merged = mergeHistUser(current, patch, generation, local.histRevision);
+    // Edge may have computed the same history at a different Recent window boundary.
+    const actionsPatch = current.fastGeneration === generation && current.histRevision === local.histRevision
+      ? { ...patch, ...Object.fromEntries(['dp', 'sp', 'dpRecent', 'spRecent'].map(key => [key, current[key]])) }
+      : patch;
+    const merged = mergeHistUser(current, actionsPatch, generation, local.histRevision);
     if (!merged.ok) throw new Error(merged.reason);
     value = mergeSlowUser(merged.value, local);
     await verify();

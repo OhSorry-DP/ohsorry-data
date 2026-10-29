@@ -5,12 +5,138 @@ import { runLightDump } from '../../../supabase/functions/_shared/dump-fast-work
 import { mergeActionsUser, mergeEdgeUser, mergeSlowUser, publishUserPatch } from '../dump-fast-publish.mjs';
 import { mergeFastPending } from '../pending-marker.mjs';
 import { guardedSlowUserPut } from '../r2-repersona.mjs';
+import { prepareFastDump } from '../dump-fast-core.mjs';
+import { sha256Hex } from '../score-buffer.mjs';
 
 const since = '2026-10-24T00:00:00.000Z';
 const fast = (n) => ({ dp: [n], sp: [n], dpRecent: [`d${n}`], spRecent: [`s${n}`] });
 const expectedUser = (g, n, slow = {}) => ({ _v: '2026-10-23T00:00:00.000Z', user: { iidx_id: 'u1' }, radars: ['stable'], ...slow,
   ...fast(n), fastGeneration: g, extension: { preserve: true } });
 const clone = (x) => JSON.parse(JSON.stringify(x));
+
+async function histOrigin() {
+  process.env.SUPABASE_URL ||= 'https://example.invalid';
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test';
+  const { publishGuardedActions } = await import('../dump-user.mjs');
+  const f = origin({ 'hist/u1.json': [], 'meta/song-aliases.json': { v: 1, rules: [] },
+    'songs.json': [{ song_id: 100, textage_song_id: 's100', title: 'Song', series_no: 1, ac: true, legen: false }] });
+  let time = Date.parse(since);
+  f.rows = [];
+  const read = f.r2.read, put = f.r2.put;
+  f.r2.read = async key => { try { return await read(key); } catch (error) { if (error.status === 404) return null; throw error; } };
+  f.r2.put = (key, body, match) => put(key, body, match === null ? { ifNoneMatch: '*' } : match);
+  Object.assign(f.deps, f.r2, { histPublish: true, prepareFastDump, nowMs: () => time,
+    readBuffer: async () => ({ rows: clone(f.rows), fingerprint: JSON.stringify(f.rows) }) });
+  f.expire = () => { time += 16000; };
+  f.run = (G = '5') => runLightDump({ id: 'u1', G, since, deps: f.deps });
+  f.actions = async (G = '5') => {
+    const hist = await f.r2.read('hist/u1.json');
+    const aliases = f.objects.get('meta/song-aliases.json');
+    const prepared = prepareFastDump({ iidxId: 'u1', previousHistRows: JSON.parse(hist.body), restRows: [],
+      aliases, aliasesBytes: Buffer.from(JSON.stringify(aliases)), songs: f.objects.get('songs.json'),
+      previousUser: f.objects.get('user/u1.json'), generation: Number(G), nowMs: Date.parse(since) });
+    return publishGuardedActions('u1', { _v: since, user: { star: 3 }, persona: 'actions',
+      ...prepared.fastPatch, dpRecent: ['actions-window'], histRevision: sha256Hex(Buffer.from(hist.body)) },
+    { r2: f.r2, env: { FAST_DUMP_HIST_GUARD: '1', FAST_DUMP_GENERATION: G, FAST_DUMP_SINCE: since } });
+  };
+  return f;
+}
+const score = (score_id, overrides = {}) => ({ score_id, iidx_id: 'u1', song_id: 100, diff: 0,
+  lamp: 4, ex_score: 800, played_version: 33, date: '2026-10-23T00:00:00Z', date_kst: '2026-10-23',
+  play_style: 1, bp: null, note_count: null, ...overrides });
+
+test('hist extension: late 33 best, NULL supplementation, consecutive G/G+1 and Actions preserve Edge fields', async () => {
+  const f = await histOrigin(); f.rows = [score(1)];
+  assert.equal((await f.run()).done, true);
+  const revision5 = f.objects.get('user/u1.json').histRevision;
+  assert.equal(f.objects.get('user/u1.json').dp[0].ex_score, 800);
+  await f.r2.put('pending/u1.json', JSON.stringify({ generation: '6', since }), f.versions.get('pending/u1.json'));
+  f.rows = [score(2, { bp: 12, note_count: 500 }), score(3, { ex_score: 900, lamp: 5,
+    bp: 10, note_count: 500, date: '2026-10-22T00:00:00Z', date_kst: '2026-10-22' })];
+  assert.equal((await f.run('6')).done, true);
+  const hist = f.objects.get('hist/u1.json'), user = f.objects.get('user/u1.json');
+  assert.equal(hist.length, 2); assert.equal(hist.find(row => row[3] === 800)[8], 12);
+  assert.equal(hist.find(row => row[3] === 800)[9], 500);
+  assert.equal(user.dp[0].ex_score, 900); assert.equal(user.dp[0].played_version, 33);
+  assert.equal(user.fastGeneration, '6'); assert.notEqual(user.histRevision, revision5);
+  assert.equal(f.objects.get('pending/u1.json').viewGeneration, '6');
+  assert.equal((await f.run()).reason, 'pending-changed');
+  const edge = clone(user), start = f.writes.length;
+  const actions = await f.actions('6');
+  for (const key of ['dp', 'sp', 'dpRecent', 'spRecent']) assert.deepEqual(actions[key], edge[key]);
+  assert.equal(actions.persona, 'actions'); assert.equal(actions.user.star, 3);
+  assert.equal(f.writes.slice(start).filter(key => key === 'user/u1.json').length, 1);
+  assert.equal(f.objects.get('pending/u1.json').histRevision, actions.histRevision);
+});
+
+test('hist extension CAS rejects stale and duplicate creation; hist 412 replays original buffer over winner', async () => {
+  const f = await histOrigin(); f.rows = [score(1)];
+  await assert.rejects(f.r2.put('hist/u1.json', '[]', '"stale"'), /412/);
+  await assert.rejects(f.r2.put('hist/u1.json', '[]', null), /412/);
+  const put = f.deps.put;
+  let raced = false;
+  const winning = [100, 0, 3, 700, 33, '2026-10-21T00:00:00Z', '2026-10-21', 1, 20, 500];
+  f.deps.put = async (key, body, match) => {
+    if (key === 'hist/u1.json' && !raced) { raced = true; await put(key, JSON.stringify([winning]), match); }
+    return put(key, body, match);
+  };
+  assert.equal((await f.run()).done, true);
+  assert.equal(raced, true); assert.equal(f.objects.get('hist/u1.json').length, 2);
+  assert.equal(f.objects.get('user/u1.json').dp[0].ex_score, 800);
+});
+
+test('hist extension hist/user partial success recovers after expiry and busy Edge hands off to guarded Actions', async () => {
+  const f = await histOrigin(); f.rows = [score(1)];
+  const put = f.deps.put;
+  f.deps.put = async (key, body, match) => { if (key === 'user/u1.json') throw Error('response lost'); return put(key, body, match); };
+  assert.equal((await f.run()).reason, 'user-put-failed');
+  assert.equal(f.objects.get('hist/u1.json').length, 1);
+  assert.equal(f.objects.get('pending/u1.json').viewGeneration, undefined);
+  assert.equal((await f.run()).reason, 'lease-busy');
+  f.expire(); f.deps.put = put;
+  assert.equal((await f.run()).done, true);
+  const edge = clone(f.objects.get('user/u1.json'));
+  await f.r2.put('meta/fast-hist-lease-u1.json', JSON.stringify({ token: 'other', expiresAt: '2099-01-01T00:00:00.000Z' }), f.versions.get('meta/fast-hist-lease-u1.json'));
+  assert.equal((await f.run()).reason, 'lease-busy');
+  await f.r2.put('meta/fast-hist-lease-u1.json', JSON.stringify({ token: 'other', expiresAt: since }), f.versions.get('meta/fast-hist-lease-u1.json'));
+  const value = await f.actions();
+  assert.deepEqual(value.dpRecent, edge.dpRecent); assert.equal(value.persona, 'actions');
+  assert.equal(f.objects.get('pending/u1.json').histRevision, value.histRevision);
+});
+
+test('hist extension OFF rollback keeps legacy light path and guarded Actions recovery', async () => {
+  const f = await histOrigin(); f.rows = [score(1)];
+  assert.equal((await f.run()).done, true);
+  await f.r2.put('pending/u1.json', JSON.stringify({ generation: '6', since }), f.versions.get('pending/u1.json'));
+  const hist = JSON.stringify(f.objects.get('hist/u1.json')), start = f.writes.length;
+  f.deps.histPublish = false;
+  assert.equal((await f.run('6')).done, true);
+  assert.equal(JSON.stringify(f.objects.get('hist/u1.json')), hist);
+  assert.ok(f.writes.slice(start).every(key => !key.startsWith('hist/') && !key.includes('lease')));
+  const value = await f.actions('6');
+  assert.equal(value.fastGeneration, '6'); assert.equal(value.persona, 'actions');
+  assert.equal(f.objects.get('pending/u1.json').viewGeneration, '6');
+});
+
+test('hist extension lease expiry after hist commit suppresses user/completion and Actions recovers the published best', async () => {
+  const f = await histOrigin(); f.rows = [score(1)];
+  const put = f.deps.put;
+  f.deps.put = async (key, body, match) => {
+    await put(key, body, match);
+    if (key === 'hist/u1.json') f.expire();
+  };
+  assert.equal((await f.run()).ok, false);
+  assert.equal(f.objects.get('hist/u1.json').length, 1);
+  assert.equal(f.writes.filter(key => key.startsWith('user/') || key.startsWith('pending/')).length, 0);
+  assert.equal(f.objects.get('pending/u1.json').viewGeneration, undefined);
+  // Actions uses its own wall clock, so explicitly hand over an expired lease.
+  await f.r2.put('meta/fast-hist-lease-u1.json', JSON.stringify({ token: 'expired', expiresAt: since }), f.versions.get('meta/fast-hist-lease-u1.json'));
+  const value = await f.actions();
+  assert.equal(value.dp[0].ex_score, 800); assert.equal(value.persona, 'actions');
+  assert.equal(value.fastGeneration, '5');
+  assert.equal(f.objects.get('pending/u1.json').histRevision, value.histRevision);
+  assert.equal(f.objects.get('pending/u1.json').viewGeneration, '5');
+});
 
 function origin(initial = {}) {
   const objects = new Map([

@@ -298,3 +298,20 @@ test('hist guard OFF keeps prepare bytes, candidate and exact IO unchanged and r
     fs.rmSync(dir, { recursive: true });
   }
 });
+
+
+test('Edge same G/revision keeps all fast fields while Actions publishes slow fields once and completes pending', async () => {
+  const { publishGuardedActions } = await guardedModule();
+  const store = histStore(), local = readyActions(store);
+  const edge = { dp: ['edge-dp'], sp: ['edge-sp'], dpRecent: ['edge-window'], spRecent: ['edge-sp-window'] };
+  const current = JSON.parse(store.objects.get(`user/${iidxId}.json`));
+  store.objects.set(`user/${iidxId}.json`, JSON.stringify({ ...current, ...edge, histRevision: local.histRevision }));
+  Object.assign(local, { persona: 'actions-persona', radars: ['actions-radars'] });
+  const value = await publishGuardedActions(iidxId, local, { r2: store, env: guardEnv });
+  for (const key of Object.keys(edge)) assert.deepEqual(value[key], edge[key], key);
+  assert.equal(value.user.star, 3); assert.equal(value.persona, local.persona); assert.deepEqual(value.radars, local.radars);
+  assert.equal(value.unknown, 42);
+  assert.equal(store.calls.filter(([op, key]) => op === 'put' && key.startsWith('user/')).length, 1);
+  const marker = JSON.parse(store.objects.get(`pending/${iidxId}.json`));
+  assert.equal(marker.viewGeneration, '7'); assert.equal(marker.histRevision, local.histRevision); assert.ok(marker.done);
+});

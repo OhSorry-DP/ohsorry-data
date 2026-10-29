@@ -226,3 +226,46 @@ test('hist readback mismatch, buffer drift, lease expiry and uncertain PUT suppr
     assert.ok(f.puts.every(x => !x.key.startsWith('user/') && !x.key.startsWith('pending/')), mode);
   }
 });
+
+
+test('hist changed after publication before user PUT suppresses user and completion', async () => {
+  const f = histFixture(), read = f.deps.read, put = f.deps.put;
+  let published = false, userReads = 0;
+  f.deps.put = async (...args) => { await put(...args); if (args[0] === 'hist/u1.json') published = true; };
+  f.deps.read = async key => {
+    const source = await read(key);
+    if (key === 'user/u1.json' && ++userReads === 2) {
+      assert.equal(published, true);
+      const hist = await read('hist/u1.json');
+      await put('hist/u1.json', JSON.stringify([{ score_id: 99 }]), hist.etag);
+    }
+    return source;
+  };
+  assert.equal((await f.run()).ok, false);
+  assert.deepEqual(f.objects.get('hist/u1.json'), [{ score_id: 99 }]);
+  assert.equal(f.puts.filter(x => x.key.startsWith('user/') || x.key.startsWith('pending/')).length, 0);
+  assert.equal(f.objects.get('pending/u1.json').viewGeneration, undefined);
+});
+
+test('held lease expires at user PUT boundary after final lease GET; user and completion PUTs stay zero', async () => {
+  const f = histFixture(), read = f.deps.read;
+  let time = Date.parse(since), userReads = 0, leaseReadsAfterUser = 0;
+  let expireOnNextClock = false;
+  f.deps.nowMs = () => {
+    const value = time;
+    if (expireOnNextClock) { time += 16000; expireOnNextClock = false; }
+    return value;
+  };
+  f.deps.read = async key => {
+    const source = await read(key);
+    if (key === 'user/u1.json') userReads++;
+    // The second verify after the current user GET ends with this lease GET.
+    if (userReads === 2 && key.includes('lease') && ++leaseReadsAfterUser === 2) expireOnNextClock = true;
+    return source;
+  };
+  const result = await f.run();
+  assert.equal(leaseReadsAfterUser, 2);
+  assert.equal(f.puts.filter(x => x.key.startsWith('user/') || x.key.startsWith('pending/')).length, 0);
+  assert.equal(result.reason, 'user-put-failed');
+  assert.equal(f.objects.get('pending/u1.json').viewGeneration, undefined);
+});
