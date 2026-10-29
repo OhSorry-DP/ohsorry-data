@@ -9,7 +9,8 @@ import { historyInputs } from './persona-lib.mjs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
 import { getText } from './r2-client.mjs';
-import { conditionalR2Client } from './r2-client.mjs';
+import { s3R2Client, conditionalR2Client } from './r2-client.mjs';
+import { histGuardEnabled, publishHistWithLease, acquireHistLease, assertHistLease, releaseHistLease, mergeHistUser, mergeHistPending, mergeSlowUser } from './dump-fast-publish.mjs';
 import { buildCandidate } from './score-buffer.mjs';
 import { replayScoreBuffer } from './score-history.mjs';
 import { normalizeAliasInputs } from './song-aliases.mjs';
@@ -103,8 +104,8 @@ function logTiming(stage, started, detail = '') {
 }
 
 export async function dumpUser(id, personaRes, opts = {}) {
-  const preparing = process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1';
-  const cumulative = process.env.SCORE_BUFFER_CUMULATIVE === '1';
+  const preparing = histGuardEnabled(process.env) || process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1';
+  const cumulative = histGuardEnabled(process.env) || process.env.SCORE_BUFFER_CUMULATIVE === '1';
   let prepared = null;
   if (preparing) {
     const started = performance.now();
@@ -225,8 +226,10 @@ export async function dumpUser(id, personaRes, opts = {}) {
       spPersona = (prev && prev.spPersona) || null;
     }
   }
-  return assembleUserDump({ timestamp: new Date().toISOString(), userRows: user, radars, osPattern,
+  const result = assembleUserDump({ timestamp: new Date().toISOString(), userRows: user, radars, osPattern,
     persona, spPersona, reachNps, dpRows: dp, sp, cumulative, dpRecent, spRecent });
+  if (histGuardEnabled(process.env)) result.histRevision = bytesHash(prepared.histBytes);
+  return result;
 }
 
 // ─── 무손실 이력 hist/{id}.json (CF 통합 §1) ──────────────────────────────────
@@ -245,7 +248,24 @@ function officialResources(resources) {
 
 const preparedFiles = new Map();
 const bytesHash = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const historyClient = () => conditionalR2Client({
+export function guardedHistoryClient(options = {}) {
+  const client = s3R2Client({ account: process.env.CLOUDFLARE_ACCOUNT_ID, ...options, retries: 0 });
+  return {
+    async read(key) {
+      const response = await client.request(key);
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error(`R2 GET HTTP ${response.status}`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return { bytes, body: new TextDecoder('utf-8', { fatal: true }).decode(bytes), etag: response.headers.get('etag') };
+    },
+    async put(key, body, etag) {
+      const response = await client.request(key, { method: 'PUT', body, headers: {
+        'Content-Type': 'application/json', ...(etag === null ? { 'If-None-Match': '*' } : { 'If-Match': etag }) } });
+      if (!response.ok) throw new Error(`R2 PUT HTTP ${response.status}`);
+    },
+  };
+}
+const historyClient = () => histGuardEnabled(process.env) ? guardedHistoryClient() : conditionalR2Client({
   account: process.env.CLOUDFLARE_ACCOUNT_ID,
   token: process.env.CLOUDFLARE_R2_TOKEN || process.env.CLOUDFLARE_API_TOKEN,
   rawBytes: true,
@@ -272,14 +292,14 @@ export async function prepareOfficialHistory(id, personaRes, opts = {}) {
   const fetched = await fetchUserHistWithScores(id);
   // Keep deletion fingerprints independent of alias normalization and replay.
   const restRows = fetched.restRows.map((row) => ({ ...row }));
-  const cumulative = process.env.SCORE_BUFFER_CUMULATIVE === '1';
+  const cumulative = histGuardEnabled(process.env) || process.env.SCORE_BUFFER_CUMULATIVE === '1';
   if (!cumulative && !fetched.histRows.length && oldRows.some((row) => !Array.isArray(row) || row[4] !== -10)) {
     throw new Error(`hist 급감(${id}): ${oldRows.length}행 → 0행 — 기존본 유지`);
   }
   started = performance.now();
   const songsObject = opts.songs === undefined ? await r2.read('songs.json') : null;
   logTiming('readSongs', started, opts.songs === undefined ? '' : 'skipped=1');
-  const songs = opts.songs ?? (songsObject ? JSON.parse((songsObject.bytes ?? songsObject.body).toString('utf8')) : null);
+  let songs = opts.songs ?? (songsObject ? JSON.parse((songsObject.bytes ?? songsObject.body).toString('utf8')) : null);
   if (!Array.isArray(songs)) throw new Error('R2 songs 응답이 배열이 아닙니다');
   started = performance.now();
   const aliasesObject = await r2.read('meta/song-aliases.json');
@@ -290,9 +310,9 @@ export async function prepareOfficialHistory(id, personaRes, opts = {}) {
   const previousHistRows = cumulative ? oldRows : [];
   started = performance.now();
   const normalized = normalizeAliasInputs({ histRows: previousHistRows, restRows, aliases, songs });
-  const histRows = replayScoreBuffer(normalized.histRows, normalized.restRows);
+  let histRows = replayScoreBuffer(normalized.histRows, normalized.restRows);
   logTiming('normalizeReplay', started, `rows=${histRows.length}`);
-  const histBytes = Buffer.from(JSON.stringify(histRows), 'utf8');
+  let histBytes = Buffer.from(JSON.stringify(histRows), 'utf8');
   // Validate the original fingerprints and replay evidence before any mutation.
   started = performance.now();
   buildCandidate({ iidxId: id, restRows, previousHistRows, aliases, aliasesBytes, songs,
@@ -302,7 +322,10 @@ export async function prepareOfficialHistory(id, personaRes, opts = {}) {
     // Conflicts and uncertain PUT outcomes propagate. The next run rereads current
     // history and aliases and recomputes from the original buffer, never stale bytes.
     started = performance.now();
-    await publishPreparedHist(id, { restRows, histBytes, r2, previous, previousHistRows, aliases, aliasesBytes, songs });
+    if (histGuardEnabled(process.env)) {
+      const published = await publishGuardedHistory(id, { r2, restRows, allowCreate: previous === null });
+      histRows = published.histRows; histBytes = Buffer.from(published.histBytes); songs = published.prepared.songs;
+    } else await publishPreparedHist(id, { restRows, histBytes, r2, previous, previousHistRows, aliases, aliasesBytes, songs });
     logTiming('publishPreparedHist', started);
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -345,6 +368,88 @@ export async function fetchUserHistWithScores(id) {
   }
   logTiming('fetchUserHistWithScores', started, `rows=${histRows.length} pages=${pages}`);
   return { histRows, restRows };
+}
+
+// Release before slow official calculations; final publication reacquires and verifies revision.
+export async function publishGuardedHistory(id, { r2, restRows, allowCreate = false }) {
+  const published = await publishHistWithLease({ r2, id, restRows, enabled: true, allowCreate,
+    prepare: async ({ previousHistRows, restRows }) => {
+      const [aliasesSource, songsSource] = await Promise.all([r2.read('meta/song-aliases.json'), r2.read('songs.json')]);
+      if (!aliasesSource || !songsSource) throw new Error('missing hist references');
+      const aliasesBytes = Buffer.from(aliasesSource.bytes ?? aliasesSource.body, 'utf8');
+      const aliases = JSON.parse(aliasesBytes.toString('utf8'));
+      const songs = JSON.parse((songsSource.bytes ?? songsSource.body).toString('utf8'));
+      const normalized = normalizeAliasInputs({ histRows: previousHistRows, restRows, aliases, songs });
+      const histRows = replayScoreBuffer(normalized.histRows, normalized.restRows);
+      const histBytes = Buffer.from(JSON.stringify(histRows));
+      buildCandidate({ iidxId: id, restRows, previousHistRows, aliases, aliasesBytes, songs,
+        publishedHistBytes: histBytes, downloadedHistBytes: histBytes });
+      return { histRows, histBytes, previousHistRows, aliases, aliasesBytes, songs, songsBody: songsSource.body };
+    } });
+  if (!published.ok) throw new Error(`hist publish: ${published.reason}`);
+  const { lease, prepared } = published;
+  const [downloaded, aliasesSource, songsSource] = await Promise.all([
+    r2.read(`hist/${id}.json`), r2.read('meta/song-aliases.json'), r2.read('songs.json')]);
+  if (!aliasesSource || !songsSource
+    || !Buffer.from(aliasesSource.bytes ?? aliasesSource.body).equals(prepared.aliasesBytes)
+    || songsSource.body !== prepared.songsBody) throw new Error('hist references changed');
+  await assertHistLease({ r2, id, lease });
+  const candidate = buildCandidate({ iidxId: id, restRows, ...prepared,
+    publishedHistBytes: published.histBytes, downloadedHistBytes: downloaded?.bytes ?? Buffer.from(downloaded?.body ?? '') });
+  // Keep the existing PREPARE/CUMULATIVE candidate publication gate.
+  if (process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1') {
+    const key = `meta/scores-delete-${id}.json`;
+    const existing = await r2.read(key);
+    await assertHistLease({ r2, id, lease });
+    await r2.put(key, JSON.stringify(candidate), existing ? existing.etag : null);
+  }
+  const released = await releaseHistLease({ r2, id, lease });
+  if (!released.ok) throw new Error(released.reason);
+  return published;
+}
+
+export async function publishGuardedActions(id, local, { r2, env = process.env } = {}) {
+  if (!histGuardEnabled(env)) throw new Error('hist guard disabled');
+  r2 ??= guardedHistoryClient();
+  const acquired = await acquireHistLease({ r2, id, enabled: true });
+  if (!acquired.ok) throw new Error(acquired.reason);
+  const { lease } = acquired;
+  const verify = async () => {
+    await assertHistLease({ r2, id, lease });
+    const hist = await r2.read(`hist/${id}.json`);
+    if (!hist || bytesHash(hist.bytes ?? Buffer.from(hist.body)) !== local.histRevision) throw new Error('hist revision changed');
+    await assertHistLease({ r2, id, lease });
+  };
+  const generation = env.FAST_DUMP_GENERATION;
+  const patch = Object.fromEntries(['dp', 'sp', 'dpRecent', 'spRecent'].map(key => [key, local[key]]));
+  Object.assign(patch, { fastGeneration: generation, histRevision: local.histRevision });
+  const userKey = `user/${id}.json`;
+  let value;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await verify();
+    const source = await r2.read(userKey);
+    const current = source ? JSON.parse(source.body) : {};
+    const merged = mergeHistUser(current, patch, generation, local.histRevision);
+    if (!merged.ok) throw new Error(merged.reason);
+    value = mergeSlowUser(merged.value, local);
+    await verify();
+    try { await r2.put(userKey, JSON.stringify(value), source ? source.etag : null); break; }
+    catch (error) { if (!/\b412\b/.test(error.message) || attempt === 2) throw error; }
+  }
+  await verify();
+  const user = await r2.read(userKey);
+  if (!user || user.body !== JSON.stringify(value)) throw new Error('user readback mismatch');
+  const pendingKey = `pending/${id}.json`;
+  const pending = await r2.read(pendingKey);
+  if (!pending) throw new Error('pending missing');
+  const merged = mergeHistPending(JSON.parse(pending.body), { generation, since: env.FAST_DUMP_SINCE,
+    histRevision: local.histRevision, done: new Date().toISOString() });
+  if (!merged.ok) throw new Error(merged.reason);
+  await verify();
+  await r2.put(pendingKey, JSON.stringify(merged.value), pending.etag);
+  const released = await releaseHistLease({ r2, id, lease });
+  if (!released.ok) throw new Error(released.reason);
+  return value;
 }
 
 async function publishPreparedHist(id, { restRows, histBytes, previous, r2, previousHistRows, aliases, aliasesBytes, songs }) {
@@ -404,7 +509,7 @@ export function histUnchanged(prev, probe) {
 
 // hist 파일 갱신. file 에 R2 현재본이 미리 놓여 있으면(워크플로가 받아둠) 변경 없을 때 전체 조회를 건너뛴다.
 export async function updateHistFile(id, file) {
-  const preparing = process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1';
+  const preparing = histGuardEnabled(process.env) || process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1';
   const normalizedFile = path.resolve(file);
   const cached = preparedFiles.get(normalizedFile);
   if (preparing && cached) {
@@ -443,12 +548,19 @@ export { loadPersonaResources };
 // CLI 로 직접 실행할 때만 동작 — import 시엔 아래 블록을 타지 않는다(dump-data-repo.js 가 import 함).
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   cliStarted = performance.now();
-  const ids = process.argv.slice(2).filter(Boolean);
+  const args = process.argv.slice(2).filter(Boolean);
+  if (args[0] === 'publish-guarded-actions') {
+    if (args.length !== 2 || !/^[A-Za-z0-9]+$/.test(args[1])) throw new Error('invalid guarded publication arguments');
+    const id = args[1];
+    await publishGuardedActions(id, JSON.parse(fs.readFileSync(`user/${id}.json`, 'utf8')));
+    process.exit(0);
+  }
+  const ids = args;
   if (!ids.length) { console.error('iidx_id 인자 없음'); process.exit(1); }
   fs.mkdirSync('user', { recursive: true });
   fs.mkdirSync('hist', { recursive: true });
   const resourcesStarted = performance.now();
-  const personaRes = await loadPersonaResources({ official: process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1' });
+  const personaRes = await loadPersonaResources({ official: histGuardEnabled(process.env) || process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1' });
   logTiming('loadPersonaResources', resourcesStarted);
   for (const id of ids) {
     if (!/^[A-Za-z0-9]+$/.test(id)) { console.error('잘못된 iidx_id 형식:', id); process.exit(1); }

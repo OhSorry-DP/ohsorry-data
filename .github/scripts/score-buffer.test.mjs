@@ -116,3 +116,185 @@ test('6. 원본 byte 불일치를 거부하고 재전송은 멱등이며 played_
   assert.deepEqual(retry, first);
   assert.equal(first.rows[0].played_version, 33);
 });
+
+// The Actions adapter tests use real conditional object versions, including 412.
+async function guardedModule() {
+  process.env.SUPABASE_URL ||= 'https://example.invalid';
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test';
+  return import('./dump-user.mjs');
+}
+function histStore() {
+  const objects = new Map([
+    [`hist/${iidxId}.json`, '[]'], ['songs.json', JSON.stringify(songs)],
+    ['meta/song-aliases.json', JSON.stringify(noAliases)],
+  ]);
+  const calls = [], versions = new Map();
+  return { objects, calls, beforePut: null, afterRead: null,
+    async read(key) {
+      calls.push(['read', key]);
+      const body = objects.get(key);
+      const result = body === undefined ? null : { body, bytes: Buffer.from(body), etag: `"${versions.get(key) || 0}"` };
+      this.afterRead?.(key, result);
+      return result;
+    },
+    async put(key, body, etag) {
+      calls.push(['put', key, String(body), etag]);
+      await this.beforePut?.(key, body, etag);
+      const expected = objects.has(key) ? `"${versions.get(key) || 0}"` : null;
+      if (etag !== expected) throw new Error('HTTP 412');
+      objects.set(key, String(body)); versions.set(key, (versions.get(key) || 0) + 1);
+    },
+  };
+}
+const guardEnv = { FAST_DUMP_HIST_GUARD: '1', FAST_DUMP_GENERATION: '7', FAST_DUMP_SINCE: '2026-10-22T00:00:00.000Z' };
+const actionsLocal = (revision) => ({ _v: '2026-10-22T02:00:00.000Z', user: { star: 3 },
+  dp: [], sp: [], dpRecent: [], spRecent: [], histRevision: revision });
+function readyActions(store) {
+  const revision = sha256Hex(Buffer.from('[]'));
+  store.objects.set(`user/${iidxId}.json`, JSON.stringify({ user: { star: 1, unknown: true }, unknown: 42,
+    fastGeneration: '7', histRevision: 'a'.repeat(64), dp: ['old'] }));
+  store.objects.set(`pending/${iidxId}.json`, JSON.stringify({ generation: '7', since: guardEnv.FAST_DUMP_SINCE, unknown: 99 }));
+  return actionsLocal(revision);
+}
+
+test('hist guard S3 adapter: identity GET, conditional PUT, 404 only missing, no transmission retry', async () => {
+  const { guardedHistoryClient } = await guardedModule();
+  const calls = [];
+  const client = guardedHistoryClient({ accessKeyId: 'test', secretAccessKey: 'test',
+    fetchImpl: async (url, init) => { calls.push(init); return new Response(init.method === 'GET' ? '[]' : '',
+      { status: init.method === 'GET' ? 200 : 412, headers: { etag: '"v1"' } }); } });
+  assert.equal((await client.read('hist/1.json')).body, '[]');
+  assert.equal(calls[0].headers.get('accept-encoding'), 'identity');
+  await assert.rejects(client.put('hist/1.json', '[]', null), /412/);
+  await assert.rejects(client.put('hist/1.json', '[]', '"v1"'), /412/);
+  assert.equal(calls[1].headers.get('if-none-match'), '*');
+  assert.equal(calls[2].headers.get('if-match'), '"v1"');
+  assert.equal(calls.length, 3);
+  for (const status of [404, 500]) {
+    let count = 0;
+    const failing = guardedHistoryClient({ accessKeyId: 'test', secretAccessKey: 'test',
+      fetchImpl: async () => { count++; return new Response('', { status }); } });
+    if (status === 404) assert.equal(await failing.read('x'), null);
+    else await assert.rejects(failing.read('x'), /500/);
+    assert.equal(count, 1);
+  }
+});
+
+test('hist guard 412 replays latest history into local file, returned calculation input, and verified candidate', async () => {
+  const { prepareOfficialHistory } = await guardedModule();
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-guard-'));
+  const file = path.join(dir, 'hist.json');
+  const oldEnv = process.env.FAST_DUMP_HIST_GUARD, oldPrepare = process.env.SCORE_BUFFER_PREPARE, oldFetch = globalThis.fetch;
+  process.env.FAST_DUMP_HIST_GUARD = '1';
+  process.env.SCORE_BUFFER_PREPARE = '1';
+  globalThis.fetch = async () => new Response(JSON.stringify(fixtureRest));
+  const store = histStore(); let conflict = true;
+  const concurrent = [...fixtureRow]; concurrent[0] = 200;
+  store.beforePut = (key) => {
+    if (key === `hist/${iidxId}.json` && conflict) {
+      conflict = false; store.objects.set(key, JSON.stringify([concurrent])); throw new Error('HTTP 412');
+    }
+  };
+  try {
+    const result = await prepareOfficialHistory(iidxId, undefined, { r2: store, histFile: file });
+    assert.equal(result.histRows.length, 2);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file)), result.histRows);
+    assert.equal(store.objects.get(`hist/${iidxId}.json`), result.histBytes.toString());
+    const candidate = JSON.parse(store.objects.get(`meta/scores-delete-${iidxId}.json`));
+    assert.equal(candidate.hist.sha256, sha256Hex(result.histBytes));
+    assert.deepEqual(candidate.score_ids, [12345]);
+    assert.equal(store.calls.filter(([op, key]) => op === 'put' && key.startsWith('hist/')).length, 2);
+    assert.ok(store.calls.filter(([op, key]) => op === 'read' && key === 'songs.json').length >= 3);
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldEnv === undefined) delete process.env.FAST_DUMP_HIST_GUARD; else process.env.FAST_DUMP_HIST_GUARD = oldEnv;
+    if (oldPrepare === undefined) delete process.env.SCORE_BUFFER_PREPARE; else process.env.SCORE_BUFFER_PREPARE = oldPrepare;
+    fs.rmSync(dir, { recursive: true });
+  }
+});
+
+test('hist guard busy lease, exhausted 412, uncertain PUT and readback mismatch never publish candidate or completion', async () => {
+  const { publishGuardedHistory } = await guardedModule();
+  const noCandidate = histStore();
+  await publishGuardedHistory(iidxId, { r2: noCandidate, restRows: fixtureRest });
+  assert.equal(noCandidate.calls.some(([op, key]) => op === 'put' && key.includes('scores-delete')), false);
+  for (const failure of ['busy', '412', 'uncertain', 'readback']) {
+    const store = histStore(); let histWritten = false;
+    if (failure === 'busy') store.objects.set(`meta/fast-hist-lease-${iidxId}.json`, JSON.stringify({ token: 'other', expiresAt: new Date(Date.now() + 15000).toISOString() }));
+    store.beforePut = (key) => {
+      if (!key.startsWith('hist/')) return;
+      histWritten = true;
+      if (failure === '412') throw new Error('HTTP 412');
+      if (failure === 'uncertain') throw new Error('response lost');
+    };
+    store.afterRead = (key, result) => { if (failure === 'readback' && histWritten && key.startsWith('hist/')) result.body = '[]'; };
+    await assert.rejects(publishGuardedHistory(iidxId, { r2: store, restRows: fixtureRest }));
+    const puts = store.calls.filter(([op]) => op === 'put');
+    assert.equal(puts.filter(([, key]) => key.includes('scores-delete') || key.startsWith('user/') || key.startsWith('pending/')).length, 0);
+    assert.equal(puts.filter(([, key]) => key.startsWith('hist/')).length, failure === 'busy' ? 0 : failure === '412' ? 3 : 1);
+    assert.equal(puts.filter(([, key]) => key.includes('lease')).length, failure === 'busy' ? 0 : 1);
+  }
+});
+
+test('hist guard same-generation recovery merges slow fields and unknowns, user then pending then own lease release', async () => {
+  const { publishGuardedActions } = await guardedModule();
+  const store = histStore(), local = readyActions(store);
+  const value = await publishGuardedActions(iidxId, local, { r2: store, env: guardEnv });
+  assert.equal(value.unknown, 42); assert.equal(value.user.unknown, true); assert.equal(value.user.star, 3);
+  assert.equal(value.histRevision, local.histRevision); assert.deepEqual(value.dp, []);
+  const pending = JSON.parse(store.objects.get(`pending/${iidxId}.json`));
+  assert.equal(pending.unknown, 99); assert.equal(pending.viewGeneration, '7'); assert.equal(pending.histRevision, local.histRevision);
+  assert.deepEqual(store.calls.filter(([op]) => op === 'put').map(([, key]) => key),
+    [`meta/fast-hist-lease-${iidxId}.json`, `user/${iidxId}.json`, `pending/${iidxId}.json`, `meta/fast-hist-lease-${iidxId}.json`]);
+});
+
+test('hist guard user uncertainty, newer generation, changed hist/pending and lease loss fail closed without completion/release', async () => {
+  const { publishGuardedActions } = await guardedModule();
+  for (const failure of ['user', 'newer', 'hist', 'pending', 'lease', 'user412']) {
+    const store = histStore(), local = readyActions(store);
+    if (failure === 'newer') store.objects.set(`user/${iidxId}.json`, '{"fastGeneration":"8"}');
+    if (failure === 'hist') local.histRevision = 'b'.repeat(64);
+    if (failure === 'pending') store.objects.set(`pending/${iidxId}.json`, '{"generation":"8"}');
+    store.beforePut = (key) => {
+      if (key.startsWith('user/') && failure === 'user') throw new Error('response lost');
+      if (key.startsWith('user/') && failure === 'user412') throw new Error('HTTP 412');
+    };
+    let leaseReads = 0;
+    store.afterRead = (key, result) => {
+      if (failure === 'lease' && key.includes('lease') && ++leaseReads > 1 && result) result.body = '{"token":"other"}';
+    };
+    await assert.rejects(publishGuardedActions(iidxId, local, { r2: store, env: guardEnv }));
+    assert.equal(store.calls.filter(([op, key]) => op === 'put' && key.startsWith('pending/')).length, 0);
+    assert.equal(store.calls.filter(([op, key]) => op === 'put' && key.includes('lease')).length, 1);
+  }
+});
+
+test('hist guard OFF keeps prepare bytes, candidate and exact IO unchanged and refuses new Actions entry without IO', async () => {
+  const { prepareOfficialHistory, publishGuardedActions } = await guardedModule();
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-off-'));
+  const previous = process.env.FAST_DUMP_HIST_GUARD, oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(fixtureRest));
+  const results = [];
+  try {
+    for (const flag of [undefined, '0']) {
+      if (flag === undefined) delete process.env.FAST_DUMP_HIST_GUARD; else process.env.FAST_DUMP_HIST_GUARD = flag;
+      const store = histStore(), file = path.join(dir, `${flag}.json`);
+      const result = await prepareOfficialHistory(iidxId, undefined, { r2: store, histFile: file });
+      results.push({ bytes: result.histBytes, file: fs.readFileSync(file), calls: store.calls });
+      assert.equal(store.calls.some(([, key]) => key.includes('lease')), false);
+    }
+    assert.deepEqual(results[0], results[1]);
+    assert.deepEqual(results[0].bytes, rowBytes([fixtureRow]));
+    const store = histStore();
+    await assert.rejects(publishGuardedActions(iidxId, {}, { r2: store, env: {} }), /disabled/);
+    assert.deepEqual(store.calls, []);
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (previous === undefined) delete process.env.FAST_DUMP_HIST_GUARD; else process.env.FAST_DUMP_HIST_GUARD = previous;
+    fs.rmSync(dir, { recursive: true });
+  }
+});
