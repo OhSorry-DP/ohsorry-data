@@ -4,10 +4,217 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { mergeActionsUser, mergeEdgeUser, mergeSlowUser, publishUserPatch, runCli } from './dump-fast-publish.mjs';
+import { HIST_LEASE_MS, histGuardEnabled, acquireHistLease, assertHistLease, releaseHistLease,
+  publishHistWithLease, mergeHistUser, mergeHistPending } from './dump-fast-publish.mjs';
+import { replayScoreBuffer } from './score-history.mjs';
 
 const fast = (generation, value = 1) => ({ dp: [value], sp: [value], dpRecent: [], spRecent: [], fastGeneration: String(generation) });
 const origin = (generation = '1') => ({ _v: 'old', user: { iidx_id: 'u1', old: true }, ...fast(generation), unknown: { keep: true } });
 const patch = (generation = '2', value = 2) => fast(generation, value);
+
+function histStore(initial = {}) {
+  const objects = new Map(Object.entries(initial));
+  const calls = [];
+  let sequence = 0;
+  return {
+    objects, calls,
+    async read(key) { calls.push(['read', key]); return objects.get(key) ?? null; },
+    async put(key, body, etag) {
+      calls.push(['put', key, body, etag]);
+      const current = objects.get(key);
+      if (etag === null ? current !== undefined : !current || current.etag !== etag)
+        throw Object.assign(new Error('HTTP 412'), { status: 412 });
+      objects.set(key, { body, etag: `"h${++sequence}"` });
+    },
+  };
+}
+const historyRow = (song, score, version = 34) => ({ score_id: song, iidx_id: 'u1', song_id: song,
+  diff: 3, lamp: 4, ex_score: score, played_version: version, date: '2026-10-29T00:00:00.000Z',
+  date_kst: '2026-10-29', play_style: 1, bp: null, note_count: null });
+const prepareHist = ({ previousHistRows, restRows }) => {
+  const histRows = replayScoreBuffer(previousHistRows, restRows);
+  return { histRows, histBytes: new TextEncoder().encode(JSON.stringify(histRows)) };
+};
+const histArgs = (r2, extra = {}) => ({ r2, id: 'u1', restRows: [historyRow(1, 100)],
+  prepare: prepareHist, enabled: true, now: () => Date.parse('2026-10-29T00:00:00.000Z'), token: 'writer-a', ...extra });
+
+test('hist guard defaults OFF with zero I/O and legacy merges remain byte-identical', async () => {
+  const r2 = histStore();
+  assert.equal(HIST_LEASE_MS, 15000);
+  for (const env of [{}, { FAST_DUMP_HIST_GUARD: '0' }, { FAST_DUMP_HIST_GUARD: true }]) assert.equal(histGuardEnabled(env), false);
+  assert.equal(histGuardEnabled({ FAST_DUMP_HIST_GUARD: '1' }), true);
+  assert.deepEqual(await acquireHistLease({ r2, id: 'u1' }), { ok: false, reason: 'disabled' });
+  assert.deepEqual(await publishHistWithLease({ r2, id: 'u1' }), { ok: false, reason: 'disabled' });
+  assert.equal(r2.calls.length, 0);
+  const current = { ...origin('2'), histRevision: 'a'.repeat(64) };
+  const bytes = JSON.stringify(current);
+  assert.equal(JSON.stringify(mergeEdgeUser(current, fast('2'), '2').value), bytes);
+  assert.equal(mergeActionsUser(current, fast('1', 99), '1').histRevision, current.histRevision);
+  assert.equal(JSON.stringify(current), bytes);
+});
+
+test('hist lease has 15s expiry, one-shot contention, conditional release and no expired follow-up', async () => {
+  let time = Date.parse('2026-10-29T00:00:00.000Z');
+  const r2 = histStore({ 'hist/u1.json': { body: '[]', etag: '"old"' } });
+  const args = histArgs(r2, { now: () => time });
+  const first = await acquireHistLease(args);
+  assert.equal(first.lease.expiresAt, '2026-10-29T00:00:15.000Z');
+  const before = r2.calls.length;
+  assert.equal((await acquireHistLease({ ...args, token: 'writer-b' })).reason, 'lease-busy');
+  assert.equal(r2.calls.length, before + 1);
+  const saved = r2.objects.get(first.lease.key);
+  r2.objects.set(first.lease.key, { ...saved, body: JSON.stringify({ ...JSON.parse(saved.body), unknown: 9 }) });
+  assert.equal((await releaseHistLease({ ...args, lease: first.lease })).ok, true);
+  assert.equal(JSON.parse(r2.objects.get(first.lease.key).body).unknown, 9);
+  const second = await acquireHistLease({ ...args, token: 'writer-b' });
+  const puts = r2.calls.filter(([op]) => op === 'put').length;
+  assert.equal((await releaseHistLease({ ...args, lease: first.lease })).ok, false);
+  assert.equal(r2.calls.filter(([op]) => op === 'put').length, puts);
+  time += HIST_LEASE_MS;
+  await assert.rejects(assertHistLease({ ...args, lease: second.lease }), /expired or lost/);
+  const third = await acquireHistLease({ ...args, token: 'writer-c' });
+  assert.equal(third.ok, true);
+  await releaseHistLease({ ...args, lease: third.lease });
+  const result = await publishHistWithLease({ ...args, token: 'writer-d', prepare: (input) => { time += HIST_LEASE_MS; return prepareHist(input); } });
+  assert.equal(result.ok, false);
+  assert.equal(r2.calls.filter(([op, key]) => op === 'put' && key.startsWith('hist/')).length, 0);
+  const conflict = histStore();
+  conflict.put = async () => { throw Object.assign(new Error('precondition'), { status: 412 }); };
+  assert.equal((await acquireHistLease(histArgs(conflict))).reason, 'lease-conflict');
+});
+
+test('reverse writers fence a delayed expired PUT and Actions replay retains both uploads including late 33', async () => {
+  let time = Date.parse('2026-10-29T00:00:00.000Z');
+  const r2 = histStore({ 'hist/u1.json': { body: '[]', etag: '"old"' } });
+  const args = histArgs(r2, { now: () => time, restRows: [historyRow(1, 100, 33)] });
+  const put = r2.put.bind(r2);
+  let delayed = true, successor;
+  r2.put = async (key, body, etag) => {
+    if (key === 'hist/u1.json' && delayed) {
+      delayed = false;
+      time += HIST_LEASE_MS;
+      successor = await publishHistWithLease({ ...args, token: 'writer-b', restRows: [historyRow(2, 200)] });
+    }
+    return put(key, body, etag);
+  };
+  const old = await publishHistWithLease(args);
+  assert.equal(successor.ok, true);
+  assert.equal(old.ok, false);
+  assert.deepEqual(JSON.parse(r2.objects.get('hist/u1.json').body).map((r) => r[0]), [2]);
+  time += HIST_LEASE_MS;
+  const recovered = await publishHistWithLease({ ...args, token: 'actions' });
+  assert.equal(recovered.ok, true);
+  assert.deepEqual(new Set(recovered.histRows.map((r) => r[0])), new Set([1, 2]));
+  assert.equal(recovered.histRows.find((r) => r[0] === 1)[4], 33);
+  assert.equal(recovered.histRevision.length, 64);
+  assert.equal(recovered.histBytes instanceof Uint8Array, true);
+  // The opposite arrival order: the expired PUT wins first, so its successor
+  // must replay both buffers against that committed body rather than overwrite it.
+  const opposite = histStore({ 'hist/u1.json': { body: '[]', etag: '"old"' } });
+  const commit = opposite.put.bind(opposite);
+  let phase = 'old', delayedBody, delayedEtag, next;
+  opposite.put = async (key, body, etag) => {
+    if (key !== 'hist/u1.json') return commit(key, body, etag);
+    if (phase === 'old') {
+      phase = 'successor'; delayedBody = body; delayedEtag = etag;
+      time += HIST_LEASE_MS;
+      next = await publishHistWithLease({ ...args, r2: opposite, token: 'writer-next', restRows: [historyRow(2, 200)] });
+      return;
+    }
+    if (phase === 'successor') {
+      phase = 'committed';
+      await commit(key, delayedBody, delayedEtag);
+    }
+    return commit(key, body, etag);
+  };
+  assert.equal((await publishHistWithLease({ ...args, r2: opposite })).ok, false);
+  assert.equal(next.ok, true);
+  assert.deepEqual(new Set(next.histRows.map((r) => r[0])), new Set([1, 2]));
+});
+
+test('hist 412 rebuilds from new origin and original buffer; conflicts stop at three PUTs', async () => {
+  const r2 = histStore({ 'hist/u1.json': { body: '[]', etag: '"old"' } });
+  const put = r2.put.bind(r2), inputs = [];
+  let first = true;
+  r2.put = async (key, body, etag) => {
+    if (key === 'hist/u1.json' && first) {
+      first = false;
+      r2.objects.set(key, { body: JSON.stringify(prepareHist({ previousHistRows: [], restRows: [historyRow(2, 200)] }).histRows), etag: '"new"' });
+    }
+    return put(key, body, etag);
+  };
+  const result = await publishHistWithLease(histArgs(r2, { prepare: (input) => {
+    inputs.push(structuredClone(input));
+    const prepared = prepareHist(input);
+    input.restRows.length = 0;
+    return prepared;
+  } }));
+  assert.equal(result.ok, true);
+  assert.deepEqual(inputs.map((input) => input.restRows.length), [1, 1]);
+  assert.equal(inputs[1].previousHistRows[0][0], 2);
+  const puts = r2.calls.filter(([op, key]) => op === 'put' && key === 'hist/u1.json');
+  assert.deepEqual(puts.map((call) => call[3]), ['"old"', '"new"']);
+  assert.deepEqual(new Set(result.histRows.map((r) => r[0])), new Set([1, 2]));
+  const conflict = histStore({ 'hist/u1.json': { body: '[]', etag: '"old"' } });
+  const basePut = conflict.put.bind(conflict);
+  let count = 0;
+  conflict.put = async (...args) => { if (args[0].startsWith('hist/')) { count++; throw new Error('HTTP 412'); } return basePut(...args); };
+  assert.equal((await publishHistWithLease(histArgs(conflict))).reason, 'hist-conflict-exhausted');
+  assert.equal(count, 3);
+});
+
+test('uncertain PUTs never retry, release, or complete; missing, weak and mismatched hist fail closed', async () => {
+  for (const target of ['lease', 'hist']) {
+    const r2 = histStore({ 'hist/u1.json': { body: '[]', etag: '"old"' } });
+    const put = r2.put.bind(r2);
+    let failureAt;
+    r2.put = async (...args) => {
+      await put(...args);
+      if (target === 'lease' ? args[0].startsWith('meta/') : args[0].startsWith('hist/')) {
+        failureAt = r2.calls.length;
+        throw new Error('response lost after commit');
+      }
+    };
+    const result = await publishHistWithLease(histArgs(r2));
+    assert.equal(result.ok, false);
+    assert.equal(r2.calls.length, failureAt);
+    assert.equal(r2.calls.some(([, key]) => /^(user|pending)\//.test(key)), false);
+  }
+  for (const source of [undefined, { body: '[]', etag: 'W/"weak"' }, { body: '{}', etag: '"x"' }]) {
+    const r2 = histStore(source ? { 'hist/u1.json': source } : {});
+    assert.equal((await publishHistWithLease(histArgs(r2))).ok, false);
+    assert.equal(r2.calls.filter(([op, key]) => op === 'put' && key.startsWith('hist/')).length, 0);
+  }
+  const create = histStore();
+  assert.equal((await publishHistWithLease(histArgs(create, { allowCreate: true }))).ok, true);
+  assert.equal(create.calls.find(([op, key]) => op === 'put' && key.startsWith('hist/'))[3], null);
+  const mismatch = histStore({ 'hist/u1.json': { body: '[]', etag: '"old"' } });
+  const put = mismatch.put.bind(mismatch);
+  mismatch.put = async (...args) => { await put(...args); if (args[0].startsWith('hist/')) mismatch.objects.set(args[0], { body: '[]', etag: '"other"' }); };
+  assert.equal((await publishHistWithLease(histArgs(mismatch))).reason, 'hist-readback-mismatch');
+});
+
+test('verified revision repairs same generation without losing unknown fields and fences view completion', () => {
+  const revision = 'b'.repeat(64), old = 'a'.repeat(64);
+  const current = { ...origin('2'), histRevision: old };
+  const next = { ...patch('2', 20), histRevision: revision };
+  const result = mergeHistUser(current, next, '2', revision);
+  assert.equal(result.ok, true);
+  assert.equal(result.value.histRevision, revision);
+  assert.deepEqual(result.value.unknown, current.unknown);
+  assert.deepEqual(result.value.user, current.user);
+  assert.equal(result.value._v, current._v);
+  assert.equal(mergeHistUser(result.value, next, '2', revision).changed, false);
+  assert.equal(mergeHistUser({ ...result.value, dp: [99] }, next, '2', revision).reason, 'generation-conflict');
+  assert.equal(mergeHistUser({ ...current, fastGeneration: '3' }, next, '2', revision).reason, 'newer-generation');
+  assert.equal(mergeHistUser(current, { ...next, persona: 'bad' }, '2', revision).reason, 'invalid-patch');
+  const since = '2026-10-29T00:00:00.000Z', done = '2026-10-29T00:00:01.000Z';
+  const marker = { generation: '2', since, done: '2026-10-29T00:00:03.000Z', unknown: { keep: true } };
+  const completed = mergeHistPending(marker, { generation: '2', since, histRevision: revision, done });
+  assert.deepEqual(completed.value, { ...marker, viewGeneration: '2', histRevision: revision });
+  assert.equal(mergeHistPending({ ...marker, generation: '3' }, { generation: '2', since, histRevision: revision, done }).reason, 'pending-changed');
+  assert.equal(mergeHistPending(marker, { generation: '2', since, histRevision: 'bad', done }).reason, 'invalid-completion');
+});
 
 test('legacy mode leaves original user bytes and performs no I/O', async () => {
   const bytes = JSON.stringify({ _v: 'old', dp: [1], unknown: true });

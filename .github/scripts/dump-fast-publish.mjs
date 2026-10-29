@@ -1,5 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 const FAST_FIELDS = ['dp', 'sp', 'dpRecent', 'spRecent'];
 const FAST_KEYS = [...FAST_FIELDS, 'fastGeneration'];
 const SLOW_FIELDS = ['_v', 'user', 'radars', 'osPattern', 'persona', 'spPersona', 'reachNps'];
@@ -77,6 +78,145 @@ const validSince = (value) => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\
   && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 const validGeneration = (value) => generationOf(value) !== null;
 const validEtag = (value) => typeof value === 'string' && /^"[\x21\x23-\x7e\x80-\xff]*"$/.test(value);
+
+export const HIST_LEASE_MS = 15000;
+const validRevision = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+const revisionOf = (body) => createHash('sha256').update(body, 'utf8').digest('hex');
+const leaseKey = (id) => {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9]+$/.test(id)) throw new TypeError('invalid hist ID');
+  return `meta/fast-hist-lease-${id}.json`;
+};
+const isConflict = (error) => error?.status === 412 || /\b412\b/.test(String(error?.message || error));
+const clock = (now) => {
+  const value = now();
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError('invalid lease clock');
+  return value;
+};
+
+/** Callers opt in explicitly; importing this module never enables history writes. */
+export function histGuardEnabled(env = {}) {
+  return env.FAST_DUMP_HIST_GUARD === '1';
+}
+
+/** One acquisition attempt, with no polling or retries on a busy/uncertain lease. */
+export async function acquireHistLease({ r2, id, enabled = false, now = Date.now, token = randomUUID() }) {
+  if (enabled !== true) return { ok: false, reason: 'disabled' };
+  const key = leaseKey(id);
+  if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(token)) throw new TypeError('invalid lease token');
+  try {
+    const source = await r2.read(key);
+    const current = source === null ? {} : parseBody(source);
+    if (!current || (source !== null && (typeof current.token !== 'string' || !validSince(current.expiresAt))))
+      return { ok: false, reason: 'invalid-lease' };
+    const time = clock(now);
+    if (source !== null && Date.parse(current.expiresAt) > time) return { ok: false, reason: 'lease-busy' };
+    const expiresAt = new Date(time + HIST_LEASE_MS).toISOString();
+    await r2.put(key, JSON.stringify({ ...current, token, expiresAt }), source === null ? null : source.etag);
+    return { ok: true, lease: Object.freeze({ key, token, expiresAt }) };
+  } catch (error) {
+    return { ok: false, reason: isConflict(error) ? 'lease-conflict' : 'lease-failed' };
+  }
+}
+
+/** This check is not atomic with another object's PUT; history CAS is the fence. */
+export async function assertHistLease({ r2, id, lease, now = Date.now }) {
+  if (!lease || lease.key !== leaseKey(id) || !validSince(lease.expiresAt)
+    || Date.parse(lease.expiresAt) <= clock(now)) throw new Error('hist lease expired or lost');
+  const source = await r2.read(lease.key);
+  const current = parseBody(source);
+  if (!current || current.token !== lease.token || current.expiresAt !== lease.expiresAt
+    || Date.parse(current.expiresAt) <= clock(now)) throw new Error('hist lease expired or lost');
+  return { source, current };
+}
+
+/** Release only our still-live token, using the latest lease ETag. Never delete. */
+export async function releaseHistLease({ r2, id, lease, now = Date.now }) {
+  try {
+    const { source, current } = await assertHistLease({ r2, id, lease, now });
+    await r2.put(lease.key, JSON.stringify({ ...current, expiresAt: new Date(clock(now)).toISOString() }), source.etag);
+    return { ok: true };
+  } catch { return { ok: false, reason: 'lease-release-failed' }; }
+}
+
+/**
+ * r2 must be an S3 identity-GET/conditional-PUT adapter: null means only GET 404;
+ * put(key, body, null) means If-None-Match:*, otherwise If-Match. PUT retries=0.
+ * prepare must use the canonical alias normalization and replay, without I/O.
+ * On 412 rebuild from current history and the original buffer, never stale bytes.
+ * Success retains the lease for user/pending publication; failure leaves it to expire.
+ */
+export async function publishHistWithLease({ r2, id, restRows, prepare, enabled = false,
+  allowCreate = false, now = Date.now, token = randomUUID() }) {
+  if (enabled !== true) return { ok: false, reason: 'disabled' };
+  if (!Array.isArray(restRows) || typeof prepare !== 'function') throw new TypeError('hist inputs required');
+  const originalRows = structuredClone(restRows);
+  const acquired = await acquireHistLease({ r2, id, enabled, now, token });
+  if (!acquired.ok) return acquired;
+  const { lease } = acquired;
+  const key = `hist/${id}.json`;
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await assertHistLease({ r2, id, lease, now });
+      const source = await r2.read(key);
+      if (source === null && !allowCreate) throw new Error('hist missing');
+      if (source !== null && (typeof source.body !== 'string' || !validEtag(source.etag))) throw new Error('invalid hist origin');
+      const previousHistRows = source === null ? [] : JSON.parse(source.body);
+      if (!Array.isArray(previousHistRows)) throw new Error('invalid hist rows');
+      await assertHistLease({ r2, id, lease, now });
+      const prepared = await prepare({ previousHistRows, restRows: structuredClone(originalRows) });
+      if (!prepared || !Array.isArray(prepared.histRows) || !(prepared.histBytes instanceof Uint8Array))
+        throw new Error('invalid prepared hist');
+      const body = new TextDecoder('utf-8', { fatal: true }).decode(prepared.histBytes);
+      if (body !== JSON.stringify(prepared.histRows)) throw new Error('prepared hist bytes differ');
+      const histRevision = revisionOf(body);
+      await assertHistLease({ r2, id, lease, now });
+      const changed = source === null || source.body !== body;
+      if (changed) {
+        try { await r2.put(key, body, source === null ? null : source.etag); }
+        catch (error) {
+          if (!isConflict(error)) return { ok: false, reason: 'hist-put-uncertain' };
+          if (attempt === 2) return { ok: false, reason: 'hist-conflict-exhausted' };
+          continue;
+        }
+      }
+      await assertHistLease({ r2, id, lease, now });
+      const downloaded = await r2.read(key);
+      if (!downloaded || !validEtag(downloaded.etag) || downloaded.body !== body)
+        return { ok: false, reason: 'hist-readback-mismatch' };
+      await assertHistLease({ r2, id, lease, now });
+      return { ok: true, changed, lease, histRevision, histEtag: downloaded.etag,
+        histRows: prepared.histRows, histBytes: new TextEncoder().encode(body), prepared };
+    }
+  } catch { return { ok: false, reason: 'hist-validation-failed' }; }
+}
+
+/** Only a caller holding a live lease and verified current hist may use this merge. */
+export function mergeHistUser(current, patch, generation, histRevision) {
+  const keys = [...FAST_KEYS, 'histRevision'];
+  if (!object(current) || !object(patch)) return { ok: false, reason: 'invalid-user' };
+  const incoming = generationOf(generation);
+  if (incoming === null || !validRevision(histRevision) || patch.histRevision !== histRevision
+    || patch.fastGeneration !== generation || keys.some((key) => !own(patch, key))
+    || Object.keys(patch).some((key) => !keys.includes(key))) return { ok: false, reason: 'invalid-patch' };
+  const existing = own(current, 'fastGeneration') ? generationOf(current.fastGeneration) : null;
+  if (own(current, 'fastGeneration') && existing === null) return { ok: false, reason: 'invalid-current-generation' };
+  if (existing !== null && existing > incoming) return { ok: false, reason: 'newer-generation' };
+  if (existing === incoming && current.histRevision === histRevision) {
+    const same = FAST_FIELDS.every((key) => JSON.stringify(current[key]) === JSON.stringify(patch[key]));
+    return same ? { ok: true, changed: false, value: current } : { ok: false, reason: 'generation-conflict' };
+  }
+  return { ok: true, changed: true, value: copyFields({ ...current }, patch, keys) };
+}
+
+/** Completion is evidence of both verified hist and user, never hist PUT alone. */
+export function mergeHistPending(current, { generation, since, histRevision, done }) {
+  if (!object(current) || !validGeneration(generation) || !validSince(since) || !validSince(done)
+    || !validRevision(histRevision)) return { ok: false, reason: 'invalid-completion' };
+  if (current.generation !== generation || current.since !== since) return { ok: false, reason: 'pending-changed' };
+  const completedAt = new Date(Math.max(Date.parse(since), Date.parse(done),
+    validSince(current.done) ? Date.parse(current.done) : 0)).toISOString();
+  return { ok: true, value: { ...current, done: completedAt, viewGeneration: generation, histRevision } };
+}
 
 /** Actions publisher with generation capture and bounded compare-and-swap retries. */
 export async function publishActionsUser({ r2, id, local, generation }) {
