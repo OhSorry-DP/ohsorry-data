@@ -97,16 +97,25 @@ export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Om
       try {
         const [{ runLightDump }, { createR2S3Adapter }] = await Promise.all([import('../_shared/dump-fast-worker.ts'), import('../_shared/r2-s3.ts')]);
         const r2 = createR2S3Adapter({ accountId: getEnv('R2_ACCOUNT_ID')!, accessKeyId: getEnv('R2_ACCESS_KEY_ID')!, secretAccessKey: getEnv('R2_SECRET_ACCESS_KEY')!, bucket: getEnv('R2_BUCKET')!, fetchImpl: fetch });
+        const histPublish = getEnv('FAST_DUMP_HIST_PUBLISH') === '1';
+        const leaseKey = `meta/fast-hist-lease-${body.iidxId}.json`;
         const read = async (key: string) => {
-          if (!R2_KEYS(body.iidxId).includes(key) && key !== `pending/${body.iidxId}.json`) throw new Error('invalid R2 key');
-          const result = await r2.get(key);
+          if (!R2_KEYS(body.iidxId).includes(key) && key !== `pending/${body.iidxId}.json` && !(histPublish && key === leaseKey)) throw new Error('invalid R2 key');
+          let result;
+          try { result = await r2.get(key); } catch (error) {
+            if (histPublish && (error as { status?: number }).status === 404) return null;
+            throw error;
+          }
           return { body: new TextDecoder('utf-8', { fatal: true }).decode(result.value!), etag: result.etag ?? null };
         };
-        const put = async (key: string, value: string, etag: string) => {
-          if (key !== `user/${body.iidxId}.json` && key !== `pending/${body.iidxId}.json`) throw new Error('invalid R2 write key');
-          await r2.put(key, new TextEncoder().encode(value), { ifMatch: etag });
+        const put = async (key: string, value: string, etag: string | null) => {
+          if (key !== `user/${body.iidxId}.json` && key !== `pending/${body.iidxId}.json` && !(histPublish && (key === leaseKey || key === `hist/${body.iidxId}.json`))) throw new Error('invalid R2 write key');
+          if (etag === null) {
+            if (!histPublish) throw new Error('creation disabled');
+            await r2.put(key, new TextEncoder().encode(value), { ifNoneMatch: '*' });
+          } else await r2.put(key, new TextEncoder().encode(value), { ifMatch: etag });
         };
-        const result = await runLightDump({ id: body.iidxId, G: body.generation, since: body.since, deps: { readBuffer: id => readBuffer(deps, id), read, put, prepareFastDump: deps.prepareFastDump } });
+        const result = await runLightDump({ id: body.iidxId, G: body.generation, since: body.since, deps: { histPublish, readBuffer: id => readBuffer(deps, id), read, put, prepareFastDump: deps.prepareFastDump } });
         const outcome = result as { ok: boolean; done?: boolean; reason?: string };
         if (!outcome.ok || !outcome.done) console.warn('dump-fast skipped', JSON.stringify({ id: body.iidxId, generation: body.generation, ok: outcome.ok, done: outcome.done ?? null, reason: outcome.reason ?? null }));
         return response(result.ok ? 200 : 409, { mode: responseMode, status: result.ok ? 'complete' : 'skipped', ...result, value: undefined });

@@ -116,3 +116,44 @@ test('publish injects the shared worker and constrains S3 writes to user and pen
   } finally {globalThis.fetch=realFetch;}
   const source=readFileSync(url,'utf8');assert.match(source,/dump-fast-worker\.ts/);assert.match(source,/r2\.put\(key, new TextEncoder\(\)\.encode\(value\), \{ ifMatch: etag \}\)/);
 });
+
+test('hist switch enables S3 conditional creation and readback; lease busy logs skip without dispatch', async () => {
+  const secret = 'p'.repeat(32), since = '2026-10-24T00:00:00.000Z';
+  const env = { FAST_DUMP_MODE: 'publish', FAST_DUMP_LIGHT_SECRET: secret, FAST_DUMP_HIST_PUBLISH: '1', R2_ACCOUNT_ID: 'acct', R2_ACCESS_KEY_ID: 'key', R2_SECRET_ACCESS_KEY: 'secret', R2_BUCKET: 'bucket' };
+  const store = new Map([['pending/u1.json', { body: JSON.stringify({ generation: '2', since }), etag: '"p"' }], ['meta/song-aliases.json', { body: '{}', etag: '"a"' }], ['songs.json', { body: '[]', etag: '"s"' }]]);
+  const writes = [], logs = []; let version = 0;
+  const handler = createDumpFastHandler({ getEnv: k => env[k], loadReads: async () => ({
+    selectBuffer: async () => ({ rows: [row(1)], total: 1 }), getR2: async () => enc([]),
+    prepareFastDump: ({ previousHistRows, restRows }) => {
+      const histRows = restRows.length ? [[1]] : previousHistRows;
+      return { histRows, histBytes: enc(histRows), fastPatch: { dp: [1], sp: [], dpRecent: [], spRecent: [] } };
+    }
+  }) });
+  const realFetch = globalThis.fetch, warn = console.warn;
+  globalThis.fetch = async (input, init) => {
+    const req = input instanceof Request ? input : new Request(input, init);
+    const key = decodeURIComponent(new URL(req.url).pathname.split('/bucket/')[1]);
+    const item = store.get(key);
+    if (req.method === 'GET') {
+      assert.equal(req.headers.get('accept-encoding'), 'identity');
+      return item ? new Response(item.body, { headers: { etag: item.etag } }) : new Response('', { status: 404 });
+    }
+    assert.equal(req.method, 'PUT');
+    writes.push({ key, match: req.headers.get('if-match'), create: req.headers.get('if-none-match') });
+    if (item ? req.headers.get('if-match') !== item.etag : req.headers.get('if-none-match') !== '*') return new Response('', { status: 412 });
+    store.set(key, { body: await req.text(), etag: `"v${++version}"` }); return new Response('');
+  };
+  console.warn = (...args) => logs.push(args.join(' '));
+  const request = () => new Request('https://local.invalid', { method: 'POST', headers: { 'content-type': 'application/json', 'x-fast-dump-light-secret': secret }, body: JSON.stringify({ iidxId: 'u1', generation: '2', since }) });
+  try {
+    const response = await handler(request()), result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result)); assert.equal(result.done, true);
+    assert.deepEqual(writes.map(x => x.key), ['meta/fast-hist-lease-u1.json', 'hist/u1.json', 'user/u1.json', 'pending/u1.json', 'meta/fast-hist-lease-u1.json']);
+    assert.ok(writes.slice(0, 3).every(x => x.create === '*'));
+    assert.equal(JSON.parse(store.get('pending/u1.json').body).viewGeneration, '2');
+    store.set('meta/fast-hist-lease-u1.json', { body: JSON.stringify({ token: 'other', expiresAt: new Date(Date.now() + 60000).toISOString() }), etag: '"busy"' });
+    writes.length = 0;
+    const skipped = await handler(request()); assert.equal((await skipped.json()).reason, 'lease-busy');
+    assert.equal(writes.length, 0); assert.ok(logs.some(x => x.includes('lease-busy')));
+  } finally { globalThis.fetch = realFetch; console.warn = warn; }
+});
