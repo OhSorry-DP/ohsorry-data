@@ -130,12 +130,14 @@ export async function assertHistLease({ r2, id, lease, now = Date.now }) {
 }
 
 /** Release only our still-live token, using the latest lease ETag. Never delete. */
-export async function releaseHistLease({ r2, id, lease, now = Date.now }) {
+export async function releaseHistLease({ r2, id, lease, now = Date.now, timing }) {
+  const started = timing ? performance.now() : 0;
   try {
     const { source, current } = await assertHistLease({ r2, id, lease, now });
     await r2.put(lease.key, JSON.stringify({ ...current, expiresAt: new Date(clock(now)).toISOString() }), source.etag);
     return { ok: true };
   } catch { return { ok: false, reason: 'lease-release-failed' }; }
+  finally { if (timing) timing('leaseRelease', performance.now() - started); }
 }
 
 /**
@@ -146,46 +148,85 @@ export async function releaseHistLease({ r2, id, lease, now = Date.now }) {
  * Success retains the lease for user/pending publication; failure leaves it to expire.
  */
 export async function publishHistWithLease({ r2, id, restRows, prepare, enabled = false,
-  allowCreate = false, now = Date.now, token = randomUUID() }) {
+  allowCreate = false, now = Date.now, token = randomUUID(), timing }) {
   if (enabled !== true) return { ok: false, reason: 'disabled' };
   if (!Array.isArray(restRows) || typeof prepare !== 'function') throw new TypeError('hist inputs required');
-  const originalRows = structuredClone(restRows);
-  const acquired = await acquireHistLease({ r2, id, enabled, now, token });
+  let started = timing ? performance.now() : 0;
+  let originalRows;
+  try { originalRows = structuredClone(restRows); }
+  finally { if (timing) timing('compute', performance.now() - started); }
+  started = timing ? performance.now() : 0;
+  let acquired;
+  try { acquired = await acquireHistLease({ r2, id, enabled, now, token }); }
+  finally { if (timing) timing('leaseAcquire', performance.now() - started); }
   if (!acquired.ok) return acquired;
   const { lease } = acquired;
   const key = `hist/${id}.json`;
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
-      await assertHistLease({ r2, id, lease, now });
-      const source = await r2.read(key);
+      started = timing ? performance.now() : 0;
+      try { await assertHistLease({ r2, id, lease, now }); }
+      finally { if (timing) timing('leaseCheck', performance.now() - started); }
+      started = timing ? performance.now() : 0;
+      let source;
+      try { source = await r2.read(key); }
+      finally { if (timing) timing('histRead', performance.now() - started); }
       if (source === null && !allowCreate) throw new Error('hist missing');
       if (source !== null && (typeof source.body !== 'string' || !validEtag(source.etag))) throw new Error('invalid hist origin');
-      const previousHistRows = source === null ? [] : JSON.parse(source.body);
-      if (!Array.isArray(previousHistRows)) throw new Error('invalid hist rows');
-      await assertHistLease({ r2, id, lease, now });
+      started = timing ? performance.now() : 0;
+      let previousHistRows;
+      try {
+        previousHistRows = source === null ? [] : JSON.parse(source.body);
+        if (!Array.isArray(previousHistRows)) throw new Error('invalid hist rows');
+      } finally { if (timing) timing('compute', performance.now() - started); }
+      started = timing ? performance.now() : 0;
+      try { await assertHistLease({ r2, id, lease, now }); }
+      finally { if (timing) timing('leaseCheck', performance.now() - started); }
       const prepared = await prepare({ previousHistRows, restRows: structuredClone(originalRows) });
       if (!prepared || !Array.isArray(prepared.histRows) || !(prepared.histBytes instanceof Uint8Array))
         throw new Error('invalid prepared hist');
-      const body = new TextDecoder('utf-8', { fatal: true }).decode(prepared.histBytes);
-      if (body !== JSON.stringify(prepared.histRows)) throw new Error('prepared hist bytes differ');
-      const histRevision = revisionOf(body);
-      await assertHistLease({ r2, id, lease, now });
-      const changed = source === null || source.body !== body;
+      started = timing ? performance.now() : 0;
+      let body, histRevision;
+      try {
+        body = new TextDecoder('utf-8', { fatal: true }).decode(prepared.histBytes);
+        if (body !== JSON.stringify(prepared.histRows)) throw new Error('prepared hist bytes differ');
+        histRevision = revisionOf(body);
+      } finally { if (timing) timing('compute', performance.now() - started); }
+      started = timing ? performance.now() : 0;
+      try { await assertHistLease({ r2, id, lease, now }); }
+      finally { if (timing) timing('leaseCheck', performance.now() - started); }
+      started = timing ? performance.now() : 0;
+      let changed;
+      try { changed = source === null || source.body !== body; }
+      finally { if (timing) timing('compute', performance.now() - started); }
       if (changed) {
+        started = timing ? performance.now() : 0;
         try { await r2.put(key, body, source === null ? null : source.etag); }
         catch (error) {
           if (!isConflict(error)) return { ok: false, reason: 'hist-put-uncertain' };
           if (attempt === 2) return { ok: false, reason: 'hist-conflict-exhausted' };
           continue;
         }
+        finally { if (timing) timing('histPut', performance.now() - started); }
       }
-      await assertHistLease({ r2, id, lease, now });
-      const downloaded = await r2.read(key);
+      started = timing ? performance.now() : 0;
+      try { await assertHistLease({ r2, id, lease, now }); }
+      finally { if (timing) timing('leaseCheck', performance.now() - started); }
+      started = timing ? performance.now() : 0;
+      let downloaded;
+      try { downloaded = await r2.read(key); }
+      finally { if (timing) timing('histVerify', performance.now() - started); }
       if (!downloaded || !validEtag(downloaded.etag) || downloaded.body !== body)
         return { ok: false, reason: 'hist-readback-mismatch' };
-      await assertHistLease({ r2, id, lease, now });
+      started = timing ? performance.now() : 0;
+      try { await assertHistLease({ r2, id, lease, now }); }
+      finally { if (timing) timing('leaseCheck', performance.now() - started); }
+      started = timing ? performance.now() : 0;
+      let histBytes;
+      try { histBytes = new TextEncoder().encode(body); }
+      finally { if (timing) timing('compute', performance.now() - started); }
       return { ok: true, changed, lease, histRevision, histEtag: downloaded.etag,
-        histRows: prepared.histRows, histBytes: new TextEncoder().encode(body), prepared };
+        histRows: prepared.histRows, histBytes, prepared };
     }
   } catch { return { ok: false, reason: 'hist-validation-failed' }; }
 }

@@ -194,6 +194,74 @@ test('uncertain PUTs never retry, release, or complete; missing, weak and mismat
   assert.equal((await publishHistWithLease(histArgs(mismatch))).reason, 'hist-readback-mismatch');
 });
 
+function withFakePerformance(run) {
+  const original = globalThis.performance;
+  let value = 0;
+  globalThis.performance = { now: () => value, advance: (ms) => { value += ms; } };
+  return Promise.resolve().then(() => run(globalThis.performance)).finally(() => { globalThis.performance = original; });
+}
+
+test('publisher timing records only hist PUT and readback elapsed time and retains lease', async () => {
+  await withFakePerformance(async (fake) => {
+    const r2 = histStore({ 'hist/u1.json': { body: '[]', etag: '"old"' } });
+    const read = r2.read.bind(r2), put = r2.put.bind(r2);
+    let histReads = 0;
+    r2.read = async (key) => { const result = await read(key); if (key.startsWith('hist/')) { histReads++; if (histReads === 2) fake.advance(11); } return result; };
+    r2.put = async (key, ...args) => { const result = await put(key, ...args); if (key.startsWith('hist/')) fake.advance(7); return result; };
+    const steps = {};
+    const result = await publishHistWithLease(histArgs(r2, { timing: (step, ms) => { steps[step] = (steps[step] || 0) + ms; } }));
+    assert.equal(result.ok, true); assert.equal(steps.histPut, 7); assert.equal(steps.histVerify, 11);
+    assert.ok(r2.objects.has(result.lease.key));
+  });
+});
+
+test('publisher timing sums three 412 PUT attempts and rebuilds each CAS from current hist', async () => {
+  await withFakePerformance(async (fake) => {
+    const r2 = histStore({ 'hist/u1.json': { body: '[]', etag: '"old"' } });
+    const put = r2.put.bind(r2); let count = 0, putMs = 0; const previous = [];
+    r2.put = async (key, body, etag) => {
+      if (key === 'hist/u1.json') {
+        count++; fake.advance(7);
+        const rows = prepareHist({ previousHistRows: [], restRows: [historyRow(count + 1, 200)] }).histRows;
+        r2.objects.set(key, { body: JSON.stringify(rows), etag: `"race${count}"` });
+        throw Object.assign(new Error('HTTP 412'), { status: 412 });
+      }
+      return put(key, body, etag);
+    };
+    const result = await publishHistWithLease(histArgs(r2, { prepare: (input) => { previous.push(input.previousHistRows); return prepareHist(input); },
+      timing: (step, ms) => { if (step === 'histPut') putMs += ms; } }));
+    assert.equal(result.reason, 'hist-conflict-exhausted'); assert.equal(count, 3);
+    assert.equal(putMs, 21);
+    assert.equal(previous[0].length, 0); assert.equal(previous[1][0][0], 2); assert.equal(previous[2][0][0], 3);
+  });
+});
+
+test('uncertain hist PUT records elapsed time and never writes user or pending', async () => {
+  await withFakePerformance(async (fake) => {
+    const r2 = histStore({ 'hist/u1.json': { body: '[]', etag: '"old"' } });
+    const put = r2.put.bind(r2);
+    r2.put = async (key, ...args) => { if (key.startsWith('hist/')) { fake.advance(7); throw new Error('response lost'); } return put(key, ...args); };
+    const steps = {};
+    const result = await publishHistWithLease(histArgs(r2, { timing: (step, ms) => { steps[step] = (steps[step] || 0) + ms; } }));
+    assert.equal(result.reason, 'hist-put-uncertain'); assert.equal(steps.histPut, 7);
+    assert.equal(r2.calls.some(([, key]) => /^(user|pending)\//.test(key)), false);
+  });
+});
+
+test('release timing includes lease GET and PUT without leaseCheck accumulation', async () => {
+  await withFakePerformance(async (fake) => {
+    const r2 = histStore();
+    const acquired = await acquireHistLease(histArgs(r2));
+    const read = r2.read.bind(r2), put = r2.put.bind(r2);
+    r2.read = async (...args) => { const result = await read(...args); fake.advance(2); return result; };
+    r2.put = async (...args) => { const result = await put(...args); fake.advance(3); return result; };
+    const steps = {};
+    const result = await releaseHistLease({ ...histArgs(r2), lease: acquired.lease,
+      timing: (step, ms) => { steps[step] = (steps[step] || 0) + ms; } });
+    assert.deepEqual(result, { ok: true }); assert.equal(steps.leaseRelease, 5); assert.equal(steps.leaseCheck, undefined);
+  });
+});
+
 test('verified revision repairs same generation without losing unknown fields and fences view completion', () => {
   const revision = 'b'.repeat(64), old = 'a'.repeat(64);
   const current = { ...origin('2'), histRevision: old };
