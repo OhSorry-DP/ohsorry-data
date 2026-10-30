@@ -467,14 +467,14 @@ test('workflow OFF bodies match fixed 89cacab16 baseline and ON sequencing is gu
   assert.ok(upload && pending);
   assert.equal(removeGuard(upload.script), BASE_OFF_UPLOAD);
   assert.equal(removeGuard(pending.script), BASE_OFF_PENDING);
-  const histStart = upload.script.indexOf('if [ "$FAST_DUMP_HIST_GUARD" = "1" ]; then');
+  const histStart = upload.script.indexOf('if [ "$FAST_DUMP_HIST_GUARD" = "1" ] && [ -n "$FAST_DUMP_GENERATION" ]; then');
   const histEnd = upload.script.indexOf('fi', histStart);
   const histBranch = upload.script.slice(histStart, histEnd);
   assert.ok(histStart >= 0 && histEnd < upload.script.indexOf('publish-actions-user'));
   assert.match(histBranch, /node \.github\/scripts\/dump-user\.mjs publish-guarded-actions/);
   assert.match(histBranch, /hist=published-by-dump[\s\S]*user=success[\s\S]*exit 0/);
   assert.doesNotMatch(histBranch, /curl|dump-fast-publish/);
-  assert.ok(pending.script.indexOf('if [ "$FAST_DUMP_HIST_GUARD" = "1" ]; then exit 0; fi')
+  assert.ok(pending.script.indexOf('if [ "$FAST_DUMP_HIST_GUARD" = "1" ] && [ -n "$FAST_DUMP_GENERATION" ]; then exit 0; fi')
     < pending.script.indexOf('complete-actions-pending'));
   assert.match(workflow, /FAST_DUMP_HIST_GUARD: \$\{\{ vars\.FAST_DUMP_HIST_GUARD \|\| '0' \}\}/);
 
