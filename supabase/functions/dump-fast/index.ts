@@ -10,7 +10,7 @@ type Deps = {
 const HIST_COLS = ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'date_kst', 'play_style', 'bp', 'note_count'];
 const R2_KEYS = (id: string) => [`hist/${id}.json`, `user/${id}.json`, 'meta/song-aliases.json', 'songs.json'];
 const noStore = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json; charset=utf-8' };
-const response = (status: number, body: Record<string, unknown>) => new Response(JSON.stringify({ histMatch: null, userMatch: null, calculatedHistHash: null, publishedHistHash: null, calculatedUserHash: null, publishedUserHash: null, bufferRows: null, ...body }), { status, headers: noStore });
+const buildResponse = (status: number, body: Record<string, unknown>) => new Response(JSON.stringify({ histMatch: null, userMatch: null, calculatedHistHash: null, publishedHistHash: null, calculatedUserHash: null, publishedUserHash: null, bufferRows: null, ...body }), { status, headers: noStore });
 const inconclusive = (reason: string, extras: Record<string, unknown> = {}) => ({ status: 'inconclusive', matched: null, reason, ...extras });
 
 function deterministic(value: any): string {
@@ -28,11 +28,14 @@ class Incomplete extends Error {}
 class Missing extends Error {}
 class External extends Error {}
 
-async function readBuffer(deps: Deps, id: string) {
+async function readBuffer(deps: Deps, id: string, onSelect?: () => void, timing?: (step: string, elapsedMs: number) => void) {
+  const started = performance.now();
+  try {
   let offset = 0, total: number | undefined, pages = 0, lastId = -1;
   const rows: Row[] = [], seen = new Set<number>();
   while (true) {
     if (pages >= 51) throw new Incomplete();
+    onSelect?.();
     const page = await deps.selectBuffer(id, offset) as { rows: Row[]; total: number };
     pages++;
     if (!page || !Array.isArray(page.rows)) throw new Incomplete();
@@ -53,6 +56,7 @@ async function readBuffer(deps: Deps, id: string) {
   if (rows.length !== total) throw new Incomplete();
   const fingerprint = await digest(new TextEncoder().encode(deterministic(rows.map(r => ['score_id','iidx_id',...HIST_COLS].map(k => r[k] === undefined ? null : r[k])))));
   return { rows, fingerprint };
+  } finally { timing?.('bufferRead', performance.now() - started); }
 }
 async function digest(bytes: Uint8Array) {
   const hash = await crypto.subtle.digest('SHA-256', bytes);
@@ -62,9 +66,25 @@ function parse(bytes: Uint8Array) { return JSON.parse(new TextDecoder('utf-8', {
 
 export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Omit<Deps, 'getEnv'>> & { loadReads?: () => Promise<Omit<Deps, 'getEnv'>> }) {
   return async (request: Request): Promise<Response> => {
+    const started = performance.now();
+    const steps: Record<string, number> = Object.fromEntries(['requestAuth', 'setup', 'bufferRead', 'histRead', 'referenceRead', 'compute', 'leaseAcquire', 'leaseCheck', 'histPut', 'histVerify', 'userRead', 'userPut', 'pendingRead', 'pendingDone', 'leaseRelease'].map(key => [key, 0]));
+    const counts = { r2Get: 0, r2Put: 0, supabaseSelect: 0 };
+    const timing = (step: string, elapsedMs: number) => { steps[step] += elapsedMs; };
+    const onSelect = () => { counts.supabaseSelect++; };
+    let timingId: string | null = null, generation: string | null = null;
+    let timingMode = 'unavailable', ok = false, reason: string | null = null;
+    let authStarted: number | null = started;
+    let setupStarted: number | null = null;
+    const response = (status: number, body: Record<string, unknown>) => {
+      ok = body.mode === 'shadow' ? body.matched === true : body.ok === true && body.done === true;
+      reason = ok ? null : (body.reason ?? body.status) as string;
+      return buildResponse(status, body);
+    };
+    try {
     const { getEnv } = options;
     const mode = getEnv('FAST_DUMP_MODE');
     const publish = mode === 'publish';
+    timingMode = publish ? (getEnv('FAST_DUMP_HIST_PUBLISH') === '1' ? 'hist' : 'light') : mode === 'shadow' ? 'shadow' : 'unavailable';
     const responseMode = publish ? 'publish' : 'shadow';
     if (mode !== 'shadow' && !publish) return response(503, { mode: 'shadow', status: 'unavailable', reason: 'mode_unavailable' });
     if (publish) {
@@ -91,12 +111,15 @@ export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Om
       let body: any;
       try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return response(400, { mode: responseMode, status: 'rejected', reason: 'invalid_json' }); }
       if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 3 || !Object.hasOwn(body, 'iidxId') || !Object.hasOwn(body, 'generation') || !Object.hasOwn(body, 'since') || typeof body.iidxId !== 'string' || !/^[A-Za-z0-9]+$/.test(body.iidxId) || typeof body.generation !== 'string' || !/^[1-9][0-9]*$/.test(body.generation) || typeof body.since !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(body.since) || !Number.isFinite(Date.parse(body.since)) || new Date(Date.parse(body.since)).toISOString() !== body.since) return response(400, { mode: responseMode, status: 'rejected', reason: 'invalid_request' });
+      timingId = body.iidxId; generation = body.generation;
+      timing('requestAuth', performance.now() - authStarted!); authStarted = null;
+      setupStarted = performance.now();
       let deps: Deps;
       try { deps = { getEnv, ...(options.loadReads ? await options.loadReads() : options) } as Deps; }
       catch { return response(503, { mode: responseMode, status: 'unavailable', reason: 'configuration_unavailable' }); }
       try {
         const [{ runLightDump }, { createR2S3Adapter }] = await Promise.all([import('../_shared/dump-fast-worker.ts'), import('../_shared/r2-s3.ts')]);
-        const r2 = createR2S3Adapter({ accountId: getEnv('R2_ACCOUNT_ID')!, accessKeyId: getEnv('R2_ACCESS_KEY_ID')!, secretAccessKey: getEnv('R2_SECRET_ACCESS_KEY')!, bucket: getEnv('R2_BUCKET')!, fetchImpl: fetch });
+        const r2 = createR2S3Adapter({ accountId: getEnv('R2_ACCOUNT_ID')!, accessKeyId: getEnv('R2_ACCESS_KEY_ID')!, secretAccessKey: getEnv('R2_SECRET_ACCESS_KEY')!, bucket: getEnv('R2_BUCKET')!, fetchImpl: fetch, onRequest: ({ operation }) => { if (operation === 'GET') counts.r2Get++; else if (operation === 'PUT') counts.r2Put++; } });
         const histPublish = getEnv('FAST_DUMP_HIST_PUBLISH') === '1';
         const leaseKey = `meta/fast-hist-lease-${body.iidxId}.json`;
         const read = async (key: string) => {
@@ -115,7 +138,8 @@ export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Om
             await r2.put(key, new TextEncoder().encode(value), { ifNoneMatch: '*' });
           } else await r2.put(key, new TextEncoder().encode(value), { ifMatch: etag });
         };
-        const result = await runLightDump({ id: body.iidxId, G: body.generation, since: body.since, deps: { histPublish, readBuffer: id => readBuffer(deps, id), read, put, prepareFastDump: deps.prepareFastDump } });
+        timing('setup', performance.now() - setupStarted!); setupStarted = null;
+        const result = await runLightDump({ id: body.iidxId, G: body.generation, since: body.since, deps: { histPublish, timing, readBuffer: id => readBuffer(deps, id, onSelect), read, put, prepareFastDump: deps.prepareFastDump } });
         const outcome = result as { ok: boolean; done?: boolean; reason?: string };
         if (!outcome.ok || !outcome.done) console.warn('dump-fast skipped', JSON.stringify({ id: body.iidxId, generation: body.generation, ok: outcome.ok, done: outcome.done ?? null, reason: outcome.reason ?? null }));
         return response(result.ok ? 200 : 409, { mode: responseMode, status: result.ok ? 'complete' : 'skipped', ...result, value: undefined });
@@ -146,14 +170,26 @@ export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Om
     try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return response(400, { mode: responseMode, status: 'rejected', reason: 'invalid_json' }); }
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || !Object.hasOwn(body, 'iidxId') || typeof body.iidxId !== 'string' || !/^[A-Za-z0-9]+$/.test(body.iidxId)) return response(400, { mode: 'shadow', status: 'rejected', reason: 'invalid_request' });
     const id = body.iidxId;
+    timingId = id;
+    timing('requestAuth', performance.now() - authStarted!); authStarted = null;
+    setupStarted = performance.now();
     let deps: Deps;
     try { deps = { getEnv, ...(options.loadReads ? await options.loadReads() : options) } as Deps; }
     catch { return response(503, { mode: 'shadow', status: 'unavailable', reason: 'configuration_unavailable' }); }
+    timing('setup', performance.now() - setupStarted!); setupStarted = null;
+    const readShadow = (key: string) => {
+      const step = key.startsWith('hist/') ? 'histRead' : key.startsWith('user/') ? 'userRead' : 'referenceRead';
+      const readStarted = performance.now();
+      counts.r2Get++;
+      try { return deps.getR2(key).finally(() => timing(step, performance.now() - readStarted)); }
+      catch (error) { timing(step, performance.now() - readStarted); throw error; }
+    };
     let firstBuffer: Awaited<ReturnType<typeof readBuffer>>;
-    try { firstBuffer = await readBuffer(deps, id); } catch (e: any) { if (e instanceof Incomplete) return response(200, { mode: 'shadow', ...inconclusive('buffer_incomplete', { bufferRows: null }) }); if (e?.code === 'credentials_missing') return response(503, { mode: 'shadow', status: 'unavailable', reason: 'configuration_unavailable' }); return response(502, { mode: 'shadow', status: 'error', reason: 'upstream_read_failed' }); }
+    try { firstBuffer = await readBuffer(deps, id, onSelect, timing); } catch (e: any) { if (e instanceof Incomplete) return response(200, { mode: 'shadow', ...inconclusive('buffer_incomplete', { bufferRows: null }) }); if (e?.code === 'credentials_missing') return response(503, { mode: 'shadow', status: 'unavailable', reason: 'configuration_unavailable' }); return response(502, { mode: 'shadow', status: 'error', reason: 'upstream_read_failed' }); }
     let firstObjects: Uint8Array[];
-    try { firstObjects = await Promise.all(R2_KEYS(id).map(k => deps.getR2(k))); } catch (e) { if (e instanceof Missing) return response(200, { mode: 'shadow', ...inconclusive('reference_missing', { bufferRows: firstBuffer.rows.length }) }); return response(502, { mode: 'shadow', status: 'error', reason: 'upstream_read_failed' }); }
+    try { firstObjects = await Promise.all(R2_KEYS(id).map(readShadow)); } catch (e) { if (e instanceof Missing) return response(200, { mode: 'shadow', ...inconclusive('reference_missing', { bufferRows: firstBuffer.rows.length }) }); return response(502, { mode: 'shadow', status: 'error', reason: 'upstream_read_failed' }); }
     const [histBytes, userBytes, aliasesBytes, songsBytes] = firstObjects;
+    let computeStarted: number | null = performance.now();
     try {
       const hist = parse(histBytes), user = parse(userBytes), aliases = parse(aliasesBytes), songs = parse(songsBytes);
       const nowMs = typeof user?._v === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(user._v) ? Date.parse(user._v) : NaN;
@@ -168,12 +204,14 @@ export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Om
       const calcFields = fields(candidate.fastPatch), publishedFields = fields(user);
       const firstUserHash = await digest(new TextEncoder().encode(publishedFields));
       let afterBuffer, afterObjects;
-      try { [afterBuffer, afterObjects] = await Promise.all([readBuffer(deps, id), Promise.all(R2_KEYS(id).map(k => deps.getR2(k)))]); }
+      timing('compute', performance.now() - computeStarted); computeStarted = null;
+      try { [afterBuffer, afterObjects] = await Promise.all([readBuffer(deps, id, onSelect, timing), Promise.all(R2_KEYS(id).map(readShadow))]); }
       catch (e) {
         if (e instanceof Missing) return response(200, { mode: 'shadow', ...inconclusive('reference_missing') });
         if (!(e instanceof Incomplete)) return response(502, { mode: 'shadow', status: 'error', reason: 'upstream_read_failed' });
         return response(200, { mode: 'shadow', ...inconclusive('inputs_changed', { histMatch: null, userMatch: null, calculatedHistHash: calcHistHash, publishedHistHash: histHash, bufferRows: firstBuffer.rows.length }) });
       }
+      computeStarted = performance.now();
       const afterHashes = await Promise.all(afterObjects.map(digest));
       const originalHashes = await Promise.all(firstObjects.map(digest));
       if (afterBuffer.fingerprint !== firstBuffer.fingerprint || afterHashes.some((h, i) => h !== originalHashes[i])) return response(200, { mode: 'shadow', ...inconclusive('inputs_changed', { histMatch: null, userMatch: null, calculatedHistHash: calcHistHash, publishedHistHash: histHash, bufferRows: firstBuffer.rows.length }) });
@@ -185,6 +223,11 @@ export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Om
     } catch (e) {
       if (e instanceof Incompatible) return response(200, { mode: 'shadow', ...inconclusive('reference_incompatible', { histMatch: null, userMatch: null, bufferRows: firstBuffer.rows.length }) });
       return response(500, { mode: 'shadow', status: 'error', reason: 'calculation_failed' });
+    } finally { if (computeStarted !== null) timing('compute', performance.now() - computeStarted); }
+    } finally {
+      if (authStarted !== null) timing('requestAuth', performance.now() - authStarted);
+      if (setupStarted !== null) timing('setup', performance.now() - setupStarted);
+      console.log('dump-fast timing', JSON.stringify({ id: timingId, generation, mode: timingMode, totalMs: Math.round(performance.now() - started), steps: Object.fromEntries(Object.entries(steps).map(([key, value]) => [key, Math.round(value)])), counts, ok, reason }));
     }
   };
 }

@@ -13,6 +13,42 @@ const { prepareFastDump, HIST_COLS } = await import('./dump-fast-core.mjs');
 const secret = 's'.repeat(32), enc = x => new TextEncoder().encode(JSON.stringify(x));
 const row = n => ({ score_id:n, iidx_id:'u1', song_id:1, diff:3, lamp:4, ex_score:100, played_version:32, date:'2026-10-23T00:00:00Z', date_kst:'2026-10-23', play_style:1, bp:2, note_count:100 });
 const req = (x = { iidxId:'u1' }, init = {}) => new Request('https://local.invalid', { method:'POST', headers:{'content-type':'application/json','x-fast-dump-shadow-secret':secret}, body:JSON.stringify(x), ...init });
+const timingKeys = ['requestAuth','setup','bufferRead','histRead','referenceRead','compute','leaseAcquire','leaseCheck','histPut','histVerify','userRead','userPut','pendingRead','pendingDone','leaseRelease'];
+async function captureTiming(run) {
+  const saved = console.log, logs = [];
+  console.log = (...args) => { assert.equal(args[0], 'dump-fast timing'); logs.push(JSON.parse(args[1])); };
+  try { await run(logs); } finally { console.log = saved; }
+}
+function timingFixture({ light = false, fail, clock = () => {}, rows = [row(1)], id = 'u1', G = '2' } = {}) {
+  const since = '2026-10-24T00:00:00.000Z';
+  const env = { FAST_DUMP_MODE:'publish', FAST_DUMP_LIGHT_SECRET:secret, FAST_DUMP_HIST_PUBLISH:light?'0':'1', R2_ACCOUNT_ID:'acct', R2_ACCESS_KEY_ID:'key', R2_SECRET_ACCESS_KEY:'secret', R2_BUCKET:'bucket' };
+  const user = {_v:since,dp:[],sp:[],dpRecent:[],spRecent:[]};
+  const store = new Map([[`pending/${id}.json`,{body:JSON.stringify({generation:G,since}),etag:'"p"'}],['meta/song-aliases.json',{body:'{}',etag:'"a"'}],['songs.json',{body:'[]',etag:'"s"'}]]);
+  // Existing objects also exercise ETag CAS for hist and user.
+  store.set(`hist/${id}.json`,{body:'[]',etag:'"h"'});
+  store.set(`user/${id}.json`,{body:JSON.stringify(user),etag:'"u"'});
+  if(fail==='lease') store.set(`meta/fast-hist-lease-${id}.json`,{body:JSON.stringify({token:'other',expiresAt:new Date(Date.now()+60000).toISOString()}),etag:'"busy"'});
+  let version=0;
+  const attempts=[], writes=[];
+  const fetch = async(input,init)=>{
+    const r=input instanceof Request?input:new Request(input,init), key=decodeURIComponent(new URL(r.url).pathname.split('/bucket/')[1]);
+    attempts.push([r.method,key]); const item=store.get(key);
+    if(r.method==='GET') return item?new Response(item.body,{headers:{etag:item.etag}}):new Response('',{status:404});
+    writes.push(key); if(key===`hist/${id}.json`) clock(7);
+    if((fail==='user'&&key===`user/${id}.json`)||(fail==='pending'&&key===`pending/${id}.json`)||(fail==='hist'&&key===`hist/${id}.json`)) throw Error('private-error');
+    if(item?r.headers.get('if-match')!==item.etag:r.headers.get('if-none-match')!=='*') return new Response('',{status:412});
+    store.set(key,{body:await r.text(),etag:`"v${++version}"`}); return new Response('');
+  };
+  const handler=createDumpFastHandler({getEnv:k=>env[k],loadReads:async()=>{clock(3);return {
+    selectBuffer:async(_,offset)=>{clock(5);return {rows:rows.slice(offset,offset+1000),total:rows.length};},getR2:async()=>enc([]),
+    prepareFastDump:({previousHistRows,restRows})=>{const histRows=light?[]:restRows.length?[[1]]:previousHistRows;return {histRows,histBytes:enc(histRows),fastPatch:{dp:[1],sp:[],dpRecent:[],spRecent:[]}};}
+  };}});
+  return {env,handler,fetch,attempts,writes,request:()=>req({iidxId:id,generation:G,since},{headers:{'content-type':'application/json','x-fast-dump-light-secret':secret}})};
+}
+async function runTimingFixture(f) {
+  const saved=globalThis.fetch; globalThis.fetch=f.fetch;
+  try {const r=await f.handler(f.request());return {status:r.status,body:await r.json()};} finally {globalThis.fetch=saved;}
+}
 function fixture({ rows = [], real = false, published = [], compute, select, r2 } = {}) {
   const env = { FAST_DUMP_MODE:'shadow', FAST_DUMP_SHADOW_SECRET:secret };
   const user = { _v:'2026-10-24T03:00:00.000Z', dp:[], sp:[], dpRecent:[], spRecent:[] };
@@ -157,3 +193,50 @@ test('hist switch enables S3 conditional creation and readback; lease busy logs 
     assert.equal(writes.length, 0); assert.ok(logs.some(x => x.includes('lease-busy')));
   } finally { globalThis.fetch = realFetch; console.warn = warn; }
 });
+
+test('timing hist success has fixed schema, counts and preserved writes',async()=>captureTiming(async logs=>{
+  const f=timingFixture(), r=await runTimingFixture(f); assert.equal(r.status,200);assert.equal(r.body.done,true);
+  assert.equal(logs.length,1);const t=logs[0];assert.equal(t.id,'u1');assert.equal(t.generation,'2');assert.equal(t.mode,'hist');assert.equal(t.ok,true);assert.equal(t.reason,null);
+  assert.deepEqual(Object.keys(t.steps),timingKeys);for(const n of [t.totalMs,...Object.values(t.steps),...Object.values(t.counts)])assert.ok(Number.isInteger(n)&&n>=0);
+  assert.deepEqual(t.counts,{r2Get:33,r2Put:5,supabaseSelect:2});assert.equal(t.counts.r2Get,f.attempts.filter(x=>x[0]==='GET').length);assert.equal(t.counts.r2Put,f.attempts.filter(x=>x[0]==='PUT').length);
+  assert.deepEqual(f.writes,['meta/fast-hist-lease-u1.json','hist/u1.json','user/u1.json','pending/u1.json','meta/fast-hist-lease-u1.json']);
+}));
+test('timing light success preserves response and user then pending writes',async()=>captureTiming(async logs=>{
+  const f=timingFixture({light:true}),r=await runTimingFixture(f);assert.equal(r.status,200);assert.equal(r.body.done,true);assert.equal(logs.length,1);
+  assert.equal(logs[0].mode,'light');assert.equal(logs[0].ok,true);assert.deepEqual(logs[0].counts,{r2Get:11,r2Put:2,supabaseSelect:2});for(const key of ['leaseAcquire','leaseCheck','leaseRelease','histPut'])assert.equal(logs[0].steps[key],0);
+  assert.deepEqual(f.writes,['user/u1.json','pending/u1.json']);
+}));
+test('timing finally covers authentication, JSON, setup and unavailable mode',async()=>captureTiming(async logs=>{
+  for(const kind of ['auth','json','setup','mode']) {
+    const f=timingFixture();let loaded=0,consumed=0;
+    if(kind==='mode')f.env.FAST_DUMP_MODE='off';
+    const handler=createDumpFastHandler({getEnv:k=>f.env[k],loadReads:async()=>{loaded++;throw Error('private-error');}});
+    const request=kind==='json'?req({}, {headers:{'content-type':'application/json','x-fast-dump-light-secret':secret},body:'{'}):kind==='auth'?req():f.request();
+    if(kind==='auth'||kind==='mode')Object.defineProperty(request,'body',{get(){consumed++;throw Error('body read');}});
+    const r=await handler(request),body=await r.json(),t=logs.at(-1);
+    assert.equal(logs.length,['auth','json','setup','mode'].indexOf(kind)+1);assert.equal(r.status,kind==='auth'?401:kind==='json'?400:503);
+    assert.equal(t.reason,body.reason);assert.equal(t.ok,false);assert.deepEqual(t.counts,{r2Get:0,r2Put:0,supabaseSelect:0});assert.equal(loaded,kind==='setup'?1:0);assert.equal(consumed,0);
+    assert.equal(t.id,kind==='setup'?'u1':null);assert.equal(t.generation,kind==='setup'?'2':null);assert.doesNotMatch(JSON.stringify(t),/private-error|ssss|since|https/);
+  }
+}));
+test('timing failure and partial success retain skip warning and sanitized reasons',async()=>captureTiming(async logs=>{
+  const saved=console.warn,warnings=[];console.warn=(...args)=>warnings.push(args.join(' '));
+  try {for(const [fail,status,reason] of [['lease',409,'lease-busy'],['user',409,'user-put-failed'],['pending',200,'done-put-failed'],['hist',409,'hist-put-uncertain']]) {
+    let now=0;const original=Object.getOwnPropertyDescriptor(performance,'now');Object.defineProperty(performance,'now',{configurable:true,value:()=>now});
+    try {const f=timingFixture({fail,clock:n=>{now+=n;}}),r=await runTimingFixture(f),t=logs.at(-1);assert.equal(r.status,status);assert.equal(r.body.reason,reason);assert.equal(t.reason,reason);assert.equal(t.ok,false);assert.equal(logs.length,['lease','user','pending','hist'].indexOf(fail)+1);if(fail==='lease')assert.equal(f.writes.length,0);if(fail==='pending'){assert.equal(r.body.ok,true);assert.equal(r.body.done,false);}if(fail==='hist')assert.equal(t.steps.histPut,7);assert.doesNotMatch(JSON.stringify(t),/private-error|ssss|since|https/);}
+    finally {if(original)Object.defineProperty(performance,'now',original);else delete performance.now;}
+  }assert.equal(warnings.length,4);assert.ok(warnings.every(x=>x.startsWith('dump-fast skipped ')));} finally {console.warn=saved;}
+}));
+test('timing exact clock and terminal empty pages count every SELECT',async()=>captureTiming(async logs=>{
+  let now=0;const original=Object.getOwnPropertyDescriptor(performance,'now');Object.defineProperty(performance,'now',{configurable:true,value:()=>now});
+  try {const f=timingFixture({clock:n=>{now+=n;}});await runTimingFixture(f);const t=logs[0];assert.equal(t.steps.setup,3);assert.equal(t.steps.bufferRead,10);assert.equal(t.steps.histPut,7);assert.equal(t.totalMs,20);
+    const paged=timingFixture({rows:Array.from({length:1000},(_,i)=>row(i+1))});await runTimingFixture(paged);assert.equal(logs[1].counts.supabaseSelect,4);
+  } finally {if(original)Object.defineProperty(performance,'now',original);else delete performance.now;}
+}));
+test('timing shadow and concurrent requests keep request state isolated',async()=>captureTiming(async logs=>{
+  await check(fixture(),200,'matched');assert.equal(logs.length,1);assert.equal(logs[0].mode,'shadow');assert.equal(logs[0].generation,null);assert.equal(logs[0].counts.r2Put,0);assert.equal(logs[0].ok,true);
+  const a=timingFixture({id:'u1',G:'2'}),b=timingFixture({id:'u2',G:'3',light:true});const saved=globalThis.fetch;
+  globalThis.fetch=(input,init)=>{const r=input instanceof Request?input:new Request(input,init);return (r.url.includes('u2')?b:a).fetch(r);};
+  try {const results=await Promise.all([a.handler(a.request()),b.handler(b.request())]);assert.ok(results.every(r=>r.status===200));assert.equal(logs.length,3);for(const [id,G,mode,puts] of [['u1','2','hist',5],['u2','3','light',2]]){const t=logs.slice(1).find(t=>t.id===id);assert.equal(t.generation,G);assert.equal(t.mode,mode);assert.equal(t.counts.r2Put,puts);assert.equal(t.steps.histPut,mode==='light'?0:t.steps.histPut);}}
+  finally {globalThis.fetch=saved;}
+}));
