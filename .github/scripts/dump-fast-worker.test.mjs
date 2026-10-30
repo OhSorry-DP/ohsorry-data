@@ -269,3 +269,98 @@ test('held lease expires at user PUT boundary after final lease GET; user and co
   assert.equal(result.reason, 'user-put-failed');
   assert.equal(f.objects.get('pending/u1.json').viewGeneration, undefined);
 });
+
+const withFakePerformance = async (fn) => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'performance');
+  let time = 0;
+  Object.defineProperty(globalThis, 'performance', { configurable: true, value: { now: () => time } });
+  try { await fn((ms) => { time += ms; }); }
+  finally { if (original) Object.defineProperty(globalThis, 'performance', original); else delete globalThis.performance; }
+};
+
+test('hist timing records buffer and prepare boundaries while preserving lease and five PUT order', async () => {
+  await withFakePerformance(async advance => {
+    const f = histFixture(), steps = {};
+    f.deps.timing = (step, ms) => { steps[step] = (steps[step] ?? 0) + ms; };
+    const readBuffer = f.deps.readBuffer, prepare = f.deps.prepareFastDump;
+    f.deps.readBuffer = async (...args) => { advance(5); return readBuffer(...args); };
+    f.deps.prepareFastDump = (...args) => { advance(3); return prepare(...args); };
+    const result = await f.run();
+    assert.equal(result.done, true);
+    assert.equal(steps.bufferRead, 10);
+    assert.equal(steps.compute, 6);
+    assert.deepEqual(f.puts.map(x => x.key), ['meta/fast-hist-lease-u1.json', 'hist/u1.json', 'user/u1.json', 'pending/u1.json', 'meta/fast-hist-lease-u1.json']);
+  });
+});
+
+test('hist timing separates initial history read from readback and lease checks', async () => {
+  await withFakePerformance(async advance => {
+    const f = histFixture(), steps = {}, read = f.deps.read;
+    f.deps.timing = (step, ms) => { steps[step] = (steps[step] ?? 0) + ms; };
+    f.deps.read = async key => { if (key.startsWith('hist/')) advance(4); if (key.includes('lease')) advance(2); return read(key); };
+    assert.equal((await f.run()).done, true);
+    assert.equal(steps.histVerify, 20);
+    assert.equal(steps.histRead, 8);
+    assert.ok(steps.leaseCheck > 0);
+    assert.equal(steps.leaseAcquire, 2);
+    assert.equal(steps.leaseRelease, 2);
+  });
+});
+
+test('light timing records only its read and compute boundaries without changing result', async () => {
+  await withFakePerformance(async advance => {
+    const { deps, objects, puts } = fixture(), steps = {};
+    deps.timing = (step, ms) => { steps[step] = (steps[step] ?? 0) + ms; };
+    const readBuffer = deps.readBuffer;
+    deps.readBuffer = async (...args) => { advance(5); return readBuffer(...args); };
+    deps.histPublish = false;
+    const result = await runLightDump({ id: 'u1', G: '5', since, deps });
+    assert.deepEqual(result, { ok: true, changed: true, done: true, value: objects.get('user/u1.json') });
+    assert.equal(steps.bufferRead, 10);
+    assert.equal(steps.histPut ?? 0, 0);
+    assert.equal(steps.leaseAcquire ?? 0, 0);
+    assert.equal(steps.leaseRelease ?? 0, 0);
+    assert.deepEqual(puts.map(x => x.key), ['user/u1.json', 'pending/u1.json']);
+    assert.equal(puts.length, 2);
+  });
+});
+
+test('failed user and completion PUTs retain timed partial results and do not release early', async () => {
+  await withFakePerformance(async advance => {
+    const user = histFixture(), userSteps = {};
+    user.deps.timing = (step, ms) => { userSteps[step] = (userSteps[step] ?? 0) + ms; };
+    const userPut = user.deps.put;
+    user.deps.put = async (key, ...args) => { if (key.startsWith('user/')) { advance(7); throw Error('lost'); } return userPut(key, ...args); };
+    assert.equal((await user.run()).reason, 'user-put-failed');
+    assert.equal(userSteps.userPut, 7);
+    assert.equal(user.puts.filter(x => x.key.startsWith('pending/')).length, 0);
+    assert.equal(user.puts.filter(x => x.key.startsWith('meta/fast-hist-lease')).length, 1);
+
+    const done = histFixture(), doneSteps = {}, put = done.deps.put;
+    done.deps.timing = (step, ms) => { doneSteps[step] = (doneSteps[step] ?? 0) + ms; };
+    done.deps.put = async (key, ...args) => { if (key.startsWith('pending/')) { advance(9); throw Error('lost'); } return put(key, ...args); };
+    const result = await done.run();
+    assert.deepEqual(result, { ok: true, changed: true, done: false, reason: 'done-put-failed' });
+    assert.equal(doneSteps.pendingDone, 9);
+    assert.deepEqual(done.puts.map(x => x.key), ['meta/fast-hist-lease-u1.json', 'hist/u1.json', 'user/u1.json']);
+    assert.equal(done.puts.filter(x => x.key.startsWith('pending/')).length, 0);
+  });
+});
+
+test('early pending change and buffer failure preserve result while recording completed boundaries', async () => {
+  await withFakePerformance(async advance => {
+    const early = fixture(), earlySteps = {};
+    early.deps.timing = (step, ms) => { earlySteps[step] = (earlySteps[step] ?? 0) + ms; };
+    const read = early.deps.read;
+    early.deps.read = async key => { const value = await read(key); if (key === 'pending/u1.json') advance(5); return value; };
+    early.objects.set('pending/u1.json', { generation: '6', since });
+    assert.deepEqual(await runLightDump({ id: 'u1', G: '5', since, deps: early.deps }), { ok: false, reason: 'pending-changed' });
+    assert.equal(earlySteps.pendingRead, 5);
+
+    const failure = fixture(), failedSteps = {};
+    failure.deps.timing = (step, ms) => { failedSteps[step] = (failedSteps[step] ?? 0) + ms; };
+    failure.deps.readBuffer = async () => { advance(5); throw Error('buffer read'); };
+    assert.deepEqual(await runLightDump({ id: 'u1', G: '5', since, deps: failure.deps }), { ok: false, reason: 'read-or-calculation-failed' });
+    assert.equal(failedSteps.bufferRead, 5);
+  });
+});
