@@ -155,6 +155,8 @@ async function runHistDump<Row>({ id, G, since, deps }: {
     const observe = <T>(promise: Promise<T>) => promise.then(value => ({ value }), error => ({ error }));
     const initial = [observe(timedRead(pendingKey, 'pendingRead')), observe(timedRead(userKey, 'userRead')), observe(timedRead(`hist/${id}.json`, 'histRead'))] as const;
     const firstBuffer = observe(timedBuffer());
+    const firstReferences = observe(Promise.all([timedRead('meta/song-aliases.json', 'referenceRead'), timedRead('songs.json', 'referenceRead')]));
+    let firstPrepare = true;
     const [pendingResult, userResult, histResult] = await Promise.all(initial);
     if ('error' in pendingResult) throw pendingResult.error;
     if ('error' in userResult) throw userResult.error;
@@ -176,7 +178,16 @@ async function runHistDump<Row>({ id, G, since, deps }: {
     // References are reloaded for every 412 replay; the original buffer is retained.
     const published = await publishHistWithLease({ r2, id, restRows: buffer.rows, enabled: true, allowCreate, now: nowMs, timing,
       prepare: async ({ previousHistRows, restRows }: { previousHistRows: unknown[]; restRows: Row[] }) => {
-        const [aliasesSource, songsSource] = await Promise.all([timedRead('meta/song-aliases.json', 'referenceRead'), timedRead('songs.json', 'referenceRead')]);
+        let referenceResult;
+        if (firstPrepare) {
+          firstPrepare = false;
+          referenceResult = await firstReferences;
+        } else {
+          const [aliasesSource, songsSource] = await Promise.all([timedRead('meta/song-aliases.json', 'referenceRead'), timedRead('songs.json', 'referenceRead')]);
+          referenceResult = { value: [aliasesSource, songsSource] };
+        }
+        if ('error' in referenceResult) throw referenceResult.error;
+        const [aliasesSource, songsSource] = referenceResult.value;
         if (!aliasesSource || !songsSource) throw new Error('missing references');
         started = timing ? performance.now() : 0;
         try { await assertHistLease({ r2, id, lease: heldLease, now: nowMs }); }

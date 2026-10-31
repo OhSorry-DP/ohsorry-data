@@ -174,19 +174,21 @@ test('higher generation and busy lease skip without histogram or user writes', a
 
 test('hist 412 reloads references and merges original buffer with winning history', async () => {
   const f = histFixture(), put = f.deps.put, read = f.deps.read;
-  let conflict = true, aliasesReads = 0;
-  f.deps.read = async key => { if (key.includes('aliases')) aliasesReads++; return read(key); };
+  let conflict = true, aliasesReads = 0, songsReads = 0;
+  f.deps.read = async key => { if (key.includes('aliases')) aliasesReads++; if (key === 'songs.json') songsReads++; return read(key); };
   f.deps.put = async (key, body, match) => {
     if (key.startsWith('hist/') && conflict) {
-      conflict = false; await put(key, JSON.stringify([{ score_id: 2 }]), match);
-      f.objects.set('meta/song-aliases.json', { changed: true });
+      conflict = false;
+      f.objects.set('meta/song-aliases.json', { v: 1 });
+      f.objects.set(key, [{ score_id: 2 }]);
+      await put(key, JSON.stringify([{ score_id: 2 }]), etag(key));
       throw Object.assign(Error('412'), { status: 412 });
     }
     return put(key, body, match);
   };
   assert.equal((await f.run()).done, true);
   assert.deepEqual(f.objects.get('hist/u1.json'), [{ score_id: 2 }, { score_id: 1 }]);
-  assert.deepEqual(f.objects.get('user/u1.json').dp, [2]); assert.equal(aliasesReads, 4);
+  assert.deepEqual(f.objects.get('user/u1.json').dp, [2]); assert.equal(aliasesReads, 4); assert.equal(songsReads, 4);
 });
 
 test('new user/hist creation requires both 404, matching pending and nonempty stable buffer', async () => {
@@ -285,10 +287,11 @@ test('held lease expires at user PUT boundary after final lease GET; user and co
   assert.equal(f.objects.get('pending/u1.json').viewGeneration, undefined);
 });
 
-test('initial R2 reads and buffer start together; buffer result waits behind initial validation', async () => {
+test('initial five R2 reads and buffer start together; results wait behind initial validation', async () => {
   const f = histFixture(), events = [], gates = new Map(), reached = new Map();
   const initial = ['pending/u1.json', 'user/u1.json', 'hist/u1.json'];
-  for (const name of [...initial, 'buffer']) {
+  const references = ['meta/song-aliases.json', 'songs.json'];
+  for (const name of [...initial, ...references, 'buffer']) {
     let release, signal;
     gates.set(name, new Promise(resolve => { release = resolve; }));
     reached.set(name, new Promise(resolve => { signal = resolve; }));
@@ -297,20 +300,49 @@ test('initial R2 reads and buffer start together; buffer result waits behind ini
   }
   const read = f.deps.read, readBuffer = f.deps.readBuffer;
   f.deps.read = async key => {
-    if (initial.includes(key)) { events.push(key); gates.get(`${key}:signal`)(); await gates.get(key); }
+    if (initial.includes(key) || references.includes(key)) { events.push(key); gates.get(`${key}:signal`)(); await gates.get(key); }
     return read(key);
   };
   f.deps.readBuffer = async (...args) => { events.push('buffer'); gates.get('buffer:signal')(); await gates.get('buffer'); return readBuffer(...args); };
   const resultPromise = f.run();
-  await Promise.all([...initial, 'buffer'].map(name => reached.get(name)));
-  assert.deepEqual(events.sort(), [...initial, 'buffer'].sort());
+  await Promise.all([...initial, ...references, 'buffer'].map(name => reached.get(name)));
+  assert.deepEqual(events.sort(), [...initial, ...references, 'buffer'].sort());
   assert.equal(f.puts.length, 0);
   gates.get('buffer:release')();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.puts.length, 0);
-  for (const key of initial) gates.get(`${key}:release`)();
+  for (const key of [...initial, ...references]) gates.get(`${key}:release`)();
   assert.equal((await resultPromise).done, true);
   assert.deepEqual(f.puts.map(x => x.key), ['meta/fast-hist-lease-u1.json', 'hist/u1.json', 'user/u1.json', 'pending/u1.json', 'meta/fast-hist-lease-u1.json']);
+});
+
+test('first reference bodies are revalidated before protected writes', async () => {
+  for (const [key, first, after] of [['meta/song-aliases.json', '{}', '{"x":"y"}'], ['songs.json', '[]', '[1]']]) {
+    const f = histFixture(), read = f.deps.read;
+    let count = 0;
+    f.deps.read = async name => name === key ? { body: ++count === 1 ? first : after, etag: etag(name) } : read(name);
+    assert.equal((await f.run()).reason, 'hist-validation-failed');
+    assert.equal(f.puts.filter(x => ['hist/u1.json', 'user/u1.json', 'pending/u1.json'].includes(x.key)).length, 0);
+  }
+});
+
+test('prefetched reference failure preserves pending and prepare error priority without unhandled rejection', async () => {
+  const unhandled = [], onUnhandled = error => unhandled.push(error);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const changed = histFixture(), changedRead = changed.deps.read;
+    changed.objects.get('pending/u1.json').generation = '6';
+    changed.deps.read = async key => key === 'meta/song-aliases.json' ? Promise.reject(Error('reference-failed')) : changedRead(key);
+    assert.deepEqual(await changed.run(), { ok: false, reason: 'pending-changed' });
+    assert.equal(changed.puts.length, 0);
+
+    const valid = histFixture(), validRead = valid.deps.read;
+    valid.deps.read = async key => key === 'meta/song-aliases.json' ? Promise.reject(Error('reference-failed')) : validRead(key);
+    assert.deepEqual(await valid.run(), { ok: false, reason: 'hist-validation-failed' });
+    assert.equal(valid.puts.filter(x => ['hist/u1.json', 'user/u1.json', 'pending/u1.json'].includes(x.key)).length, 0);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(unhandled.length, 0);
+  } finally { process.off('unhandledRejection', onUnhandled); }
 });
 
 test('buffer failure does not override pending change or initial R2 failure', async () => {
