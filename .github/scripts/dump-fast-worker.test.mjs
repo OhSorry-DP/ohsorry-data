@@ -204,6 +204,21 @@ test('new user/hist creation requires both 404, matching pending and nonempty st
   assert.equal((await empty.run()).reason, 'invalid-buffer'); assert.equal(empty.puts.length, 0);
 });
 
+test('empty buffer remains accepted with existing objects and rejected for creation', async () => {
+  const stable = histFixture();
+  stable.deps.readBuffer = async () => ({ rows: [], fingerprint: 'same' });
+  assert.equal((await stable.run()).done, true);
+  assert.ok(stable.puts.some(x => x.key === 'user/u1.json'));
+  const existingUserOnly = histFixture(); existingUserOnly.remove('hist/u1.json');
+  existingUserOnly.deps.readBuffer = async () => ({ rows: [], fingerprint: 'same' });
+  assert.deepEqual(await existingUserOnly.run(), { ok: false, reason: 'invalid-reference' });
+  assert.equal(existingUserOnly.puts.length, 0);
+  const create = histFixture(); create.remove('hist/u1.json'); create.remove('user/u1.json');
+  create.deps.readBuffer = async () => ({ rows: [], fingerprint: 'same' });
+  assert.deepEqual(await create.run(), { ok: false, reason: 'invalid-buffer' });
+  assert.equal(create.puts.length, 0);
+});
+
 test('hist readback mismatch, buffer drift, lease expiry and uncertain PUT suppress user/completion', async () => {
   for (const mode of ['readback', 'buffer', 'expiry', 'uncertain']) {
     const f = histFixture(), put = f.deps.put, read = f.deps.read;
@@ -268,6 +283,56 @@ test('held lease expires at user PUT boundary after final lease GET; user and co
   assert.equal(f.puts.filter(x => x.key.startsWith('user/') || x.key.startsWith('pending/')).length, 0);
   assert.equal(result.reason, 'user-put-failed');
   assert.equal(f.objects.get('pending/u1.json').viewGeneration, undefined);
+});
+
+test('initial R2 reads and buffer start together; buffer result waits behind initial validation', async () => {
+  const f = histFixture(), events = [], gates = new Map(), reached = new Map();
+  const initial = ['pending/u1.json', 'user/u1.json', 'hist/u1.json'];
+  for (const name of [...initial, 'buffer']) {
+    let release, signal;
+    gates.set(name, new Promise(resolve => { release = resolve; }));
+    reached.set(name, new Promise(resolve => { signal = resolve; }));
+    gates.set(`${name}:release`, () => release());
+    gates.set(`${name}:signal`, () => signal());
+  }
+  const read = f.deps.read, readBuffer = f.deps.readBuffer;
+  f.deps.read = async key => {
+    if (initial.includes(key)) { events.push(key); gates.get(`${key}:signal`)(); await gates.get(key); }
+    return read(key);
+  };
+  f.deps.readBuffer = async (...args) => { events.push('buffer'); gates.get('buffer:signal')(); await gates.get('buffer'); return readBuffer(...args); };
+  const resultPromise = f.run();
+  await Promise.all([...initial, 'buffer'].map(name => reached.get(name)));
+  assert.deepEqual(events.sort(), [...initial, 'buffer'].sort());
+  assert.equal(f.puts.length, 0);
+  gates.get('buffer:release')();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.puts.length, 0);
+  for (const key of initial) gates.get(`${key}:release`)();
+  assert.equal((await resultPromise).done, true);
+  assert.deepEqual(f.puts.map(x => x.key), ['meta/fast-hist-lease-u1.json', 'hist/u1.json', 'user/u1.json', 'pending/u1.json', 'meta/fast-hist-lease-u1.json']);
+});
+
+test('buffer failure does not override pending change or initial R2 failure', async () => {
+  const unhandled = [];
+  const onUnhandled = error => unhandled.push(error);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+  const pending = histFixture(), pendingRead = pending.deps.read;
+  pending.deps.read = async key => key === 'pending/u1.json'
+    ? { body: JSON.stringify({ generation: '6', since }), etag: etag('pending') } : pendingRead(key);
+  pending.deps.readBuffer = async () => { throw Error('buffer-failed'); };
+  assert.deepEqual(await pending.run(), { ok: false, reason: 'pending-changed' });
+  assert.equal(pending.puts.length, 0);
+
+  const failed = histFixture(), read = failed.deps.read;
+  failed.deps.read = async key => { if (key === 'user/u1.json') throw Error('initial-read-failed'); return read(key); };
+  failed.deps.readBuffer = async () => { throw Error('buffer-failed'); };
+  assert.deepEqual(await failed.run(), { ok: false, reason: 'read-or-calculation-failed' });
+  assert.equal(failed.puts.length, 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(unhandled.length, 0);
+  } finally { process.off('unhandledRejection', onUnhandled); }
 });
 
 const withFakePerformance = async (fn) => {

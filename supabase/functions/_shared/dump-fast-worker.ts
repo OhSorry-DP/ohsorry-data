@@ -152,7 +152,14 @@ async function runHistDump<Row>({ id, G, since, deps }: {
     } };
   const userKey = `user/${id}.json`, pendingKey = `pending/${id}.json`;
   try {
-    const [pendingSource, userSource, histSource] = await Promise.all([timedRead(pendingKey, 'pendingRead'), timedRead(userKey, 'userRead'), timedRead(`hist/${id}.json`, 'histRead')]);
+    const observe = <T>(promise: Promise<T>) => promise.then(value => ({ value }), error => ({ error }));
+    const initial = [observe(timedRead(pendingKey, 'pendingRead')), observe(timedRead(userKey, 'userRead')), observe(timedRead(`hist/${id}.json`, 'histRead'))] as const;
+    const firstBuffer = observe(timedBuffer());
+    const [pendingResult, userResult, histResult] = await Promise.all(initial);
+    if ('error' in pendingResult) throw pendingResult.error;
+    if ('error' in userResult) throw userResult.error;
+    if ('error' in histResult) throw histResult.error;
+    const pendingSource = pendingResult.value, userSource = userResult.value, histSource = histResult.value;
     const pending = parse(pendingSource), initialUser = parse(userSource);
     if (!pending || pending.generation !== G || pending.since !== since) return { ok: false, reason: 'pending-changed' };
     const allowCreate = userSource === null && histSource === null;
@@ -161,7 +168,9 @@ async function runHistDump<Row>({ id, G, since, deps }: {
     if (initialUser?.fastGeneration && /^[1-9][0-9]*$/.test(initialUser.fastGeneration)
       && BigInt(initialUser.fastGeneration) > BigInt(G)) return { ok: false, reason: 'newer-generation' };
     check();
-    const buffer = await timedBuffer();
+    const bufferResult = await firstBuffer;
+    if ('error' in bufferResult) throw bufferResult.error;
+    const buffer = bufferResult.value;
     if (!buffer || !Array.isArray(buffer.rows) || typeof buffer.fingerprint !== 'string'
       || (allowCreate && buffer.rows.length === 0)) return { ok: false, reason: 'invalid-buffer' };
     // References are reloaded for every 412 replay; the original buffer is retained.
