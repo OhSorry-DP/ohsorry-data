@@ -226,7 +226,6 @@ async function runHistDump<Row>({ id, G, since, deps }: {
       try { await assertHistLease({ r2, id, lease: published.lease, now: nowMs }); }
       finally { if (timing) timing('leaseCheck', performance.now() - started); }
     };
-    await verify();
     const currentSource = await timedRead(userKey, 'userRead'), current = parse(currentSource);
     if (!current && !(allowCreate && currentSource === null)) return { ok: false, reason: 'invalid-reference' };
     const patch = Object.fromEntries(FAST_FIELDS.map(field => [field, published.prepared.fastPatch[field]]));
@@ -241,7 +240,6 @@ async function runHistDump<Row>({ id, G, since, deps }: {
       catch { return { ok: false, reason: 'user-put-failed' }; }
       finally { if (timing) timing('userPut', performance.now() - started); }
     }
-    await verify();
     const markerSource = await timedRead(pendingKey, 'pendingRead'), marker = parse(markerSource);
     const completion = mergeHistPending(marker, { generation: G, since, histRevision: published.histRevision, done: now() });
     if (!completion.ok || !markerSource?.etag) return { ok: true, changed: merged.changed, done: false, reason: completion.reason ?? 'done-invalid' };

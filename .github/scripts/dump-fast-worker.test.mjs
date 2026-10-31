@@ -145,7 +145,13 @@ test('hist ON publishes readback, user, completion then releases; same G rerun i
   assert.match(user.histRevision, /^[a-f0-9]{64}$/); assert.equal(marker.histRevision, user.histRevision); assert.equal(marker.viewGeneration, '5');
   assert.deepEqual(user.radars, [1]); assert.deepEqual(user.extension, { keep: true });
   f.puts.length = 0;
+  const beforeHist = JSON.stringify(f.objects.get('hist/u1.json')), beforeUser = JSON.stringify(f.objects.get('user/u1.json'));
+  let gets = 0; const read = f.deps.read;
+  f.deps.read = async (...args) => { gets++; return read(...args); };
   const again = await f.run(); assert.equal(again.done, true); assert.equal(again.changed, false);
+  assert.equal(gets, 27);
+  assert.deepEqual(f.puts.map(x => x.key), ['meta/fast-hist-lease-u1.json','pending/u1.json','meta/fast-hist-lease-u1.json']);
+  assert.deepEqual(f.objects.get('hist/u1.json'), JSON.parse(beforeHist)); assert.deepEqual(f.objects.get('user/u1.json'), JSON.parse(beforeUser));
   assert.ok(f.puts.every(x => !x.key.startsWith('hist/') && !x.key.startsWith('user/')));
 });
 
@@ -245,23 +251,71 @@ test('hist readback mismatch, buffer drift, lease expiry and uncertain PUT suppr
 });
 
 
-test('hist changed after publication before user PUT suppresses user and completion', async () => {
-  const f = histFixture(), read = f.deps.read, put = f.deps.put;
-  let published = false, userReads = 0;
-  f.deps.put = async (...args) => { await put(...args); if (args[0] === 'hist/u1.json') published = true; };
-  f.deps.read = async key => {
-    const source = await read(key);
-    if (key === 'user/u1.json' && ++userReads === 2) {
-      assert.equal(published, true);
-      const hist = await read('hist/u1.json');
-      await put('hist/u1.json', JSON.stringify([{ score_id: 99 }]), hist.etag);
+test('verify before user PUT rejects hist drift and lease loss', async () => {
+  for (const mode of ['hist', 'lease']) {
+    const f = histFixture(), read = f.deps.read, put = f.deps.put;
+    let published = false, userReads = 0;
+    f.deps.put = async (...args) => { await put(...args); if (args[0] === 'hist/u1.json') published = true; };
+    f.deps.read = async key => {
+      const source = await read(key);
+      if (key === 'user/u1.json' && ++userReads === 2) {
+        assert.equal(published, true);
+        if (mode === 'hist') { const hist = await read('hist/u1.json'); await put('hist/u1.json', JSON.stringify([{ score_id: 99 }]), hist.etag); }
+        else { const lease = await read('meta/fast-hist-lease-u1.json'); await put('meta/fast-hist-lease-u1.json', JSON.stringify({ token: 'other', expiresAt: lease && JSON.parse(lease.body).expiresAt }), lease.etag); }
+      }
+      return source;
+    };
+    assert.deepEqual(await f.run(), { ok: false, reason: 'read-or-calculation-failed' }, mode);
+    if (mode === 'hist') assert.deepEqual(f.objects.get('hist/u1.json'), [{ score_id: 99 }]);
+    assert.equal(f.puts.filter(x => x.key.startsWith('user/') || x.key.startsWith('pending/')).length, 0, mode);
+  }
+});
+
+test('verify before pending PUT rejects hist drift or lease loss after user success', async () => {
+  for (const mode of ['hist', 'lease']) {
+    const f = histFixture(), read = f.deps.read, put = f.deps.put;
+    let pendingReads = 0;
+    f.deps.read = async key => {
+      const source = await read(key);
+      if (key === 'pending/u1.json' && ++pendingReads === 3) {
+        if (mode === 'hist') { const hist = await read('hist/u1.json'); await put('hist/u1.json', JSON.stringify([{ score_id: 99 }]), hist.etag); }
+        else { const lease = await read('meta/fast-hist-lease-u1.json'); await put('meta/fast-hist-lease-u1.json', JSON.stringify({ token: 'other', expiresAt: JSON.parse(lease.body).expiresAt }), lease.etag); }
+      }
+      return source;
+    };
+    const result = await f.run();
+    assert.deepEqual(result, { ok: false, reason: 'read-or-calculation-failed' }, mode);
+    assert.equal(f.puts.filter(x => x.key === 'user/u1.json').length, 1, mode);
+    assert.equal(f.puts.filter(x => x.key === 'pending/u1.json').length, 0, mode);
+    assert.equal(f.puts.filter(x => x.key === 'meta/fast-hist-lease-u1.json').length, mode === 'lease' ? 2 : 1, mode);
+    if (mode === 'lease') assert.equal(f.objects.get('meta/fast-hist-lease-u1.json').token, 'other');
+  }
+});
+
+test('late multi-conflict reports user and pending reasons before the removed verify', async () => {
+  const user = histFixture(), userRead = user.deps.read, userPut = user.deps.put;
+  let userReads = 0;
+  user.deps.read = async key => {
+    const source = await userRead(key);
+    if (key === 'user/u1.json' && ++userReads === 2) { const hist = await userRead('hist/u1.json'); await userPut('hist/u1.json', JSON.stringify([{ score_id: 99 }]), hist.etag); return null; }
+    return source;
+  };
+  assert.deepEqual(await user.run(), { ok: false, reason: 'invalid-reference' });
+  assert.equal(user.puts.filter(x => x.key === 'user/u1.json' || x.key === 'pending/u1.json').length, 0);
+
+  const pending = histFixture(), pendingRead = pending.deps.read, pendingPut = pending.deps.put;
+  let pendingReads = 0;
+  pending.deps.read = async key => {
+    const source = await pendingRead(key);
+    if (key === 'pending/u1.json' && ++pendingReads === 3) {
+      const hist = await pendingRead('hist/u1.json'); await pendingPut('hist/u1.json', JSON.stringify([{ score_id: 99 }]), hist.etag);
+      return { ...source, body: JSON.stringify({ generation: '6', since }) };
     }
     return source;
   };
-  assert.equal((await f.run()).ok, false);
-  assert.deepEqual(f.objects.get('hist/u1.json'), [{ score_id: 99 }]);
-  assert.equal(f.puts.filter(x => x.key.startsWith('user/') || x.key.startsWith('pending/')).length, 0);
-  assert.equal(f.objects.get('pending/u1.json').viewGeneration, undefined);
+  assert.deepEqual(await pending.run(), { ok: true, changed: true, done: false, reason: 'pending-changed' });
+  assert.equal(pending.puts.filter(x => x.key === 'user/u1.json').length, 1);
+  assert.equal(pending.puts.filter(x => x.key === 'pending/u1.json').length, 0);
 });
 
 test('held lease expires at user PUT boundary after final lease GET; user and completion PUTs stay zero', async () => {
@@ -396,7 +450,7 @@ test('hist timing separates initial history read from readback and lease checks'
     f.deps.timing = (step, ms) => { steps[step] = (steps[step] ?? 0) + ms; };
     f.deps.read = async key => { if (key.startsWith('hist/')) advance(4); if (key.includes('lease')) advance(2); return read(key); };
     assert.equal((await f.run()).done, true);
-    assert.equal(steps.histVerify, 20);
+    assert.equal(steps.histVerify, 12);
     assert.equal(steps.histRead, 8);
     assert.ok(steps.leaseCheck > 0);
     assert.equal(steps.leaseAcquire, 2);

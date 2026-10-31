@@ -198,7 +198,10 @@ test('timing hist success has fixed schema, counts and preserved writes',async()
   const f=timingFixture(), r=await runTimingFixture(f); assert.equal(r.status,200);assert.equal(r.body.done,true);
   assert.equal(logs.length,1);const t=logs[0];assert.equal(t.id,'u1');assert.equal(t.generation,'2');assert.equal(t.mode,'hist');assert.equal(t.ok,true);assert.equal(t.reason,null);
   assert.deepEqual(Object.keys(t.steps),timingKeys);for(const n of [t.totalMs,...Object.values(t.steps),...Object.values(t.counts)])assert.ok(Number.isInteger(n)&&n>=0);
-  assert.deepEqual(t.counts,{r2Get:33,r2Put:5,supabaseSelect:2});assert.equal(t.counts.r2Get,f.attempts.filter(x=>x[0]==='GET').length);assert.equal(t.counts.r2Put,f.attempts.filter(x=>x[0]==='PUT').length);
+  assert.deepEqual(t.counts,{r2Get:27,r2Put:5,supabaseSelect:2});assert.equal(t.counts.r2Get,f.attempts.filter(x=>x[0]==='GET').length);assert.equal(t.counts.r2Put,f.attempts.filter(x=>x[0]==='PUT').length);
+  assert.equal(f.attempts.filter(x=>x[0]==='GET'&&x[1]==='hist/u1.json').length, 5);
+  assert.equal(f.attempts.filter(x=>x[0]==='GET'&&x[1]==='meta/fast-hist-lease-u1.json').length, 13);
+  assert.deepEqual(f.attempts.filter(x=>x[0]==='PUT').map(x=>x[1]),['meta/fast-hist-lease-u1.json','hist/u1.json','user/u1.json','pending/u1.json','meta/fast-hist-lease-u1.json']);
   assert.deepEqual(f.writes,['meta/fast-hist-lease-u1.json','hist/u1.json','user/u1.json','pending/u1.json','meta/fast-hist-lease-u1.json']);
 }));
 test('timing light success preserves response and user then pending writes',async()=>captureTiming(async logs=>{
