@@ -124,6 +124,12 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-11-01 — uslice 요약 `seriesMax`
+
+- [user-slice.mjs](.github/scripts/user-slice.mjs)(`2e1b59d`): 유저 이력의 SP·DP 공통 최신 `played_version`을 uslice 요약 `seriesMax`로 기록한다. DBR `-10`은 제외하며 INF는 0이다.
+- 백필은 하지 않는다. 기존 유저는 덤프가 다시 돌 때 새 필드를 얻으며 그전 웹 곡 상세는 통산 점수를 표시한다. 시즌 점수 소비는 요약과 곡 이력 shard를 사용한다.
+- 검증: `.github/scripts/*.test.mjs` 486/486 통과. DBR 제외 변이를 테스트가 검출했다. push·배포 전이다.
+
 ### 2026-10-26 — dump-fast publish 건너뜀 사유 로그
 
 - `dump-fast/index.ts`: publish 모드에서 `runLightDump` 가 `ok:false` 이거나 `done:false` 면 `console.warn('dump-fast skipped', {id, generation, ok, done, reason})` 를 남긴다. 운영 Edge 가 10-25 13:32Z 이후 모든 깨우기에 409 를 냈지만 사유가 응답 본문에만 있어 어디에도 남지 않았다. 응답·게시 동작은 그대로다.
