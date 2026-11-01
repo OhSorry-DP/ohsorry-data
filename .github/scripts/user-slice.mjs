@@ -15,7 +15,7 @@ const pickSummaryUser = (user) => Object.fromEntries(SUMMARY_USER_FIELDS.filter(
 export function buildUserSlice(id, data, hist = []) {
   if (!validId(id) || !data?.user || !Array.isArray(data.dp) || !Array.isArray(data.sp)) throw new Error('slice 원본 형식 오류');
   const summary = { v: 1, id, date: data.user.date, u: pickSummaryUser(data.user),
-    dpSeriesMax: null, shards: { r: { dp: [], sp: [] }, h: { dp: [], sp: [] } } };
+    dpSeriesMax: null, seriesMax: null, shards: { r: { dp: [], sp: [] }, h: { dp: [], sp: [] } } };
   const objects = {};
   for (const mode of ['dp', 'sp']) {
     const buckets = new Map();
@@ -38,6 +38,11 @@ export function buildUserSlice(id, data, hist = []) {
   if (!Array.isArray(hist)) throw new Error('slice hist 배열 형식 오류');
   // HIST_COLS 정본: song_id=0, play_style=7. 과거 8열 행도 그대로 보존한다.
   const warnings = [];
+  for (const row of hist) {
+    if (Array.isArray(row) && typeof row[4] === 'number' && Number.isFinite(row[4]) && row[4] !== -10) {
+      summary.seriesMax = summary.seriesMax === null ? row[4] : Math.max(summary.seriesMax, row[4]);
+    }
+  }
   const missingMode = hist.some((row) => Array.isArray(row) && (row[7] === undefined || row[7] === null));
   const allMissingMode = hist.length > 0 && hist.every((row) => Array.isArray(row) && (row[7] === undefined || row[7] === null));
   if (missingMode && !allMissingMode) throw new Error('slice hist 모드 일부 누락 — 혼합 분류 불가');

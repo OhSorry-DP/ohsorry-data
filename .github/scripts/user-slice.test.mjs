@@ -20,7 +20,7 @@ test('16 shard 분배·원본 행 보존·전체 DP 최대 버전', () => {
   const source = data(), before = JSON.stringify(source);
   const bundle = buildUserSlice('A1', source);
   assert.equal(USLICE_SHARDS, 16);
-  assert.deepEqual(bundle.summary, { v: 1, id: 'A1', date: source.user.date, u: { dj_name: 'DJ', star: 2.25, r_star: 1.5, sp_star: null, sp_r_star: 8.75, sp_r_star_model_id: 'sp-model', sp_r_star_formula_version: 'sp-v1' }, dpSeriesMax: 33,
+  assert.deepEqual(bundle.summary, { v: 1, id: 'A1', date: source.user.date, u: { dj_name: 'DJ', star: 2.25, r_star: 1.5, sp_star: null, sp_r_star: 8.75, sp_r_star_model_id: 'sp-model', sp_r_star_formula_version: 'sp-v1' }, dpSeriesMax: 33, seriesMax: null,
     shards: { r: { dp: [0, 1], sp: [1] }, h: { dp: [], sp: [] } } });
   assert.deepEqual(JSON.parse(bundle.objects['uslice/A1-r-dp-01.json']).songs, { 1: [source.dp[0]], 17: [source.dp[1]] });
   assert.equal(JSON.stringify(source), before);
@@ -137,4 +137,38 @@ test('첫 생성 최대 64 shard PUT·요약 1 PUT', async () => {
   const r = await publishUserSlice('A1', b, d);
   assert.equal(r.puts, 65); assert.equal(r.rc, 0);
   assert.equal(d.calls.at(-1)[1], 'uslice/A1.json');
+});
+test('seriesMax uses the maximum played_version across DP and SP history', () => {
+  const hist = [
+    [1, 3, 5, 100, 32, 'date', 'KST', 1, 0, 50],
+    [2, 3, 5, 100, 33, 'date', 'KST', 0, 0, 50],
+  ];
+  const b = buildUserSlice('A1', data(), hist);
+  assert.equal(b.summary.seriesMax, 33);
+});
+
+test('seriesMax is null when history only has played_version -10', () => {
+  const hist = [[1, 3, 5, 100, -10, 'date', 'KST', 1, 0, 50]];
+  const b = buildUserSlice('A1', data(), hist);
+  assert.equal(b.summary.seriesMax, null);
+});
+
+test('seriesMax treats INF played_version 0 as a valid value', () => {
+  const hist = [[1, 3, 5, 100, 0, 'date', 'KST', 0, 0, 50]];
+  const b = buildUserSlice('A1', data(), hist);
+  assert.equal(b.summary.seriesMax, 0);
+});
+
+test('seriesMax stays null for empty history even when DP data has played_version 33', () => {
+  const source = { ...data(), dp: [{ song_id: 1, played_version: 33, diff: 2 }] };
+  const b = buildUserSlice('A1', source, []);
+  assert.equal(b.summary.seriesMax, null);
+});
+
+test('history seriesMax does not change dpSeriesMax', () => {
+  const source = { ...data(), dp: [{ song_id: 1, played_version: 32, diff: 2 }] };
+  const hist = [[1, 3, 5, 100, 33, 'date', 'KST', 0, 0, 50]];
+  const b = buildUserSlice('A1', source, hist);
+  assert.equal(b.summary.seriesMax, 33);
+  assert.equal(b.summary.dpSeriesMax, 32);
 });
