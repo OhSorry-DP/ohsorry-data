@@ -124,6 +124,11 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-11-05 — 웹 크롤 이력 필터와 replay 램프 분리 갱신
+
+- `filterWebCrawlHistoryRows`를 적용했다. replay에서 EX와 램프를 독립적으로 갱신한다.
+- 이 처리는 웹 크롤 입력뿐 아니라 INF·CSV 입력에도 적용된다.
+
 ### 2026-11-01 — uslice 요약 `seriesMax`
 
 - [user-slice.mjs](.github/scripts/user-slice.mjs)(`2e1b59d`): 유저 이력의 SP·DP 공통 최신 `played_version`을 uslice 요약 `seriesMax`로 기록한다. DBR `-10`은 제외하며 INF는 0이다.
