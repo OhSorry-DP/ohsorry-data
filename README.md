@@ -128,6 +128,7 @@ https://data.iidx.in/version.json
 
 - `filterWebCrawlHistoryRows`를 적용했다. replay에서 EX와 램프를 독립적으로 갱신한다.
 - 이 처리는 웹 크롤 입력뿐 아니라 INF·CSV 입력에도 적용된다.
+- 별칭 규칙에 `song-version-before` scope 를 추가했다. 특정 `played_version` 의 기준 시각 이전 행만 다른 곡으로 옮기며, v34 Zenith 오귀속 이동에 쓴다.
 
 ### 2026-11-01 — uslice 요약 `seriesMax`
 

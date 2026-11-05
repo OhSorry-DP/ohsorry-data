@@ -134,3 +134,41 @@ test('original natural duplicates fail before aliasing and DBR, legacy rows, and
   assert.deepEqual(valid.histRows[1], hist[1]);
   assert.deepEqual(valid.histRows[2], hist[2]);
 });
+
+test('song-version-before는 버전과 마이크로초 기준 시각 이전만 이동하고 REST 원본은 보존한다', () => {
+  const timed = { v: 1, rules: [{ from: 1564, to: 1677, scope: 'song-version-before',
+    played_version: 34, before: '2026-11-05T08:43:52.253Z' }] };
+  const timedSongs = [...songs, { song_id: 1564 }, { song_id: 1677 }];
+  const at = '2026-11-05 08:43:52.253+00';
+  assert.equal(resolveSongId(1564, 3, 34, timed, '2026-11-05T08:43:52.253Z'), 1564);
+  assert.equal(resolveSongId(1564, 3, 34, timed, '2026-11-05T08:43:52.253000Z'), 1564);
+  assert.equal(resolveSongId(1564, 3, 34, timed, '2026-11-05T08:43:52.252999Z'), 1677);
+  assert.equal(resolveSongId(1564, 3, 33, timed, '2026-11-05T08:00:00Z'), 1564);
+  assert.equal(resolveSongId(1564, 3, 34, timed, '2026-11-05T09:00:00Z'), 1564);
+  assert.equal(resolveSongId(1564, 3, -10, timed, '2026-11-05T08:00:00Z'), 1564);
+  assert.equal(resolveSongId(100, 3, 34, timed, '2026-11-05T08:00:00Z'), 100);
+  assert.throws(() => resolveSongId(1564, 3, 34, timed), /timestamp with timezone/);
+  assert.throws(() => resolveSongId(1564, 3, 34, timed, 'bad-date'), /timestamp with timezone/);
+  const hist = [row(1564, 3, 5, 2000, 34, '2026-11-05T08:43:52.252999Z', '2026-11-05'),
+    row(1564, 3, 5, 2000, 33, at, '2026-11-05')];
+  const restRows = [rest(20, 1564, { played_version: 34, date: at })];
+  const output = normalizeAliasInputs({ histRows: hist, restRows, aliases: timed, songs: timedSongs });
+  assert.equal(output.histRows[0][0], 1677);
+  assert.equal(output.histRows[1][0], 1564);
+  assert.equal(output.restRows[0].song_id, 1564);
+  assert.equal(restRows[0].song_id, 1564);
+});
+
+test('song-version-before 충돌과 순환 및 없는 종착점을 거부하고 기존 scope는 유지한다', () => {
+  const legacy = { v: 1, rules: [{ from: 100, to: 200, scope: 'song' },
+    { from: 300, to: 400, scope: 'chart-ac', diff: 3 }] };
+  assert.equal(resolveSongId(100, 3, 33, legacy), 200);
+  assert.equal(resolveSongId(300, 3, 33, legacy), 400);
+  for (const rules of [
+    [{ from: 1564, to: 1677, scope: 'song-version-before', played_version: 34, before: '2026-11-05T08:43:52Z' },
+      { from: 1564, to: 200, scope: 'song' }],
+    [{ from: 1564, to: 1677, scope: 'song-version-before', played_version: 34, before: '2026-11-05T08:43:52Z' },
+      { from: 1677, to: 1564, scope: 'song' }],
+    [{ from: 1564, to: 9999, scope: 'song-version-before', played_version: 34, before: '2026-11-05T08:43:52Z' }],
+  ]) assert.throws(() => validateAliases({ v: 1, rules }, [...songs, { song_id: 1564 }, { song_id: 1677 }]));
+});

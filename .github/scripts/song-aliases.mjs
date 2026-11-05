@@ -1,4 +1,4 @@
-import { mergeScoreHistory, replayScoreBuffer } from './score-history.mjs';
+import { historyInstant, mergeScoreHistory, replayScoreBuffer } from './score-history.mjs';
 
 const fail = (message) => { throw new TypeError(message); };
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -15,14 +15,22 @@ function rulesBySource(aliases) {
   if (aliases.v !== 1 || !Array.isArray(aliases.rules)) fail('invalid aliases version or rules');
   const bySource = new Map();
   for (const rule of aliases.rules) {
-    if (!object(rule) || !['song', 'chart-ac'].includes(rule.scope)) fail('invalid alias scope');
-    keys(rule, rule.scope === 'song' ? ['from', 'to', 'scope'] : ['from', 'to', 'scope', 'diff'], 'rule');
+    if (!object(rule) || !['song', 'chart-ac', 'song-version-before'].includes(rule.scope)) fail('invalid alias scope');
+    keys(rule, rule.scope === 'song' ? ['from', 'to', 'scope'] : rule.scope === 'chart-ac'
+      ? ['from', 'to', 'scope', 'diff'] : ['from', 'to', 'scope', 'played_version', 'before'], 'rule');
     integer(rule.from, 'from');
     integer(rule.to, 'to');
     if (rule.scope === 'chart-ac') integer(rule.diff, 'diff');
+    if (rule.scope === 'song-version-before') {
+      integer(rule.played_version, 'played_version');
+      historyInstant(rule.before);
+      if (bySource.get(rule.from)?.length) fail('overlapping or branching alias rules');
+    }
     if (rule.from === rule.to) fail('self reference in aliases');
     const previous = bySource.get(rule.from) ?? [];
-    if (previous.some((r) => r.scope === 'song' || rule.scope === 'song' || r.diff === rule.diff)) {
+    if (previous.some((r) => r.scope === 'song' || rule.scope === 'song'
+      || r.scope === 'song-version-before' || rule.scope === 'song-version-before'
+      || (r.scope === 'chart-ac' && rule.scope === 'chart-ac' && r.diff === rule.diff))) {
       fail('overlapping or branching alias rules');
     }
     previous.push(rule);
@@ -31,15 +39,18 @@ function rulesBySource(aliases) {
   return bySource;
 }
 
-function resolve(songId, diff, playedVersion, bySource) {
+function resolve(songId, diff, playedVersion, date, bySource) {
   if (playedVersion === -10) return songId;
   const visited = new Set();
   let current = songId;
   while (true) {
     if (visited.has(current)) fail('cycle in aliases');
     visited.add(current);
-    const rule = bySource.get(current)?.find((r) => r.scope === 'song'
-      || (playedVersion > 0 && r.diff === diff));
+    const rules = bySource.get(current) ?? [];
+    const rule = rules.find((r) => r.scope === 'song'
+      || (r.scope === 'chart-ac' && playedVersion > 0 && r.diff === diff)
+      || (r.scope === 'song-version-before' && r.played_version === playedVersion
+        && historyInstant(date) < historyInstant(r.before)));
     if (!rule) return current;
     current = rule.to;
   }
@@ -59,21 +70,24 @@ export function validateAliases(aliases, songs) {
   const diffs = [...new Set(aliases.rules.filter((r) => r.scope === 'chart-ac').map((r) => r.diff))];
   // null represents all other diffs: chart-ac rules cannot match it.
   for (const rule of aliases.rules) {
-    const domains = rule.scope === 'song'
+    const domains = rule.scope === 'song-version-before'
+      ? [[null, rule.played_version, `${rule.before.slice(0, 10)}T00:00:00Z`], [null, rule.played_version, rule.before]]
+      : rule.scope === 'song'
       ? [[null, 0], ...[null, ...diffs].map((diff) => [diff, 1])]
       : [[rule.diff, 1]];
-    for (const [diff, version] of domains) {
-      if (!live.has(resolve(rule.from, diff, version, bySource))) fail('alias terminal target does not exist in songs');
+    for (const domain of domains) {
+      const [diff, version, date] = domain;
+      if (!live.has(resolve(rule.from, diff, version, date, bySource))) fail('alias terminal target does not exist in songs');
     }
   }
   return aliases;
 }
 
-export function resolveSongId(songId, diff, playedVersion, aliases) {
+export function resolveSongId(songId, diff, playedVersion, aliases, date) {
   integer(songId, 'songId');
   integer(diff, 'diff');
   integer(playedVersion, 'playedVersion');
-  return resolve(songId, diff, playedVersion, rulesBySource(aliases));
+  return resolve(songId, diff, playedVersion, date, rulesBySource(aliases));
 }
 
 const chartKey = (row) => JSON.stringify([row[0], row[1], row[4], row[7]]);
@@ -96,7 +110,7 @@ export function normalizeAliasInputs({ histRows, restRows, aliases, songs }) {
   const normalized = original.map((row) => {
     integer(row[0], 'song_id');
     const copy = [...row];
-    copy[0] = resolve(row[0], row[1], row[4], bySource);
+    copy[0] = resolve(row[0], row[1], row[4], row[5], bySource);
     return copy;
   });
   const seen = new Set();
@@ -137,7 +151,7 @@ export function normalizeAliasInputs({ histRows, restRows, aliases, songs }) {
     integer(row.song_id, 'song_id');
     integer(row.diff, 'diff');
     integer(row.played_version, 'played_version');
-    return { ...row, song_id: resolve(row.song_id, row.diff, row.played_version, bySource) };
+    return { ...row, song_id: resolve(row.song_id, row.diff, row.played_version, row.date, bySource) };
   });
   return { histRows: result, restRows: rest };
 }
