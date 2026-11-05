@@ -355,6 +355,17 @@ test('replay keeps independent EX and lamp bests in a day and across dates', () 
     date: '2026-10-21T00:00:00Z', date_kst: '2026-10-21', ex_score: 90, lamp: 5 })]), otherDay);
 });
 
+test('replay does not replace today slot when incoming misses all-time EX and lamp bests', () => {
+  const hist = [
+    row(100, 3, 4, 110, 33, '2026-10-19T03:12:45Z', '2026-10-19', 1, null, null),
+    row(100, 3, 3, 90, 33, d, '2026-10-20', 1, null, null),
+  ];
+  const result = replayScoreBuffer(hist, [rest(101, { song_id: 100, diff: 3, played_version: 33,
+    date: d2, date_kst: '2026-10-20', ex_score: 95, lamp: 3 })]);
+  assert.equal(result.length, 2);
+  assert.equal(result[1][3], 90);
+});
+
 test('replay independent behavior also applies to INF version zero and CSV-shaped rows', () => {
   const inf = [row(1, 0, 4, 100, 0, d, '2026-10-20')];
   const result = replayScoreBuffer(inf, [rest(1, { song_id: 1, diff: 0, played_version: 0,
