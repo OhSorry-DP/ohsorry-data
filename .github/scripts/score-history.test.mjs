@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { filterScoreHistoryRows, mergeScoreHistory, replayScoreBuffer } from './score-history.mjs';
+import { filterScoreHistoryRows, filterWebCrawlHistoryRows, mergeScoreHistory, replayScoreBuffer } from './score-history.mjs';
 
 const d = '2026-10-20T03:12:45.123456+00:00';
 const d2 = '2026-10-20T03:12:45.123457+00:00';
@@ -253,7 +253,7 @@ test('replay preserves DBR, seasons, styles, slot order and source timestamps', 
   assert.equal(result[1][5], d);
 });
 
-test('replay long same-chart sequence matches sequential merge and preserves inputs', () => {
+test('replay long same-chart sequence keeps independent day bests and preserves inputs', () => {
   const hist = [row(1, 0, 4, 10, 30, d, '2026-10-20', 1, null, null)];
   const rows = Array.from({ length: 80 }, (_, i) => rest(i + 1, {
     song_id: 1, diff: 0, played_version: 30, play_style: 1,
@@ -263,10 +263,9 @@ test('replay long same-chart sequence matches sequential merge and preserves inp
   }));
   const beforeHist = structuredClone(hist);
   const beforeRows = structuredClone(rows);
-  let expected = hist;
-  for (const item of rows) expected = mergeScoreHistory(expected, [[item.song_id, item.diff, item.lamp,
-    item.ex_score, item.played_version, item.date, item.date_kst, item.play_style, item.bp, item.note_count]]);
-  assert.deepEqual(replayScoreBuffer(hist, rows), expected);
+  const replayed = replayScoreBuffer(hist, rows);
+  assert.deepEqual(replayed.map((r) => [r[3], r[2]]), [[29, 7], [49, 7], [69, 7], [89, 7]]);
+  assert.deepEqual(replayScoreBuffer(replayed, rows), replayed);
   assert.deepEqual(hist, beforeHist);
   assert.deepEqual(rows, beforeRows);
 });
@@ -325,6 +324,47 @@ function assertUploadFilter(hist, incoming, expected) {
   assert.deepEqual(mergeScoreHistory(hist, selected), mergeScoreHistory(hist, incoming));
   assert.deepEqual(mergeScoreHistory(hist, selected), mergeScoreHistory(baseline, selected));
 }
+
+test('web filter independently accepts lamp gains, first version rows, and NULL supplements', () => {
+  const hist = [row(1, 0, 4, 100, 30, d, '2026-10-20', 1, null, null),
+    row(2, 0, 4, 100, 30, d, '2026-10-20', 1, 2, null)];
+  const incoming = [row(1, 0, 5, 90), row(2, 0, 4, 100, 30, d2, '2026-10-20', 1, 0, 120),
+    row(3, 0, 1, 10, 31), row(1, 0, 1, 110, 30, d2, '2026-10-20', 0)];
+  assert.deepEqual(filterWebCrawlHistoryRows(hist, incoming), incoming);
+  assert.deepEqual(filterScoreHistoryRows(hist, [incoming[0]]), []);
+  assert.throws(() => filterWebCrawlHistoryRows([], [incoming[2], [...incoming[2]]]), /duplicate/);
+  assert.throws(() => filterWebCrawlHistoryRows([], [row(4, 0, 1, 1, 30, 'bad-date')]), /date/);
+});
+
+test('replay keeps independent EX and lamp bests in a day and across dates', () => {
+  const base = row(1, 0, 4, 100, 30, d, '2026-10-20', 1, 9, 100);
+  const lowerExBetterLamp = rest(1, { song_id: 1, diff: 0, played_version: 30, date: d,
+    date_kst: '2026-10-20', ex_score: 90, lamp: 5, bp: 3 });
+  const sameDayEx = rest(2, { song_id: 1, diff: 0, played_version: 30, date: d2,
+    date_kst: '2026-10-20', ex_score: 110, lamp: 3, bp: 0 });
+  const sameDay = replayScoreBuffer([base], [lowerExBetterLamp, sameDayEx]);
+  assert.equal(sameDay.length, 1);
+  assert.deepEqual(sameDay[0].slice(2, 4), [5, 110]);
+  assert.equal(sameDay[0][8], 0);
+  const exOnly = replayScoreBuffer([base], [sameDayEx]);
+  assert.deepEqual(exOnly[0].slice(2, 4), [4, 110]);
+  const otherDay = replayScoreBuffer([base], [rest(3, { song_id: 1, diff: 0, played_version: 30,
+    date: '2026-10-21T00:00:00Z', date_kst: '2026-10-21', ex_score: 90, lamp: 5 })]);
+  assert.deepEqual(otherDay.map((r) => r.slice(2, 4)), [[4, 100], [5, 90]]);
+  assert.deepEqual(replayScoreBuffer(otherDay, [rest(3, { song_id: 1, diff: 0, played_version: 30,
+    date: '2026-10-21T00:00:00Z', date_kst: '2026-10-21', ex_score: 90, lamp: 5 })]), otherDay);
+});
+
+test('replay independent behavior also applies to INF version zero and CSV-shaped rows', () => {
+  const inf = [row(1, 0, 4, 100, 0, d, '2026-10-20')];
+  const result = replayScoreBuffer(inf, [rest(1, { song_id: 1, diff: 0, played_version: 0,
+    date: d2, date_kst: '2026-10-20', ex_score: 90, lamp: 5 })]);
+  assert.deepEqual(result[0].slice(2, 5), [5, 100, 0]);
+  const csvRows = [[1, 0, 4, 100, 30, d, '2026-10-20', 1]];
+  const csvReplay = replayScoreBuffer(csvRows, [rest(2, { song_id: 1, diff: 0, played_version: 30,
+    date: d2, date_kst: '2026-10-20', ex_score: 90, lamp: 5 })]);
+  assert.deepEqual(csvReplay[0], [1, 0, 5, 100, 30, d, '2026-10-20', 1, null, 1500]);
+});
 
 test('upload filter: EX and lamp decisions', () => {
   const hist = [row(1, 0, 5, 200), row(2, 0, 5, 200), row(3, 0, 5, 200),

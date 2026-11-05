@@ -142,6 +142,47 @@ export function filterScoreHistoryRows(histRows, incomingRows) {
 }
 // END SCORE_HISTORY_UPLOAD_FILTER_SYNC
 
+/** 웹 크롤 비교: EX와 lamp를 서로 독립된 최고 기록으로 판정한다. */
+export function filterWebCrawlHistoryRows(histRows, incomingRows) {
+  if (!Array.isArray(histRows) || !Array.isArray(incomingRows)) fail('histRows and incomingRows must be arrays');
+  const baseline = mergeScoreHistory(histRows, []);
+  const normalizedIncoming = incomingRows.map((r, i) => normalize(r, 'incoming', i));
+  mergeScoreHistory([], incomingRows);
+  const bestByChart = new Map();
+  for (const r of baseline) {
+    if (r[4] === -10) continue;
+    const key = chartKey(r);
+    const best = bestByChart.get(key) ?? { ex: -1, lamp: 0 };
+    best.ex = Math.max(best.ex, ex(r));
+    best.lamp = Math.max(best.lamp, lamp(r));
+    bestByChart.set(key, best);
+  }
+  const selected = [];
+  for (let i = 0; i < normalizedIncoming.length; i += 1) {
+    const { row } = normalizedIncoming[i];
+    if (row[4] === -10) continue;
+    const key = chartKey(row);
+    const best = bestByChart.get(key);
+    if (!best) {
+      bestByChart.set(key, { ex: ex(row), lamp: lamp(row) });
+      selected.push(incomingRows[i]);
+      continue;
+    }
+    const accepted = ex(row) > best.ex || lamp(row) > best.lamp
+      || (row[3] !== null && row[3] === best.ex && row[8] !== null
+        && baseline.some((old) => old[4] !== -10 && chartKey(old) === key
+          && old[3] === row[3] && old[8] === null))
+      || (row[9] !== null && baseline.some((old) => old[4] !== -10
+        && chartKey(old) === key && old[9] === null));
+    if (accepted) {
+      best.ex = Math.max(best.ex, ex(row));
+      best.lamp = Math.max(best.lamp, lamp(row));
+      selected.push(incomingRows[i]);
+    }
+  }
+  return selected;
+}
+
 export { instant as historyInstant };
 
 /** Replay REST score rows in score_id order, preserving the existing history slots. */
@@ -163,8 +204,9 @@ export function replayScoreBuffer(histRows, restRows) {
   // Preserve the historical empty-REST fast path, including its lack of validation.
   if (ordered.length === 0) return histRows;
 
-  // The first merge preserves canonical validation order and exact error messages.
-  let result = mergeScoreHistory(histRows, [ordered[0].row]);
+  // 첫 입력을 단독 검증해 기존 오류 순서를 유지한 뒤 독립 최고값으로 반영한다.
+  mergeScoreHistory([], [ordered[0].row]);
+  const result = mergeScoreHistory(histRows, []);
   const slotsByNatural = new Map();
   const bestByChart = new Map();
   const notesWaitingByChart = new Map();
@@ -187,9 +229,10 @@ export function replayScoreBuffer(histRows, restRows) {
     const nk = naturalKey(r);
     slotsByNatural.set(nk, slot);
     const best = bestByChart.get(ck);
-    if (!best || ex(r) > best.ex || (ex(r) === best.ex && lamp(r) > best.lamp)) {
-      bestByChart.set(ck, { ex: ex(r), lamp: lamp(r) });
-    }
+    const current = best ?? { ex: -1, lamp: 0 };
+    current.ex = Math.max(current.ex, ex(r));
+    current.lamp = Math.max(current.lamp, lamp(r));
+    bestByChart.set(ck, current);
     if (r[9] === null) addWaiting(notesWaitingByChart, ck, slot);
     if (r[8] === null && r[3] !== null) addWaiting(bpWaitingByChart, JSON.stringify([ck, r[3]]), slot);
   };
@@ -197,29 +240,45 @@ export function replayScoreBuffer(histRows, restRows) {
   // the complete history; its unique non-DBR natural keys make these maps lossless.
   for (let i = 0; i < result.length; i += 1) register(i);
 
-  for (let n = 1; n < ordered.length; n += 1) {
+  for (let n = 0; n < ordered.length; n += 1) {
     const row = normalize(ordered[n].row, 'incoming', 0).row;
     if (row[4] !== -10) {
       const ck = chartKey(row);
       const best = bestByChart.get(ck);
-      if (!best || !(best.ex > ex(row) || (best.ex === ex(row) && best.lamp >= lamp(row)))) {
-        const nk = naturalKey(row);
-        const slot = slotsByNatural.get(nk);
-        if (slot === undefined) {
+      const exImproved = !best || ex(row) > best.ex;
+      const lampImproved = !best || lamp(row) > best.lamp;
+      const nk = naturalKey(row);
+      const slot = slotsByNatural.get(nk);
+      if (slot === undefined && (exImproved || lampImproved)) {
           const appended = [...row];
           result.push(appended);
           register(result.length - 1);
-        } else {
+      } else if (slot !== undefined && (exImproved || lampImproved)) {
           const old = result[slot];
-          const oldChart = chartKey(old);
-          removeWaiting(notesWaitingByChart, oldChart, slot);
-          removeWaiting(bpWaitingByChart, JSON.stringify([oldChart, old[3]]), slot);
-          const replacement = [...row];
-          replacement[8] = row[8] ?? (row[3] !== null && row[3] === old[3] ? old[8] : null);
-          replacement[9] = row[9] ?? old[9];
-          result[slot] = replacement;
-          register(slot);
-        }
+          const dayExImproved = ex(row) > ex(old);
+          const dayLampImproved = lamp(row) > lamp(old);
+          const fillNote = old[9] === null && row[9] !== null;
+          if (dayExImproved || dayLampImproved || fillNote) {
+            const oldChart = chartKey(old);
+            removeWaiting(notesWaitingByChart, oldChart, slot);
+            removeWaiting(bpWaitingByChart, JSON.stringify([oldChart, old[3]]), slot);
+            const replacement = [...old];
+            if (ex(row) >= ex(old) && (dayExImproved || dayLampImproved)) {
+              replacement[3] = row[3];
+              replacement[5] = row[5];
+              replacement[8] = row[8] ?? (row[3] === old[3] ? old[8] : null);
+            }
+            if (dayLampImproved) replacement[2] = row[2];
+            replacement[9] = row[9] ?? old[9];
+            result[slot] = replacement;
+            register(slot);
+          }
+      }
+      if (exImproved || lampImproved) {
+        const updated = bestByChart.get(ck) ?? { ex: -1, lamp: 0 };
+        updated.ex = Math.max(updated.ex, ex(row));
+        updated.lamp = Math.max(updated.lamp, lamp(row));
+        bestByChart.set(ck, updated);
       }
       const notes = notesWaitingByChart.get(ck);
       if (notes && row[9] !== null) {
