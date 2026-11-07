@@ -128,7 +128,7 @@ https://data.iidx.in/version.json
 
 - `.github/scripts/dump-sp-clear-map.mjs`와 시험, `.github/workflows/dump-chart-dist.yml`의 별도 단계로 저장된 유저 sp★와 유저별 채보 최고 램프를 사용해 SP11 표 4개와 SP12 표 3개를 계산한다. 자산은 `data/sp-clear-map.json`이며 최초 게시 전이다.
 - 기본은 무쓰기 관찰이다. 후보 전체는 `SP_CLEAR_MAP_CANDIDATE_JSON` 로그 줄에 남긴다. 최초 게시는 정본 404일 때 `workflow_dispatch` 입력 `sp_clear_map_initial`로만 한다.
-- 자동 게시는 `SP_CLEAR_MAP_AUTO_PUBLISH`가 `'true'`일 때만 가능하다. 변동 기준 초과 시 보류하고 같은 방향 후보가 연속 N회면 게시한다. `GUARD_POLICY`는 아직 null이므로 스위치를 켜면 실패하며, 수치 기준은 며칠 관찰한 뒤 정한다.
+- 자동 게시는 `SP_CLEAR_MAP_AUTO_PUBLISH`가 `'true'`일 때만 가능하다. 표 변동이 0.5 이하면 게시하고, 초과하면 보류한 뒤 같은 방향 후보가 3일 연속이면 게시한다. `GUARD_POLICY` 수치는 하루 간격 실측 전 임시값이며 2026-11-07에 스위치를 켰다.
 - 검증: 데이터 시험 21건 합격. 실제 297명 기록에서 생산기 표 7개와 측정 정본의 값 차이 0, 곡 키 1,502개 동일. 메모리 R2로 게시 8단계를 확인했고 자산은 약 2.2KB다.
 
 ### 2026-11-05 — 웹 크롤 이력 필터와 replay 램프 분리 갱신

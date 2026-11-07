@@ -13,7 +13,7 @@ const SOURCES = {
 const USER_KEY_RE = /^user\/([A-Za-z0-9]+)\.json$/;
 const DIFFS = ['BEGINNER', 'NORMAL', 'HYPER', 'ANOTHER', 'LEGGENDARIA'];
 const STAR_FIELDS = ['estEc', 'estHc', 'estExh', 'estFc'];
-const GUARD_POLICY = null;
+const GUARD_POLICY = { version: 'guard-v1', maxChange: 0.5, similarityDistance: 0.5, directionTolerance: 0.1, consecutiveRounds: 3 }; // 하루 간격 실측 전 임시값이다.
 const ASSET_KEY = 'data/sp-clear-map.json';
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
