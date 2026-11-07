@@ -23,6 +23,14 @@ const fakeFetch = (overrides = {}) => async (url) => response(overrides[url] ?? 
   'https://data.iidx.in/lib/normTitle.js': 'module.exports={norm: value => value};',
 })[url]);
 
+test('user null 덤프는 제외하고 user 누락은 장애', () => {
+  const base = { songs, textage: { songs: {} }, cpiRows, starRows, norm, variants };
+  const counts = collectObservations({ ...base, dumps: [{ user: null, sp: [] }, dump('A1', 3)] }).counts;
+  assert.equal(counts.usersRead, 2);
+  assert.equal(counts.usersWithoutStar, 1);
+  assert.throws(() => collectObservations({ ...base, dumps: [{ sp: [] }] }));
+});
+
 test('유저 덤프를 각각 한 번 읽고 저장 sp_star를 보존하며 null은 제외', async () => {
   const reads = [];
   const loaded = await loadInputs({ list: async () => ['user/A1.json', 'user/B2.json', 'user/C3.json'],
