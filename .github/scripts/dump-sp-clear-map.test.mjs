@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyTable, balanceLine, buildTables, collectObservations, loadInputs, loadNorm, loadVariants, tableOf } from './dump-sp-clear-map.mjs';
+import { applyTable, balanceLine, buildTables, collectObservations, loadInputs, loadNorm, loadVariants, tableOf, validateTables, compareTables, decideGuard } from './dump-sp-clear-map.mjs';
 
 const norm = (value) => value;
 const variants = {
@@ -120,4 +120,40 @@ test('확정 산식과 보정표 및 필수 표 계약을 검증한다', () => {
   assert.deepEqual(kept.tables['11'].ec, [[2.5, 2]]);
   const fourHard = buildTables({ stars: sixStars, plays: sixPlays, measure: (plays) => ({ c: 2, st: Number(plays[0][0].slice(1)) < 4 ? 'hard' : 'ok' }) });
   assert.deepEqual(fourHard.tables['11'].ec, []);
+});
+
+const guardTables = (y) => ({ '11': { ec: [[0.5, y], [1.5, y + 1]], hc: [[0.5, y], [1.5, y + 1]], ex: [[0.5, y], [1.5, y + 1]], fc: [[0.5, y], [1.5, y + 1]] }, '12': { ec: [[0.5, y], [1.5, y + 1]], ex: [[0.5, y], [1.5, y + 1]], fc: [[0.5, y], [1.5, y + 1]] } });
+const generation = (tables) => ({ generation: 'g', generatedAt: '2026-11-07T00:00:00Z', tables });
+const guardPolicy = { maxChange: 0.1, similarityDistance: 0.05, directionTolerance: 0.01, consecutiveRounds: 3, version: 'test', starPositions: [0.5, 1.5] };
+
+test('guard 표 검증 및 비교와 연속 확인 계약', () => {
+  const a = guardTables(1), b = guardTables(1.2);
+  assert.deepEqual(validateTables(a), { valid: true });
+  for (const mutate of [t => { t['11'].ec = []; }, t => { t['11'].ec[0][1] = Infinity; }, t => { t['11'].ec[1][0] = 0.5; }, t => { t['11'].ec[1][1] = 0; }]) {
+    const bad = guardTables(1); mutate(bad); assert.throws(() => validateTables(bad));
+  }
+  b['11'].ec.pop();
+  const comparison = compareTables(a, b, [0.5, 1.5]);
+  assert.ok(Math.abs(comparison.worst - 0.2) < 1e-12);
+  assert.deepEqual(comparison.tables['11.ec'].lostNodes, [1.5]);
+  assert.equal(comparison.tables['11.ec'].currentNodeCount, 2);
+  const current = generation(a), candidate = generation(guardTables(1.2));
+  let pending = null;
+  for (const round of ['2026-11-07', '2026-11-08']) {
+    const result = decideGuard({ current, candidate, pending, policy: guardPolicy, round, positions: { '11': { ec: [0.5, 1.5] } } });
+    assert.equal(result.action, 'hold'); pending = result.pending;
+  }
+  assert.equal(decideGuard({ current, candidate, pending, policy: guardPolicy, round: '2026-11-09', positions: { '11': { ec: [0.5, 1.5] } } }).action, 'publish');
+});
+
+test('guard는 역방향·유사도 이탈·회차 단절을 초기화하고 재시도·해시 변경을 보존한다', () => {
+  const current = generation(guardTables(1)), a = generation(guardTables(1.2)), b = generation(guardTables(1.4));
+  const first = decideGuard({ current, candidate: a, pending: null, policy: guardPolicy, round: '2026-11-07' }).pending;
+  assert.equal(decideGuard({ current, candidate: a, pending: first, policy: guardPolicy, round: '2026-11-07' }).pending.count, 1);
+  assert.equal(decideGuard({ current, candidate: b, pending: first, policy: guardPolicy, round: '2026-11-08' }).pending.count, 1);
+  assert.equal(decideGuard({ current, candidate: generation(guardTables(0.8)), pending: first, policy: guardPolicy, round: '2026-11-08' }).pending.count, 1);
+  const changed = { ...a, inputHashes: { value: 'changed' } };
+  assert.equal(decideGuard({ current, candidate: changed, pending: first, policy: guardPolicy, round: '2026-11-08' }).pending.count, 2);
+  assert.equal(decideGuard({ current, candidate: a, pending: first, policy: guardPolicy, round: '2026-11-10' }).pending.count, 1);
+  assert.equal(decideGuard({ current, candidate: generation(guardTables(1.05)), pending: null, policy: guardPolicy, round: '2026-11-07' }).action, 'publish');
 });

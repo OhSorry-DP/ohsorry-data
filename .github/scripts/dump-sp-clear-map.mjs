@@ -223,6 +223,124 @@ export function applyTable(x, points) {
   return lastY + x - lastX;
 }
 
+const TABLE_KEYS = { '11': ['ec', 'hc', 'ex', 'fc'], '12': ['ec', 'ex', 'fc'] };
+
+export function validateTables(tables) {
+  assertObject(tables, 'tables');
+  for (const [level, lamps] of Object.entries(TABLE_KEYS)) {
+    assertObject(tables[level], `tables.${level}`);
+    for (const lamp of lamps) {
+      const points = tables[level][lamp];
+      if (!Array.isArray(points) || points.length === 0) throw new Error(`tables.${level}.${lamp}: 필수 표가 비어 있음`);
+      let previousX = -Infinity, previousY = -Infinity;
+      for (const point of points) {
+        if (!Array.isArray(point) || point.length !== 2 || !point.every(Number.isFinite)) throw new Error(`tables.${level}.${lamp}: 유한한 절점이 아님`);
+        if (point[0] <= previousX) throw new Error(`tables.${level}.${lamp}: x 중복 또는 역전`);
+        if (point[1] < previousY) throw new Error(`tables.${level}.${lamp}: y 단조 위반`);
+        previousX = point[0]; previousY = point[1];
+      }
+    }
+  }
+  return { valid: true };
+}
+
+function legacyCompareTables(currentTables, candidateTables, starPositions) {
+  validateTables(currentTables); validateTables(candidateTables);
+  const currentNodes = [], candidateNodes = [];
+  for (const level of Object.keys(TABLE_KEYS)) for (const lamp of TABLE_KEYS[level]) {
+    currentNodes.push(...currentTables[level][lamp].map(([x]) => x));
+    candidateNodes.push(...candidateTables[level][lamp].map(([x]) => x));
+  }
+  const nodeUnion = [...new Set([...currentNodes, ...candidateNodes])].sort((a, b) => a - b);
+  const actualPositions = [...new Set(starPositions)].sort((a, b) => a - b);
+  const diffs = actualPositions.map((x) => applyTable(x, candidateTables['11'].ec) - applyTable(x, currentTables['11'].ec));
+  const abs = diffs.map(Math.abs).sort((a, b) => a - b);
+  const medianAbs = abs.length ? abs[Math.floor(abs.length / 2)] : 0;
+  const p90Abs = abs.length ? abs[Math.min(abs.length - 1, Math.ceil(abs.length * 0.9) - 1)] : 0;
+  let maxIndex = 0;
+  for (let i = 1; i < diffs.length; i++) if (Math.abs(diffs[i]) > Math.abs(diffs[maxIndex])) maxIndex = i;
+  return { medianAbs, p90Abs, maxAbs: abs.at(-1) ?? 0, direction: diffs.length ? Math.sign(diffs[maxIndex]) : 0,
+    maxPosition: diffs.length ? actualPositions[maxIndex] : null, overPointOne: diffs.filter((value) => Math.abs(value) >= 0.1).length,
+    currentNodeCount: currentNodes.length, candidateNodeCount: candidateNodes.length,
+    currentIntervalCount: Math.max(0, currentNodes.length - 1), candidateIntervalCount: Math.max(0, candidateNodes.length - 1),
+    lostNodes: Object.keys(TABLE_KEYS).flatMap((level) => TABLE_KEYS[level].flatMap((lamp) => currentTables[level][lamp]
+      .filter(([x]) => !candidateTables[level][lamp].some(([candidateX]) => candidateX === x)).map(([x]) => ({ level, lamp, x })))), nodeUnion, actualPositions };
+}
+
+function legacyDecideGuard({ current, candidate, pending, policy, round, compare }) {
+  const compareFn = compare ?? compareTables;
+  const summary = compareFn(current.tables, candidate.tables, policy?.starPositions ?? []);
+  if (!policy) return { action: 'publish', pending: null };
+  const threshold = policy.maxChange ?? policy.generalMax ?? 0;
+  if (summary.maxAbs <= threshold) return { action: 'publish', pending: null };
+  const day = new Date(`${round}T00:00:00Z`);
+  if (!Number.isFinite(day.getTime()) || day.toISOString().slice(0, 10) !== round) throw new Error('round는 UTC 날짜 YYYY-MM-DD여야 함');
+  const similar = (a, b) => {
+    const result = compareFn(a.tables, b.tables, policy.starPositions ?? []);
+    const candidateDirection = compareFn(current.tables, b.tables, policy.starPositions ?? []);
+    return candidateDirection.direction === summary.direction && Math.abs(candidateDirection.maxAbs - summary.maxAbs) <= (policy.directionTolerance ?? 0) && result.medianAbs <= (policy.similarityDistance ?? 0);
+  };
+  const yesterday = new Date(day.getTime() - 86400000).toISOString().slice(0, 10);
+  if (pending?.lastRound === round) return { action: 'hold', pending };
+  const matches = pending && pending.lastRound === yesterday && pending.policyVersion === policy.version &&
+    similar(pending.first, candidate) && similar(pending.last, candidate);
+  const next = matches ? { ...pending, last: candidate, count: pending.count + 1, lastRound: round }
+    : { first: candidate, last: candidate, count: 1, policyVersion: policy.version, lastRound: round };
+  return next.count >= policy.consecutiveRounds ? { action: 'publish', pending: null } : { action: 'hold', pending: next };
+}
+
+export function compareTables(currentTables, candidateTables, positions) {
+  validateTables(currentTables); validateTables(candidateTables);
+  const tables = {};
+  const summarize = (level, lamp, xs) => {
+    const points = [...new Set(xs)].sort((a, b) => a - b);
+    const diffs = points.map((x) => applyTable(x, candidateTables[level][lamp]) - applyTable(x, currentTables[level][lamp]));
+    const abs = diffs.map(Math.abs).sort((a, b) => a - b);
+    let maxIndex = 0;
+    for (let i = 1; i < diffs.length; i++) if (Math.abs(diffs[i]) > Math.abs(diffs[maxIndex])) maxIndex = i;
+    return { medianAbs: abs.length ? abs[Math.floor(abs.length / 2)] : 0,
+      p90Abs: abs.length ? abs[Math.min(abs.length - 1, Math.ceil(abs.length * 0.9) - 1)] : 0,
+      maxAbs: abs.at(-1) ?? 0, direction: diffs.length ? Math.sign(diffs[maxIndex]) : 0,
+      maxPosition: diffs.length ? points[maxIndex] : null, overPointOne: diffs.filter((v) => Math.abs(v) >= 0.1).length };
+  };
+  for (const [level, lamps] of Object.entries(TABLE_KEYS)) for (const lamp of lamps) {
+    const current = currentTables[level][lamp], candidate = candidateTables[level][lamp];
+    const lostNodes = current.filter(([x]) => !candidate.some(([cx]) => cx === x)).map(([x]) => x);
+    const addedNodes = candidate.filter(([x]) => !current.some(([cx]) => cx === x)).map(([x]) => x);
+    tables[`${level}.${lamp}`] = { actual: summarize(level, lamp, positions?.[level]?.[lamp] ?? []),
+      nodes: summarize(level, lamp, [...current.map(([x]) => x), ...candidate.map(([x]) => x)]),
+      lostNodes, addedNodes, currentNodeCount: current.length, candidateNodeCount: candidate.length };
+  }
+  return { tables, worst: Math.max(0, ...Object.values(tables).flatMap((t) => [t.actual.maxAbs, t.nodes.maxAbs])) };
+}
+
+export function decideGuard({ current, candidate, pending, policy, round, positions, compare }) {
+  if (!policy || typeof policy.version !== 'string' || !policy.version || !Number.isFinite(policy.maxChange) ||
+      !Number.isFinite(policy.similarityDistance) || !Number.isFinite(policy.directionTolerance) ||
+      !Number.isInteger(policy.consecutiveRounds) || policy.consecutiveRounds < 1) throw new Error('guard policy fields are invalid');
+  const compareFn = compare ?? compareTables;
+  const summary = compareFn(current.tables, candidate.tables, positions);
+  if (summary.worst <= policy.maxChange) return { action: 'publish', pending: null };
+  const day = new Date(`${round}T00:00:00Z`);
+  if (!Number.isFinite(day.getTime()) || day.toISOString().slice(0, 10) !== round) throw new Error('round must be UTC YYYY-MM-DD');
+  if (pending?.lastRound === round) return { action: 'hold', pending };
+  const sameMove = (a, b) => {
+    if (compareFn(a.tables, b.tables, positions).worst > policy.similarityDistance) return false;
+    const left = compareFn(current.tables, a.tables, positions).tables;
+    const right = compareFn(current.tables, b.tables, positions).tables;
+    return Object.keys(TABLE_KEYS).every((level) => TABLE_KEYS[level].every((lamp) => {
+      const x = left[`${level}.${lamp}`].actual, y = right[`${level}.${lamp}`].actual;
+      return (x.maxAbs <= policy.directionTolerance && y.maxAbs <= policy.directionTolerance) || x.direction === y.direction;
+    }));
+  };
+  const yesterday = new Date(day.getTime() - 86400000).toISOString().slice(0, 10);
+  const matches = pending && pending.lastRound === yesterday && pending.policyVersion === policy.version &&
+    sameMove(pending.first, candidate) && sameMove(pending.last, candidate);
+  const next = matches ? { ...pending, last: candidate, count: pending.count + 1, lastRound: round }
+    : { first: candidate, last: candidate, count: 1, policyVersion: policy.version, lastRound: round };
+  return next.count >= policy.consecutiveRounds ? { action: 'publish', pending: null } : { action: 'hold', pending: next };
+}
+
 export function buildTables({ stars, plays, measure = balanceLine }) {
   const tables = { '11': {}, '12': {} };
   const bins = { '11': {}, '12': {} };
