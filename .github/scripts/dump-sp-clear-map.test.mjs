@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { collectObservations, loadInputs, loadNorm, loadVariants } from './dump-sp-clear-map.mjs';
+import { applyTable, balanceLine, buildTables, collectObservations, loadInputs, loadNorm, loadVariants, tableOf } from './dump-sp-clear-map.mjs';
 
 const norm = (value) => value;
 const variants = {
-  resolveChartId: (row, _songs, _norm, context) => row.textage_song_id || (context.source === 'INF' ? 'inf' : 'ac'),
+  resolveChartId: (row, _songs, _norm, context) => row.textage_song_id || (row.played_version === 0 || context?.source === 'INF' ? 'inf' : 'ac'),
   variantChartKey: (title, diff, id) => id ? `${title}|${diff}${id === 'inf' ? '|@inf' : ''}` : null,
-  ratingKeyOf: (row) => row.title && row.diff ? `${row.title}|${row.diff}${row.textage_song_id === 'inf' ? '|@inf' : ''}` : null,
+  ratingKeyOf: (row) => row.title && row.diff ? `${row.title}|${row.diff}${(row.__textageSongId ?? row.textage_song_id) === 'inf' ? '|@inf' : ''}` : null,
 };
 const songs = [{ song_id: 1, title: 'A', textage_song_id: 'ac' }];
 const starRows = [{ title: 'A', diff: 'ANOTHER', gameLevel: 11, estEc: 2, estHc: 3, estExh: 4, estFc: 5 }];
@@ -91,4 +91,33 @@ test('SP11은 CPI를 받지 않고 SP12는 유한 CPI 값을 우선하며 CPI �
   assert.equal(nullCpi.stars.get('A|ANOTHER').estEc, 2);
   const cpiOnly = collectObservations({ dumps: [], songs, cpiRows: [{ ...cpiRows[0], title: 'B' }], starRows: [], norm, variants });
   assert.equal(cpiOnly.stars.get('B|ANOTHER').gameLevel, 12);
+});
+
+test('확정 산식과 보정표 및 필수 표 계약을 검증한다', () => {
+  const makePlays = (stars, lamps) => stars.map((star, index) => [`U${index}`, star, lamps[index]]);
+  assert.equal(balanceLine(makePlays(Array(7).fill(1), Array(7).fill(1)), 'ec'), null);
+  assert.deepEqual(balanceLine(makePlays([1, 1, 1, 1, 2, 2, 2, 2], [1, 1, 1, 1, 3, 3, 3, 3]), 'ec'), { c: 2, st: 'hard' });
+  assert.deepEqual(balanceLine(makePlays([1, 2, 1, 2, 1, 2, 1, 2], Array(8).fill(3)), 'ec'), { c: 1, st: 'easy' });
+  assert.deepEqual(balanceLine(makePlays([1, 2, 1, 2, 1, 2, 1, 2], Array(8).fill(1)), 'ec'), { c: 2, st: 'hard' });
+  assert.deepEqual(balanceLine(makePlays([1.01, 1.01, 1.01, 1.01, 1.29, 1.29, 1.29, 1.29], [1, 1, 1, 1, 3, 3, 3, 3]), 'ec'), { c: 1.15, st: 'ok' });
+  const table = tableOf([[1, 4], [1, 3], [1, 2], [1, 1], [1, 5], [1, 6], [2, 1], [2, 1], [2, 1], [2, 1], [2, 1]]);
+  assert.deepEqual(table, [[1.5, 4], [2.5, 4]]);
+  assert.deepEqual([applyTable(2, table), applyTable(1, table), applyTable(3, table)], [4, 3.5, 4.5]);
+  const stars = new Map(); const observations = new Map();
+  for (let i = 0; i < 6; i++) {
+    const key = `chart${i}`;
+    stars.set(key, { gameLevel: i < 4 ? 11 : 12, estEc: 1.1, estHc: 1.1, estExh: 1.1, estFc: 1.1 });
+    observations.set(key, Array.from({ length: 8 }, (_, n) => [`u${n}`, 1, 1]));
+  }
+  const built = buildTables({ stars, plays: observations, measure: () => ({ c: 1, st: 'hard' }) });
+  assert.deepEqual(built.tables['11'].ec, []);
+  assert.equal(built.tables['12'].hc, null);
+  for (const lamp of ['ec', 'hc', 'ex', 'fc']) assert.ok(Array.isArray(built.tables['11'][lamp]));
+  for (const lamp of ['ec', 'ex', 'fc']) assert.ok(Array.isArray(built.tables['12'][lamp]));
+  const sixStars = new Map(Array.from({ length: 6 }, (_, i) => [`k${i}`, { gameLevel: 11, estEc: 2.1 }]));
+  const sixPlays = new Map([...sixStars.keys()].map((key, i) => [key, [[`u${i}`, 1, 1]]]));
+  const kept = buildTables({ stars: sixStars, plays: sixPlays, measure: (plays) => ({ c: 2, st: Number(plays[0][0].slice(1)) < 3 ? 'hard' : 'ok' }) });
+  assert.deepEqual(kept.tables['11'].ec, [[2.5, 2]]);
+  const fourHard = buildTables({ stars: sixStars, plays: sixPlays, measure: (plays) => ({ c: 2, st: Number(plays[0][0].slice(1)) < 4 ? 'hard' : 'ok' }) });
+  assert.deepEqual(fourHard.tables['11'].ec, []);
 });

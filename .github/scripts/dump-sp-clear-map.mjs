@@ -94,7 +94,7 @@ function makeRatingKey(row, norm, variants) {
   return variants.ratingKeyOf(row, norm, { source: 'AC' });
 }
 
-export function collectObservations({ dumps, songs, cpiRows, starRows, norm, variants }) {
+export function collectObservations({ dumps, songs, textage, cpiRows, starRows, norm, variants }) {
   if (!Array.isArray(dumps) || !Array.isArray(songs) || !Array.isArray(cpiRows) || !Array.isArray(starRows)) throw new Error('입력 배열 형식 오류');
   validateRatingRows(cpiRows, 'cpi.json');
   validateRatingRows(starRows, 'sp-clear-star.json');
@@ -140,10 +140,11 @@ export function collectObservations({ dumps, songs, cpiRows, starRows, norm, var
       if (!song) { counts.unresolved++; continue; }
       const diff = DIFFS[row.diff];
       if (!diff) throw new Error(`user/${userId}: diff 값 오류`);
-      const chart = { ...row, title: row.title ?? song.title, textage_song_id: row.textage_song_id ?? song.textage_song_id, diff };
+      const chart = { title: row.title ?? song.title, diff, __playedVersion: row.played_version,
+        __textageSongId: variants.resolveChartId({ ...row, title: row.title ?? song.title,
+          textage_song_id: row.textage_song_id ?? song.textage_song_id }, textage?.songs ?? {}, norm) };
       if (!chart.title) { counts.unresolved++; continue; }
-      const source = chart.played_version === 0 ? 'INF' : 'AC';
-      const resolvedId = variants.resolveChartId(chart, null, norm, { source });
+      const resolvedId = variants.resolveChartId(chart, null, norm);
       const rowKey = variants.variantChartKey(chart.title, diff, resolvedId, norm);
       if (rowKey == null) { counts.unresolved++; continue; }
       const key = variants.ratingKeyOf(chart, norm);
@@ -166,4 +167,86 @@ export function collectObservations({ dumps, songs, cpiRows, starRows, norm, var
     users: sha256(JSON.stringify(userStar.sort(([a], [b]) => a.localeCompare(b)))),
   };
   return { stars, plays, counts, hashes };
+}
+
+const LAMP_THRESHOLDS = { ec: 3, hc: 5, ex: 6, fc: 7 };
+
+export function balanceLine(plays, lamp) {
+  if (!Array.isArray(plays) || plays.length < 8 || !LAMP_THRESHOLDS[lamp]) return null;
+  const points = plays.map(([, star, value]) => [star, value >= LAMP_THRESHOLDS[lamp]]);
+  const successes = points.filter(([, cleared]) => cleared).length;
+  const top = Math.max(...points.map(([star]) => star));
+  const bottom = Math.min(...points.map(([star]) => star));
+  if (!successes) return { c: top, st: 'hard' };
+  if (successes === points.length) return { c: bottom, st: 'easy' };
+  const min = Math.floor(bottom * 10) / 10;
+  const max = Math.ceil(top * 10) / 10;
+  let best = Infinity;
+  const tied = [];
+  for (let s = min; s <= max + 1e-9; s = +(s + 0.1).toFixed(1)) {
+    let errors = 0;
+    for (const [star, cleared] of points) if ((star >= s && !cleared) || (star < s && cleared)) errors++;
+    if (errors < best) { best = errors; tied.length = 0; tied.push(s); }
+    else if (errors === best) tied.push(s);
+  }
+  if (tied[tied.length - 1] >= max) return { c: top, st: 'hard' };
+  if (tied[0] <= min) return { c: bottom, st: 'easy' };
+  return { c: (tied[0] + tied[tied.length - 1]) / 2, st: 'ok' };
+}
+
+const median = (values) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+};
+
+export function tableOf(pairs) {
+  const bins = new Map();
+  for (const [x, y] of pairs) {
+    const bin = Math.floor(x);
+    if (!bins.has(bin)) bins.set(bin, []);
+    bins.get(bin).push(y);
+  }
+  const table = [...bins.keys()].filter((bin) => bins.get(bin).length >= 5).sort((a, b) => a - b)
+    .map((bin) => [bin + 0.5, median(bins.get(bin))]);
+  for (let i = 1; i < table.length; i++) table[i][1] = Math.max(table[i][1], table[i - 1][1]);
+  return table;
+}
+
+export function applyTable(x, points) {
+  if (!points.length) return x;
+  if (x <= points[0][0]) return points[0][1] + x - points[0][0];
+  for (let i = 1; i < points.length; i++) if (x <= points[i][0]) {
+    const [leftX, leftY] = points[i - 1], [rightX, rightY] = points[i];
+    return leftY + (rightY - leftY) * (x - leftX) / (rightX - leftX);
+  }
+  const [lastX, lastY] = points[points.length - 1];
+  return lastY + x - lastX;
+}
+
+export function buildTables({ stars, plays, measure = balanceLine }) {
+  const tables = { '11': {}, '12': {} };
+  const bins = { '11': {}, '12': {} };
+  for (const level of [11, 12]) for (const lamp of Object.keys(LAMP_THRESHOLDS)) {
+    if (level === 12 && lamp === 'hc') { tables[level][lamp] = null; bins[level][lamp] = {}; continue; }
+    const pairs = [];
+    for (const [key, star] of stars) {
+      const field = { ec: 'estEc', hc: 'estHc', ex: 'estExh', fc: 'estFc' }[lamp];
+      if (star.gameLevel !== level || !Number.isFinite(star[field])) continue;
+      const line = measure(plays.get(key) || [], lamp);
+      if (line) pairs.push([star[field], line.c, line.st]);
+    }
+    const grouped = new Map();
+    for (const pair of pairs) {
+      const bin = Math.floor(pair[0]);
+      if (!grouped.has(bin)) grouped.set(bin, []);
+      grouped.get(bin).push(pair);
+    }
+    const kept = pairs.filter((pair) => {
+      const group = grouped.get(Math.floor(pair[0]));
+      return group.filter((item) => item[2] === 'hard').length * 2 <= group.length;
+    });
+    bins[level][lamp] = Object.fromEntries([...grouped].map(([bin, group]) => [bin, group.length]));
+    tables[level][lamp] = tableOf(kept.map(([x, y]) => [x, y]));
+  }
+  return { tables, bins };
 }
