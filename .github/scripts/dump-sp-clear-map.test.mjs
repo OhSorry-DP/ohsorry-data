@@ -72,12 +72,19 @@ test('AC와 INF 식별을 분리하고 DBR을 제외하며 미지 song_id는 unr
   assert.deepEqual(result.plays.get('A|ANOTHER'), [['U1', 3, 5]]);
   assert.equal(result.counts.unresolved, 1);
   assert.equal(result.counts.outOfScope, 2);
+  const dbrOnly = collectObservations({ dumps: [dump('DBR', 3, 5, [{ song_id: 1, diff: 3, lamp: 5, played_version: -10 }])], songs, cpiRows: [], starRows, norm, variants });
+  assert.equal(dbrOnly.plays.has('A|ANOTHER'), false);
+  assert.equal(dbrOnly.counts.unresolved, 0);
+  const normal = collectObservations({ dumps: [dump('SP', 3, 5, [{ song_id: 1, diff: 3, lamp: 5 }])], songs, cpiRows: [], starRows, norm, variants });
+  assert.deepEqual(normal.plays.get('A|ANOTHER'), [['SP', 3, 5]]);
 });
 
 test('유저와 채보마다 최고 램프 하나만 관측하고 잘못된 램프는 장애', () => {
   const result = collectObservations({ dumps: [dump('A1', 3, 5, [{ song_id: 1, diff: 3, lamp: 1 }, { song_id: 1, diff: 3, lamp: 5 }]),
     dump('B2', 4, 0), dump('C3', 5, null), dump('D4', 6, 5, [{ song_id: 1, diff: 3, lamp: undefined }])], songs, cpiRows: [], starRows, norm, variants });
   assert.deepEqual(result.plays.get('A|ANOTHER'), [['A1', 3, 5]]);
+  const reversed = collectObservations({ dumps: [dump('A1', 3, 5, [{ song_id: 1, diff: 3, lamp: 5 }, { song_id: 1, diff: 3, lamp: 1 }])], songs, cpiRows: [], starRows, norm, variants });
+  assert.deepEqual(reversed.plays.get('A|ANOTHER'), [['A1', 3, 5]]);
   for (const lamp of ['5', NaN, 1.5, -1, 8]) assert.throws(() => collectObservations({ dumps: [dump('E5', 7, lamp)], songs, cpiRows: [], starRows, norm, variants }), /lamp 값 오류/);
   for (let lamp = 1; lamp <= 7; lamp++) assert.doesNotThrow(() => collectObservations({ dumps: [dump('E5', 7, lamp)], songs, cpiRows: [], starRows, norm, variants }));
 });
@@ -121,6 +128,20 @@ test('확정 산식과 보정표 및 필수 표 계약을 검증한다', () => {
   assert.deepEqual(kept.tables['11'].ec, [[2.5, 2]]);
   const fourHard = buildTables({ stars: sixStars, plays: sixPlays, measure: (plays) => ({ c: 2, st: Number(plays[0][0].slice(1)) < 4 ? 'hard' : 'ok' }) });
   assert.deepEqual(fourHard.tables['11'].ec, []);
+});
+
+test('램프 임계와 표 경계', () => {
+  const p = (lamp) => [1.01,1.01,1.01,1.01,1.29,1.29,1.29,1.29].map((s, i) => ['u' + i, s, i < 4 ? 1 : lamp]);
+  assert.equal(balanceLine(p(3), 'ec').st, 'ok');
+  assert.equal(balanceLine(p(2), 'ec').st, 'hard');
+  assert.equal(balanceLine(p(5), 'hc').st, 'ok');
+  assert.equal(balanceLine(p(4), 'hc').st, 'hard');
+  assert.equal(balanceLine(p(6), 'ex').st, 'ok');
+  assert.equal(balanceLine(p(5), 'ex').st, 'hard');
+  assert.equal(balanceLine(p(7), 'fc').st, 'ok');
+  assert.equal(balanceLine(p(6), 'fc').st, 'hard');
+  assert.deepEqual(tableOf([[1,1],[1,2],[1,3],[1,4]]), []);
+  assert.deepEqual(tableOf([[1,1],[1,2],[1,3],[1,4],[1,5]]), [[1.5,3]]);
 });
 
 const guardTables = (y) => ({ '11': { ec: [[0.5, y], [1.5, y + 1]], hc: [[0.5, y], [1.5, y + 1]], ex: [[0.5, y], [1.5, y + 1]], fc: [[0.5, y], [1.5, y + 1]] }, '12': { ec: [[0.5, y], [1.5, y + 1]], ex: [[0.5, y], [1.5, y + 1]], fc: [[0.5, y], [1.5, y + 1]] } });
@@ -222,6 +243,9 @@ test('끊기면 1로 돌아간다', () => {
   const previous = cand(all([[0.5, 1.24], [1.5, 2.24]]));
   const candidate = cand(all([[0.5, 1.28], [1.5, 2.28]]));
   check(candidate, '2026-11-03', { first, last: previous, count: 2, policyVersion: 't', lastRound: '2026-11-02' });
+  const previousOnlyMismatch = cand(all([[0.5, 1.3], [1.5, 2.3]]));
+  const candidateNearFirst = cand(all([[0.5, 1.24], [1.5, 2.24]]));
+  check(candidateNearFirst, '2026-11-03', { first, last: previousOnlyMismatch, count: 2, policyVersion: 't', lastRound: '2026-11-02' });
 });
 
 const workflowInputs = () => {
@@ -311,7 +335,8 @@ test('가드는 보류 때 표·시각을 보존하고 게시 때 이전 세대�
   const oldTables = workflowBaseTables();
   for (const lamps of Object.values(oldTables)) for (const key of Object.keys(lamps)) lamps[key] = [[2.5, 0]];
   const old = storedGeneration(oldTables);
-  const asset = JSON.stringify({ version: 1, current: old, previous: null, pending: null });
+  const previous = storedGeneration(workflowBaseTables());
+  const asset = JSON.stringify({ version: 1, current: old, previous, pending: null });
   const policy = { version: 'test', maxChange: 0, similarityDistance: 0.05, directionTolerance: 0.01, consecutiveRounds: 3 };
   const holdStore = fakeStore(asset);
   const holdLogs = logger();
@@ -320,7 +345,7 @@ test('가드는 보류 때 표·시각을 보존하고 게시 때 이전 세대�
   assert.equal(held.action, 'hold');
   assertCandidateLine(holdLogs, held.candidate);
   const heldAsset = JSON.parse((await holdStore.read('')).body);
-  assert.deepEqual(heldAsset.current, old); assert.equal(heldAsset.previous, null); assert.equal(heldAsset.pending.count, 1);
+  assert.deepEqual(heldAsset.current, old); assert.deepEqual(heldAsset.previous, previous); assert.equal(heldAsset.pending.count, 1);
   const publishStore = fakeStore(asset);
   const publishLogs = logger();
   const published = await run({ mode: 'auto', env: { SP_CLEAR_MAP_AUTO_PUBLISH: 'true' }, client: publishStore,
