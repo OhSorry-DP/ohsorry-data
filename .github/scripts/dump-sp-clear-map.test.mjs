@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyTable, balanceLine, buildTables, collectObservations, loadInputs, loadNorm, loadVariants, tableOf, validateTables, compareTables, decideGuard } from './dump-sp-clear-map.mjs';
+import { createHash } from 'node:crypto';
+import { applyTable, balanceLine, buildTables, collectObservations, loadInputs, loadNorm, loadVariants, tableOf, validateTables, compareTables, decideGuard, run, recover } from './dump-sp-clear-map.mjs';
 
 const norm = (value) => value;
 const variants = {
@@ -221,4 +222,125 @@ test('끊기면 1로 돌아간다', () => {
   const previous = cand(all([[0.5, 1.24], [1.5, 2.24]]));
   const candidate = cand(all([[0.5, 1.28], [1.5, 2.28]]));
   check(candidate, '2026-11-03', { first, last: previous, count: 2, policyVersion: 't', lastRound: '2026-11-02' });
+});
+
+const workflowInputs = () => {
+  const songs = [], starRows = [], dumps = [];
+  for (const [level, baseId] of [[11, 1], [12, 101]]) for (let i = 0; i < 5; i++) {
+    const song_id = baseId + i, title = `W${level}-${i}`;
+    songs.push({ song_id, title, textage_song_id: 'ac' });
+    starRows.push({ title, diff: 'ANOTHER', gameLevel: level, estEc: 2.1, estHc: 2.1, estExh: 2.1, estFc: 2.1 });
+  }
+  for (let user = 0; user < 8; user++) dumps.push({ user: { iidx_id: `U${user}`, sp_star: user + 1 },
+    sp: songs.map((song) => ({ song_id: song.song_id, diff: 3, lamp: user < 4 ? 7 : 1 })) });
+  return { dumps, songs, textage: { songs: {} }, cpiRows: [], starRows, norm, variants, hashes: { songs: 'hash' } };
+};
+const workflowBaseTables = () => ({ '11': { ec: [[2.5, 1]], hc: [[2.5, 1]], ex: [[2.5, 1]], fc: [[2.5, 1]] }, '12': { ec: [[2.5, 1]], ex: [[2.5, 1]], fc: [[2.5, 1]] } });
+const storedGeneration = (tables = workflowBaseTables()) => ({ generation: createHash('sha256').update(JSON.stringify(tables)).digest('hex'),
+  generatedAt: '2026-11-01T00:00:00.000Z', tables,
+  meta: { formulaVersion: 'sp-clear-map-v1', inputHashes: {}, counts: {}, bins: {}, guard: null } });
+function fakeStore(initial = null, options = {}) {
+  let value = initial, etag = '"one"'; const writes = [];
+  return { writes, async read() { return value === null ? null : { body: value, etag }; }, async put(_key, body, condition) {
+    writes.push({ body, condition });
+    if (options.failPut) throw new Error('PUT failed');
+    if (options.conflict) throw new Error('R2 PUT HTTP 412');
+    value = options.mismatch ? '{}' : body; etag = '"two"';
+    if (options.afterPut) throw new Error('network response lost');
+  } };
+}
+const logger = () => { const lines = []; return { lines, log(line) { lines.push(line); }, error() {} }; };
+const assertCandidateLine = (logs, candidate) => {
+  const lines = logs.lines.filter((line) => line.startsWith('SP_CLEAR_MAP_CANDIDATE_JSON '));
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0].slice('SP_CLEAR_MAP_CANDIDATE_JSON '.length)), candidate);
+};
+
+test('최초 게시 404 조건부 생성과 기존 정본 거부', async () => {
+  const store = fakeStore();
+  const inputs = workflowInputs();
+  const first = await run({ mode: 'initial', env: {}, client: store, loadInputsImpl: async () => inputs,
+    log: logger(), now: () => new Date('2026-11-07T12:00:00Z'), policy: null });
+  assert.equal(first.action, 'publish'); assert.equal(store.writes.length, 1);
+  const existing = fakeStore(JSON.stringify({ version: 1, current: storedGeneration(), previous: null, pending: null }));
+  await assert.rejects(run({ mode: 'initial', env: {}, client: existing, loadInputsImpl: async () => { throw new Error('should not load'); }, log: logger() }), /이미 존재함/);
+  assert.equal(existing.writes.length, 0);
+});
+
+test('관찰 404와 dry-run은 무쓰기이며 자동 404는 실패', async () => {
+  const store = fakeStore();
+  const observeLogs = logger();
+  const observe = await run({ mode: 'auto', env: {}, client: store, loadInputsImpl: async () => workflowInputs(), log: observeLogs, now: () => new Date('2026-11-07T12:00:00Z') });
+  assert.equal(observe.action, 'observe');
+  assertCandidateLine(observeLogs, observe.candidate);
+  assert.equal(store.writes.length, 0);
+  const dryStore = fakeStore();
+  const dry = await run({ mode: 'dry-run', env: { SP_CLEAR_MAP_AUTO_PUBLISH: 'true' }, client: dryStore, loadInputsImpl: async () => workflowInputs(), log: logger(), now: () => new Date('2026-11-07T12:00:00Z'), policy: null });
+  assert.equal(dry.action, 'dry-run'); assert.equal(dryStore.writes.length, 0);
+  await assert.rejects(run({ mode: 'auto', env: { SP_CLEAR_MAP_AUTO_PUBLISH: 'true' }, client: fakeStore(), loadInputsImpl: async () => { throw new Error('must not load'); }, log: logger() }), /정본 자산 404/);
+  const old = storedGeneration();
+  await assert.rejects(run({ mode: 'auto', env: { SP_CLEAR_MAP_AUTO_PUBLISH: 'true' },
+    client: fakeStore(JSON.stringify({ version: 1, current: old, previous: null, pending: null })),
+    loadInputsImpl: async () => workflowInputs(), log: logger(), now: () => new Date('2026-11-07T12:00:00Z'), policy: null }), /GUARD_POLICY/);
+});
+
+test('후보 로그는 접두 한 줄이며 전체 세대 JSON이다', async () => {
+  const logs = logger();
+  const result = await run({ mode: 'dry-run', env: {}, client: fakeStore(), loadInputsImpl: async () => workflowInputs(), log: logs, now: () => new Date('2026-11-07T12:00:00Z') });
+  const candidates = logs.lines.filter((line) => line.startsWith('SP_CLEAR_MAP_CANDIDATE_JSON '));
+  assert.equal(candidates.length, 1);
+  const parsed = JSON.parse(candidates[0].slice('SP_CLEAR_MAP_CANDIDATE_JSON '.length));
+  assert.deepEqual(parsed, result.candidate); assert.equal(Object.keys(parsed.tables['11']).length + Object.keys(parsed.tables['12']).length, 7);
+  assert.equal(Object.hasOwn(parsed.tables['12'], 'hc'), false);
+  assert.ok(parsed.generation && parsed.meta.inputHashes && parsed.meta.counts && parsed.meta.bins);
+});
+
+test('조건부 저장 실패와 사후 본문 불일치는 추가 쓰기 없이 실패', async () => {
+  const input = workflowInputs();
+  for (const options of [{ failPut: true }, { mismatch: true }, { conflict: true }]) {
+    const store = fakeStore(null, options);
+    await assert.rejects(run({ mode: 'initial', env: {}, client: store, loadInputsImpl: async () => input, log: logger(), now: () => new Date('2026-11-07T12:00:00Z') }));
+    assert.equal(store.writes.length, 1);
+  }
+  const lost = fakeStore(null, { afterPut: true });
+  const result = await run({ mode: 'initial', env: {}, client: lost, loadInputsImpl: async () => input, log: logger(), now: () => new Date('2026-11-07T12:00:00Z') });
+  assert.equal(result.action, 'publish'); assert.equal(lost.writes.length, 1);
+});
+
+test('가드는 보류 때 표·시각을 보존하고 게시 때 이전 세대를 한 개 보관한다', async () => {
+  const oldTables = workflowBaseTables();
+  for (const lamps of Object.values(oldTables)) for (const key of Object.keys(lamps)) lamps[key] = [[2.5, 0]];
+  const old = storedGeneration(oldTables);
+  const asset = JSON.stringify({ version: 1, current: old, previous: null, pending: null });
+  const policy = { version: 'test', maxChange: 0, similarityDistance: 0.05, directionTolerance: 0.01, consecutiveRounds: 3 };
+  const holdStore = fakeStore(asset);
+  const holdLogs = logger();
+  const held = await run({ mode: 'auto', env: { SP_CLEAR_MAP_AUTO_PUBLISH: 'true' }, client: holdStore,
+    loadInputsImpl: async () => workflowInputs(), log: holdLogs, now: () => new Date('2026-11-07T12:00:00Z'), policy });
+  assert.equal(held.action, 'hold');
+  assertCandidateLine(holdLogs, held.candidate);
+  const heldAsset = JSON.parse((await holdStore.read('')).body);
+  assert.deepEqual(heldAsset.current, old); assert.equal(heldAsset.previous, null); assert.equal(heldAsset.pending.count, 1);
+  const publishStore = fakeStore(asset);
+  const publishLogs = logger();
+  const published = await run({ mode: 'auto', env: { SP_CLEAR_MAP_AUTO_PUBLISH: 'true' }, client: publishStore,
+    loadInputsImpl: async () => workflowInputs(), log: publishLogs, now: () => new Date('2026-11-07T12:00:00Z'),
+    policy: { ...policy, maxChange: 10 } });
+  assert.equal(published.action, 'publish');
+  assertCandidateLine(publishLogs, published.candidate);
+  const finalAsset = JSON.parse((await publishStore.read('')).body);
+  assert.equal(finalAsset.previous.generation, old.generation); assert.equal(finalAsset.pending, null);
+});
+
+test('복구는 조건부 승격하며 충돌 시 실패한다', async () => {
+  const current = storedGeneration();
+  const previousTables = workflowBaseTables();
+  for (const lamps of Object.values(previousTables)) for (const key of Object.keys(lamps)) lamps[key] = [[2.5, 0]];
+  const previous = storedGeneration(previousTables);
+  const asset = JSON.stringify({ version: 1, current, previous, pending: { first: current, last: current, count: 1, policyVersion: 'p', lastRound: '2026-11-07' } });
+  const store = fakeStore(asset);
+  const result = await recover({ client: store, generation: 'previous', log: logger() });
+  assert.equal(result.current.generation, previous.generation); assert.equal(result.previous.generation, current.generation); assert.equal(result.pending, null);
+  const conflict = fakeStore(asset, { conflict: true });
+  await assert.rejects(recover({ client: conflict, generation: 'current', log: logger() }), /412/);
 });

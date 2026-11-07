@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { list, getText, pool } from './r2-client.mjs';
+import { pathToFileURL } from 'node:url';
+import { list, getText, pool, conditionalR2Client } from './r2-client.mjs';
 
 const VARIANTS_URL = 'https://iidx.in/legacy/shared/variants.js';
 const NORM_TITLE_URL = 'https://data.iidx.in/lib/normTitle.js';
@@ -12,6 +13,8 @@ const SOURCES = {
 const USER_KEY_RE = /^user\/([A-Za-z0-9]+)\.json$/;
 const DIFFS = ['BEGINNER', 'NORMAL', 'HYPER', 'ANOTHER', 'LEGGENDARIA'];
 const STAR_FIELDS = ['estEc', 'estHc', 'estExh', 'estFc'];
+const GUARD_POLICY = null;
+const ASSET_KEY = 'data/sp-clear-map.json';
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
 function assertObject(value, label) {
@@ -367,4 +370,153 @@ export function buildTables({ stars, plays, measure = balanceLine }) {
     tables[level][lamp] = tableOf(kept.map(([x, y]) => [x, y]));
   }
   return { tables, bins };
+}
+
+function positionsOf(stars) {
+  const positions = { '11': { ec: [], hc: [], ex: [], fc: [] }, '12': { ec: [], ex: [], fc: [] } };
+  const fields = { ec: 'estEc', hc: 'estHc', ex: 'estExh', fc: 'estFc' };
+  for (const star of stars.values()) for (const [lamp, field] of Object.entries(fields)) {
+    if (positions[star.gameLevel]?.[lamp] && Number.isFinite(star[field])) positions[star.gameLevel][lamp].push(star[field]);
+  }
+  for (const lamps of Object.values(positions)) for (const values of Object.values(lamps)) values.sort((a, b) => a - b);
+  return positions;
+}
+
+function candidateOf(tables, hashes, counts, bins, guard, now) {
+  const generatedAt = now().toISOString();
+  const meta = { formulaVersion: 'sp-clear-map-v1', inputHashes: hashes, counts, bins, guard };
+  return { generation: sha256(JSON.stringify(tables)), generatedAt, tables, meta };
+}
+
+function validateGeneration(value, label) {
+  assertObject(value, label);
+  if (Object.keys(value).sort().join(',') !== 'generatedAt,generation,meta,tables') throw new Error(`${label}: 세대 필드 구조 오류`);
+  if (typeof value.generation !== 'string' || !/^[a-f0-9]{64}$/.test(value.generation) ||
+      typeof value.generatedAt !== 'string' || !Number.isFinite(Date.parse(value.generatedAt))) throw new Error(`${label}: 세대 식별 정보 오류`);
+  if (Object.keys(value.tables ?? {}).sort().join(',') !== '11,12' ||
+      Object.keys(value.tables['11'] ?? {}).sort().join(',') !== 'ec,ex,fc,hc' ||
+      Object.keys(value.tables['12'] ?? {}).sort().join(',') !== 'ec,ex,fc') throw new Error(`${label}: 표 필드 구조 오류`);
+  validateTables(value.tables);
+  if (sha256(JSON.stringify(value.tables)) !== value.generation) throw new Error(`${label}: generation 해시 불일치`);
+  assertObject(value.meta, `${label}.meta`);
+  if (Object.keys(value.meta).sort().join(',') !== 'bins,counts,formulaVersion,guard,inputHashes') throw new Error(`${label}: meta 필드 구조 오류`);
+  if (value.meta.formulaVersion !== 'sp-clear-map-v1' || !value.meta.inputHashes || typeof value.meta.inputHashes !== 'object' ||
+      !value.meta.counts || typeof value.meta.counts !== 'object' || !value.meta.bins || typeof value.meta.bins !== 'object' ||
+      !Object.hasOwn(value.meta, 'guard')) throw new Error(`${label}: meta 구조 오류`);
+  return value;
+}
+
+function assertAsset(value) {
+  assertObject(value, 'asset');
+  if (Object.keys(value).sort().join(',') !== 'current,pending,previous,version') throw new Error('정본 필드 구조 오류');
+  if (value.version !== 1 || !Object.hasOwn(value, 'previous') || !Object.hasOwn(value, 'pending')) throw new Error('정본 자산 구조 오류');
+  validateGeneration(value.current, 'current');
+  if (value.previous !== null) {
+    validateGeneration(value.previous, 'previous');
+    if (Object.hasOwn(value.previous, 'previous')) throw new Error('previous 중첩 오류');
+  }
+  if (value.pending !== null) {
+    const pending = assertObject(value.pending, 'pending');
+    if (Object.keys(pending).sort().join(',') !== 'count,first,last,lastRound,policyVersion') throw new Error('pending 필드 구조 오류');
+    validateGeneration(pending.first, 'pending.first'); validateGeneration(pending.last, 'pending.last');
+    if (!Number.isInteger(pending.count) || pending.count < 1 || typeof pending.policyVersion !== 'string' ||
+        typeof pending.lastRound !== 'string') throw new Error('pending 구조 오류');
+  }
+  return value;
+}
+
+function summaryLine(value) {
+  const text = JSON.stringify(value);
+  return `SP_CLEAR_MAP_CANDIDATE_JSON ${text}`;
+}
+
+async function conditionalWriteAndVerify(client, body, etag) {
+  let putError;
+  try { await client.put(ASSET_KEY, body, etag); }
+  catch (error) {
+    putError = error;
+    if (/\b412\b/.test(String(error?.message || error))) throw error;
+  }
+  const verified = await client.read(ASSET_KEY);
+  if (verified?.body === body) return;
+  if (putError) throw new Error(`조건부 PUT 응답 유실 후 정본 불일치: ${putError.message}`);
+  throw new Error('저장 사후 본문 확인 불일치');
+}
+
+export async function recover({ client, generation = 'current', log = console } = {}) {
+  if (!client || !['current', 'previous'].includes(generation)) throw new Error('복구 입력 오류');
+  const stored = await client.read(ASSET_KEY);
+  if (!stored) throw new Error('정본 자산 없음');
+  const asset = assertAsset(parseJson(stored.body, ASSET_KEY));
+  const promoted = generation === 'current' ? asset.current : asset.previous;
+  if (!promoted) throw new Error('승격할 previous 세대 없음');
+  const next = { version: 1, current: promoted, previous: generation === 'previous' ? asset.current : asset.previous, pending: null };
+  await conditionalWriteAndVerify(client, JSON.stringify(next), stored.etag);
+  log.log(`sp-clear-map 복구 완료: ${generation}`);
+  return next;
+}
+
+export async function run({ mode = 'auto', env = process.env, client, loadInputsImpl = loadInputs, now = () => new Date(), log = console, policy = GUARD_POLICY } = {}) {
+  if (!['auto', 'dry-run', 'initial'].includes(mode)) throw new Error(`실행 mode 오류: ${mode}`);
+  const dryRun = mode === 'dry-run';
+  const autoPublish = !dryRun && (mode === 'initial' || env.SP_CLEAR_MAP_AUTO_PUBLISH === 'true');
+  const r2 = client ?? conditionalR2Client({ account: env.CLOUDFLARE_ACCOUNT_ID, token: env.CLOUDFLARE_API_TOKEN, retry: true });
+  const summaryPath = env.GITHUB_STEP_SUMMARY;
+  const addSummary = async (line) => {
+    if (summaryPath) await (await import('node:fs/promises')).appendFile(summaryPath, `${line}\n`, 'utf8');
+  };
+  const stored = await r2.read(ASSET_KEY);
+  if (!stored && !dryRun && autoPublish && mode !== 'initial') throw new Error('자동 게시 중 정본 자산 404');
+  if (!stored && !dryRun && mode === 'initial') {
+    // 최초 생성을 위해 404 상태를 보존하고 If-None-Match 조건으로 게시한다.
+  }
+  if (stored && mode === 'initial' && !dryRun) throw new Error('최초 게시 대상 정본이 이미 존재함');
+  const inputs = await loadInputsImpl();
+  const collected = collectObservations(inputs);
+  const built = buildTables({ stars: collected.stars, plays: collected.plays });
+  validateTables(built.tables);
+  const tables = { '11': { ec: built.tables['11'].ec, hc: built.tables['11'].hc, ex: built.tables['11'].ex, fc: built.tables['11'].fc },
+    '12': { ec: built.tables['12'].ec, ex: built.tables['12'].ex, fc: built.tables['12'].fc } };
+  validateTables(tables);
+  const positions = positionsOf(collected.stars);
+  const round = now().toISOString().slice(0, 10);
+  const current = stored ? assertAsset(parseJson(stored.body, ASSET_KEY)).current : null;
+  const compare = current ? compareTables(current.tables, tables, positions) : null;
+  const guard = { action: current ? 'observe' : 'initial', comparison: compare };
+  const candidate = candidateOf(tables, { ...inputs.hashes, ...collected.hashes }, collected.counts, built.bins, guard, now);
+  const fullCandidate = candidate;
+  let decision = { action: 'observe', pending: stored ? assertAsset(parseJson(stored.body, ASSET_KEY)).pending : null };
+  if (!dryRun && autoPublish && current) {
+    if (!policy) throw new Error('자동 게시에 GUARD_POLICY가 필요함');
+    decision = decideGuard({ current, candidate, pending: assertAsset(parseJson(stored.body, ASSET_KEY)).pending,
+      policy, round, positions });
+    candidate.meta.guard = { ...guard, action: decision.action };
+    candidate.generation = sha256(JSON.stringify(candidate.tables));
+  }
+  log.log(summaryLine(fullCandidate));
+  if (compare) {
+    log.log(`sp-clear-map 변경 요약 ${JSON.stringify(compare)}`);
+    await addSummary(`### SP clear map 변경 (${round})\n\n최대 변동: ${compare.worst}\n\n절점 변화: ${Object.entries(compare.tables).map(([key, item]) => `${key} +${item.addedNodes.length}/-${item.lostNodes.length}`).join(', ')}`);
+  }
+  if (dryRun || !autoPublish || decision.action === 'hold') {
+    if (!dryRun && !autoPublish && !stored) return { action: 'observe', candidate };
+    if (!stored) return { action: dryRun ? 'dry-run' : 'observe', candidate };
+    if (!dryRun && autoPublish && decision.action === 'hold') {
+      const asset = assertAsset(parseJson(stored.body, ASSET_KEY));
+      const next = { version: 1, current: asset.current, previous: asset.previous, pending: decision.pending };
+      await conditionalWriteAndVerify(r2, JSON.stringify(next), stored.etag);
+    }
+    return { action: dryRun ? 'dry-run' : decision.action === 'hold' ? 'hold' : 'observe', candidate };
+  }
+  const asset = current ? assertAsset(parseJson(stored.body, ASSET_KEY)) : null;
+  const next = { version: 1, current: candidate, previous: asset?.current ?? null, pending: null };
+  await conditionalWriteAndVerify(r2, JSON.stringify(next), stored ? stored.etag : null);
+  await addSummary(`SP clear map 게시 완료: ${candidate.generation}`);
+  return { action: 'publish', candidate };
+}
+
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  const mode = process.argv.includes('--dry-run') ? 'dry-run' : process.argv.includes('--initial') ? 'initial' : 'auto';
+  try { await run({ mode }); }
+  catch (error) { console.error(error.message); process.exitCode = 1; }
 }
