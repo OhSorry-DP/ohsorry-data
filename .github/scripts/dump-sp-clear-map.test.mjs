@@ -332,6 +332,32 @@ test('가드는 보류 때 표·시각을 보존하고 게시 때 이전 세대�
   assert.equal(finalAsset.previous.generation, old.generation); assert.equal(finalAsset.pending, null);
 });
 
+test('같은 세대 게시 결정은 previous를 보존하고 pending만 정리한다', async () => {
+  const inputs = workflowInputs();
+  const preview = await run({ mode: 'dry-run', env: {}, client: fakeStore(), loadInputsImpl: async () => inputs,
+    log: logger(), now: () => new Date('2026-11-07T12:00:00Z') });
+  const current = storedGeneration(preview.candidate.tables);
+  const pending = { first: current, last: current, count: 1, policyVersion: 'test', lastRound: '2026-11-06' };
+  const policy = { ...guardPolicy, maxChange: 10 };
+  const emptyStore = fakeStore(JSON.stringify({ version: 1, current, previous: null, pending: null }));
+  const unchanged = await run({ mode: 'auto', env: { SP_CLEAR_MAP_AUTO_PUBLISH: 'true' }, client: emptyStore,
+    loadInputsImpl: async () => inputs, log: logger(), now: () => new Date('2026-11-07T12:00:00Z'), policy });
+  assert.equal(unchanged.action, 'unchanged');
+  assert.equal(emptyStore.writes.length, 0);
+
+  const previous = storedGeneration(workflowBaseTables());
+  const original = { version: 1, current, previous, pending };
+  const pendingStore = fakeStore(JSON.stringify(original));
+  const cleared = await run({ mode: 'auto', env: { SP_CLEAR_MAP_AUTO_PUBLISH: 'true' }, client: pendingStore,
+    loadInputsImpl: async () => inputs, log: logger(), now: () => new Date('2026-11-07T12:00:00Z'), policy });
+  assert.equal(cleared.action, 'unchanged');
+  assert.equal(pendingStore.writes.length, 1);
+  const written = JSON.parse(pendingStore.writes[0].body);
+  assert.deepEqual(written.current, original.current);
+  assert.deepEqual(written.previous, original.previous);
+  assert.equal(written.pending, null);
+});
+
 test('복구는 조건부 승격하며 충돌 시 실패한다', async () => {
   const current = storedGeneration();
   const previousTables = workflowBaseTables();

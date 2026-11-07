@@ -467,9 +467,6 @@ export async function run({ mode = 'auto', env = process.env, client, loadInputs
   };
   const stored = await r2.read(ASSET_KEY);
   if (!stored && !dryRun && autoPublish && mode !== 'initial') throw new Error('자동 게시 중 정본 자산 404');
-  if (!stored && !dryRun && mode === 'initial') {
-    // 최초 생성을 위해 404 상태를 보존하고 If-None-Match 조건으로 게시한다.
-  }
   if (stored && mode === 'initial' && !dryRun) throw new Error('최초 게시 대상 정본이 이미 존재함');
   const inputs = await loadInputsImpl();
   const collected = collectObservations(inputs);
@@ -480,20 +477,19 @@ export async function run({ mode = 'auto', env = process.env, client, loadInputs
   validateTables(tables);
   const positions = positionsOf(collected.stars);
   const round = now().toISOString().slice(0, 10);
-  const current = stored ? assertAsset(parseJson(stored.body, ASSET_KEY)).current : null;
+  const asset = stored ? assertAsset(parseJson(stored.body, ASSET_KEY)) : null;
+  const current = asset?.current ?? null;
   const compare = current ? compareTables(current.tables, tables, positions) : null;
   const guard = { action: current ? 'observe' : 'initial', comparison: compare };
   const candidate = candidateOf(tables, { ...inputs.hashes, ...collected.hashes }, collected.counts, built.bins, guard, now);
-  const fullCandidate = candidate;
-  let decision = { action: 'observe', pending: stored ? assertAsset(parseJson(stored.body, ASSET_KEY)).pending : null };
+  let decision = { action: 'observe', pending: asset?.pending ?? null };
   if (!dryRun && autoPublish && current) {
     if (!policy) throw new Error('자동 게시에 GUARD_POLICY가 필요함');
-    decision = decideGuard({ current, candidate, pending: assertAsset(parseJson(stored.body, ASSET_KEY)).pending,
+    decision = decideGuard({ current, candidate, pending: asset.pending,
       policy, round, positions });
     candidate.meta.guard = { ...guard, action: decision.action };
-    candidate.generation = sha256(JSON.stringify(candidate.tables));
   }
-  log.log(summaryLine(fullCandidate));
+  log.log(summaryLine(candidate));
   if (compare) {
     log.log(`sp-clear-map 변경 요약 ${JSON.stringify(compare)}`);
     await addSummary(`### SP clear map 변경 (${round})\n\n최대 변동: ${compare.worst}\n\n절점 변화: ${Object.entries(compare.tables).map(([key, item]) => `${key} +${item.addedNodes.length}/-${item.lostNodes.length}`).join(', ')}`);
@@ -502,13 +498,18 @@ export async function run({ mode = 'auto', env = process.env, client, loadInputs
     if (!dryRun && !autoPublish && !stored) return { action: 'observe', candidate };
     if (!stored) return { action: dryRun ? 'dry-run' : 'observe', candidate };
     if (!dryRun && autoPublish && decision.action === 'hold') {
-      const asset = assertAsset(parseJson(stored.body, ASSET_KEY));
       const next = { version: 1, current: asset.current, previous: asset.previous, pending: decision.pending };
       await conditionalWriteAndVerify(r2, JSON.stringify(next), stored.etag);
     }
     return { action: dryRun ? 'dry-run' : decision.action === 'hold' ? 'hold' : 'observe', candidate };
   }
-  const asset = current ? assertAsset(parseJson(stored.body, ASSET_KEY)) : null;
+  if (decision.action === 'publish' && candidate.generation === current?.generation) {
+    if (asset.pending !== null) {
+      const next = { version: 1, current: asset.current, previous: asset.previous, pending: null };
+      await conditionalWriteAndVerify(r2, JSON.stringify(next), stored.etag);
+    }
+    return { action: 'unchanged', candidate };
+  }
   const next = { version: 1, current: candidate, previous: asset?.current ?? null, pending: null };
   await conditionalWriteAndVerify(r2, JSON.stringify(next), stored ? stored.etag : null);
   await addSummary(`SP clear map 게시 완료: ${candidate.generation}`);
