@@ -120,6 +120,7 @@ export function collectObservations({ dumps, songs, textage, cpiRows, starRows, 
   const counts = { usersRead: 0, usersWithStar: 0, usersWithoutStar: 0, observations: 0, unresolved: 0, outOfScope: 0 };
   const userStar = [];
   for (const dump of dumps) {
+    if (dump?.user === null) { counts.usersRead++; counts.usersWithoutStar++; continue; } // 유저 행 없는 덤프는 정상 상태다.
     assertObject(dump?.user, 'user dump user');
     const userId = dump.user.iidx_id;
     if (typeof userId !== 'string' || !userId) throw new Error('user.iidx_id 누락');
