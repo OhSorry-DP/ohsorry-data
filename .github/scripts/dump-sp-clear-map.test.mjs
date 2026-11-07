@@ -157,3 +157,68 @@ test('guard는 역방향·유사도 이탈·회차 단절을 초기화하고 재
   assert.equal(decideGuard({ current, candidate: a, pending: first, policy: guardPolicy, round: '2026-11-10' }).pending.count, 1);
   assert.equal(decideGuard({ current, candidate: generation(guardTables(1.05)), pending: null, policy: guardPolicy, round: '2026-11-07' }).action, 'publish');
 });
+
+const A = [[0.5, 1], [1.5, 2]];
+const B = [[0.5, 1.2], [1.5, 2.2]];
+const all = (t) => ({ '11': { ec: t, hc: t, ex: t, fc: t }, '12': { ec: t, ex: t, fc: t } });
+const only = (level, lamp, t) => { const x = all(A); x[level] = { ...x[level], [lamp]: t }; return x; };
+const pos = { '11': { ec: [1], hc: [1], ex: [1], fc: [1] }, '12': { ec: [1], ex: [1], fc: [1] } };
+const policy = { version: 't', maxChange: 0.1, similarityDistance: 0.05, directionTolerance: 0.01, consecutiveRounds: 3 };
+const cand = (t) => ({ tables: t });
+const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-12, `${a} is not close to ${b}`);
+
+test('표 7개를 표마다 비교한다', () => {
+  const comparison = compareTables(all(A), only('12', 'fc', B), pos);
+  near(comparison.worst, 0.2);
+  assert.equal(Object.keys(comparison.tables).length, 7);
+  assert.equal(comparison.tables['12.fc'].actual.direction, 1);
+  near(comparison.tables['12.fc'].actual.maxAbs, 0.2);
+  assert.equal(comparison.tables['11.ec'].actual.maxAbs, 0);
+  near(compareTables(all(A), only('11', 'hc', B), pos).worst, 0.2);
+  const lost = compareTables(all(A), only('12', 'ex', [[0.5, 1]]), pos);
+  assert.deepEqual(lost.tables['12.ex'].lostNodes, [1.5]);
+  assert.deepEqual(lost.tables['11.ec'].lostNodes, []);
+});
+
+test('정책이 없거나 깨지면 던진다', () => {
+  const args = { current: cand(all(A)), candidate: cand(all(B)), pending: null, round: '2026-11-01', positions: pos };
+  assert.throws(() => decideGuard({ ...args, policy: null }));
+  for (const key of ['maxChange', 'similarityDistance', 'directionTolerance']) {
+    const broken = { ...policy }; delete broken[key];
+    assert.throws(() => decideGuard({ ...args, policy: broken }));
+  }
+  assert.throws(() => decideGuard({ ...args, policy: { ...policy, consecutiveRounds: 0 } }));
+  assert.throws(() => decideGuard({ ...args, policy: { ...policy, version: '' } }));
+});
+
+test('연속 N회면 게시', () => {
+  const args = { current: cand(all(A)), candidate: cand(all(B)), policy, positions: pos };
+  const first = decideGuard({ ...args, pending: null, round: '2026-11-01' });
+  assert.equal(first.action, 'hold'); assert.equal(first.pending.count, 1);
+  const second = decideGuard({ ...args, pending: first.pending, round: '2026-11-02' });
+  assert.equal(second.action, 'hold'); assert.equal(second.pending.count, 2);
+  const third = decideGuard({ ...args, pending: second.pending, round: '2026-11-03' });
+  assert.equal(third.action, 'publish'); assert.equal(third.pending, null);
+  const retried = decideGuard({ ...args, pending: first.pending, round: '2026-11-01' });
+  const retryAgain = decideGuard({ ...args, pending: retried.pending, round: '2026-11-01' });
+  assert.equal(retryAgain.action, 'hold'); assert.equal(retryAgain.pending.count, 1);
+  const small = cand(all([[0.5, 1.05], [1.5, 2.05]]));
+  const smallResult = decideGuard({ ...args, candidate: small, pending: null, round: '2026-11-01' });
+  assert.equal(smallResult.action, 'publish'); assert.equal(smallResult.pending, null);
+});
+
+test('끊기면 1로 돌아간다', () => {
+  const current = cand(all(A));
+  const first = cand(all(B));
+  const pending = { first, last: first, count: 2, policyVersion: 't', lastRound: '2026-11-02' };
+  const check = (candidate, round = '2026-11-03', suppliedPending = pending) => {
+    const result = decideGuard({ current, candidate, pending: suppliedPending, policy, round, positions: pos });
+    assert.equal(result.action, 'hold'); assert.equal(result.pending.count, 1);
+  };
+  check(first, '2026-11-04');
+  check(cand(all([[0.5, 0.8], [1.5, 1.8]])));
+  check(cand(all([[0.5, 1.3], [1.5, 2.3]])));
+  const previous = cand(all([[0.5, 1.24], [1.5, 2.24]]));
+  const candidate = cand(all([[0.5, 1.28], [1.5, 2.28]]));
+  check(candidate, '2026-11-03', { first, last: previous, count: 2, policyVersion: 't', lastRound: '2026-11-02' });
+});
