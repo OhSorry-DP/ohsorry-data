@@ -189,11 +189,15 @@ export function filterWebCrawlBestRows(best, incomingRows) {
     || !Array.isArray(best.dp) || !Array.isArray(best.sp) || !best.flags || typeof best.flags !== 'object'
     || Array.isArray(best.flags)) fail('best must contain dp, sp, and flags');
   if (!Array.isArray(incomingRows)) fail('incomingRows must be an array');
+  const requestKeys = new Set();
   const normalized = incomingRows.map((r, i) => {
     if (Array.isArray(r) && r.length >= 5 && r[4] === -10) return { row: r };
-    return normalize(r, 'incoming', i);
+    const item = normalize(r, 'incoming', i);
+    const key = chartKey(item.row);
+    if (requestKeys.has(key)) fail(`duplicate incoming chart key at row ${i}: ${key}`);
+    requestKeys.add(key);
+    return item;
   });
-  mergeScoreHistory([], incomingRows.filter((r) => !(Array.isArray(r) && r.length >= 5 && r[4] === -10)));
   const bestByChart = new Map();
   for (const [style, rows] of [[1, best.dp], [0, best.sp]]) {
     for (const r of rows) {

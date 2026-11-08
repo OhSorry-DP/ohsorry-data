@@ -249,3 +249,26 @@ test('stale zero supplement flags defer metadata until best is refreshed', () =>
   assert.deepEqual(filterWebCrawlBestRows(stale, [candidate]), []);
   assert.deepEqual(filterWebCrawlBestRows(fresh, [candidate]), [candidate]);
 });
+
+test('best filter rejects duplicate incoming chart keys with the canonical message', () => {
+  const duplicate = [row(1), row(1, 3, 6, 2100, 33, date2)];
+  assert.throws(() => filterWebCrawlBestRows({ dp: [], sp: [], flags: {} }, duplicate),
+    { name: 'TypeError', message: 'duplicate incoming chart key at row 1: [1,3,33,1]' });
+});
+
+test('best filter handles 5000 chart best rows and incoming rows within 1500ms', () => {
+  const best = { dp: [], sp: [], flags: {} };
+  const incoming = [];
+  for (let i = 0; i < 5000; i += 1) {
+    const song = i + 1;
+    best.dp.push({ song_id: song, diff: 3, lamp: 5, ex_score: 1000,
+      played_version: 33, date, bp: 10, note_count: 1500 });
+    incoming.push(row(song, 3, 5, 1001, 33, date2));
+  }
+  const started = performance.now();
+  assert.equal(filterWebCrawlBestRows(best, incoming).length, 5000);
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 1500, `expected under 1500ms, got ${elapsed.toFixed(1)}ms`);
+  // Keep the measurement visible in node --test output for review.
+  console.log(`5000-row best filter: ${elapsed.toFixed(1)}ms`);
+});
