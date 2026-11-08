@@ -1,5 +1,5 @@
 import { normalizeAliasInputs } from './song-aliases.mjs';
-import { gridFromHistory, replayScoreBuffer } from './score-history.mjs';
+import { gridFromHistory, gridByVersionFromHistory, replayScoreBuffer } from './score-history.mjs';
 import { buildCandidate, sha256Hex } from './score-buffer.mjs';
 
 // Pure helpers shared by the local dumper and the fast dump path.
@@ -11,6 +11,14 @@ export const slimRow = (row) => {
   for (const key of SCORE_KEEP) if (row[key] !== undefined) out[key] = row[key];
   return out;
 };
+
+/** Build the independent best document from a verified history snapshot. */
+export function buildBestDocument({ id, histRows, songs, histRevision }) {
+  const grid = gridByVersionFromHistory(id, histRows, songs);
+  return { document: { v: 1, id, histRevision: histRevision ?? null,
+    dp: grid.dp.map(slimRow), sp: grid.sp.map(slimRow), flags: grid.flags },
+  missingSongCount: grid.missingSongCount };
+}
 
 export function recentHistoryFromRows(rows, playStyle, nowMs = Date.now()) {
   const todayKst = new Date(nowMs + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);

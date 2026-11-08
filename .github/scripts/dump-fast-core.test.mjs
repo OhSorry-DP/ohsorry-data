@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assembleUserDump, HIST_COLS, prepareFastDump, recentHistoryFromRows, slimRow } from './dump-fast-core.mjs';
+import { assembleUserDump, buildBestDocument, HIST_COLS, prepareFastDump, recentHistoryFromRows, slimRow } from './dump-fast-core.mjs';
 import { normalizeAliasInputs } from './song-aliases.mjs';
 import { replayScoreBuffer } from './score-history.mjs';
 import { buildCandidate, sha256Hex } from './score-buffer.mjs';
@@ -15,6 +15,24 @@ test('slimRow preserves DP/SP field order and null while omitting missing fields
   assert.deepEqual(slimRow(row), { song_id: 42, diff: 3, lamp: null, ex_score: 12, date: null, bp: 0, note_count: null });
   assert.deepEqual(Object.keys(slimRow(row)), ['song_id', 'diff', 'lamp', 'ex_score', 'date', 'bp', 'note_count']);
   assert.equal(legacyHistCols, HIST_COLS);
+});
+
+test('buildBestDocument emits eight fields per version, null flags, and missing song count', () => {
+  const songs = [{ song_id: 1 }];
+  const row = (song, version, style, score, bp, notes) => [song, 2, 4, score, version,
+    '2026-10-29T00:00:00.000Z', '2026-10-29', style, bp, notes];
+  const built = buildBestDocument({ id: 'u1', histRevision: 'rev', songs, histRows: [
+    row(1, 30, 1, 500, null, 100), row(1, 30, 1, 500, 2, null),
+    row(1, 31, 1, 600, 0, 100), row(1, 30, 0, 400, 1, 90),
+    row(9, 30, 1, 700, null, null), row(1, -10, 1, 900, null, null),
+  ] });
+  assert.equal(built.missingSongCount, 1);
+  assert.deepEqual(Object.keys(built.document), ['v', 'id', 'histRevision', 'dp', 'sp', 'flags']);
+  assert.deepEqual(built.document.dp.map((r) => r.played_version), [30, 31]);
+  assert.deepEqual(built.document.sp.map((r) => r.played_version), [30]);
+  assert.deepEqual(Object.keys(built.document.dp[0]), ['song_id', 'diff', 'lamp', 'ex_score', 'played_version', 'date', 'bp', 'note_count']);
+  assert.deepEqual(built.document.flags, { '1:2:30:1': [1, 1] });
+  assert.equal(built.document.dp.some((r) => r.ex_score === 900), false);
 });
 
 test('recent history has fixed KST boundary, sort, dedupe, DBR and play style behavior', () => {

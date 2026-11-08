@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { buildBestDocument } from './dump-fast-core.mjs';
 const FAST_FIELDS = ['dp', 'sp', 'dpRecent', 'spRecent'];
 const FAST_KEYS = [...FAST_FIELDS, 'fastGeneration'];
 const SLOW_FIELDS = ['_v', 'user', 'radars', 'osPattern', 'persona', 'spPersona', 'reachNps'];
@@ -82,6 +83,54 @@ const validEtag = (value) => typeof value === 'string' && /^"[\x21\x23-\x7e\x80-
 export const HIST_LEASE_MS = 15000;
 const validRevision = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const revisionOf = (body) => createHash('sha256').update(body, 'utf8').digest('hex');
+
+/** Publish best independently; its failures never affect the verified hist result. */
+export async function publishBest({ r2, id, histRows, songs, histRevision }) {
+  const warning = (reason, missingSongCount = 0) => ({ ok: false, warning: true, reason, missingSongCount });
+  if (!r2 || typeof r2.read !== 'function' || typeof r2.put !== 'function') return warning('best-r2-invalid');
+  const histKey = `hist/${id}.json`, bestKey = `best/${id}.json`;
+  let rows = histRows;
+  let revision = histRevision ?? null;
+  let missingSongCount = 0;
+  try {
+    // Only proceed from a body that was successfully read back from hist storage.
+    let verified = await r2.read(histKey);
+    if (!verified || typeof verified.body !== 'string' || !validEtag(verified.etag)
+      || verified.body !== JSON.stringify(histRows)) return warning('best-hist-readback-mismatch');
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const built = buildBestDocument({ id, histRows: rows, songs, histRevision: revision });
+      missingSongCount = built.missingSongCount;
+      const body = JSON.stringify(built.document);
+      let current;
+      try { current = await r2.read(bestKey); }
+      catch { return warning('best-read-failed', missingSongCount); }
+      if (current !== null && (!current || typeof current.body !== 'string' || !validEtag(current.etag)))
+        return warning('best-invalid-origin', missingSongCount);
+      try { await r2.put(bestKey, body, current === null ? null : current.etag); }
+      catch (error) {
+        if (!isConflict(error)) return warning('best-put-failed', missingSongCount);
+        if (attempt === 2) return warning('best-conflict-exhausted', missingSongCount);
+        try {
+          verified = await r2.read(histKey);
+          if (!verified || typeof verified.body !== 'string' || !validEtag(verified.etag))
+            return warning('best-hist-reread-failed', missingSongCount);
+          rows = JSON.parse(verified.body);
+          if (!Array.isArray(rows)) return warning('best-hist-invalid', missingSongCount);
+          revision = revisionOf(verified.body);
+        } catch { return warning('best-hist-reread-failed', missingSongCount); }
+        continue;
+      }
+      let readback;
+      try { readback = await r2.read(bestKey); }
+      catch { return warning('best-readback-failed', missingSongCount); }
+      if (!readback || !validEtag(readback.etag) || readback.body !== body)
+        return warning('best-readback-mismatch', missingSongCount);
+      return { ok: true, warning: missingSongCount > 0, reason: missingSongCount > 0 ? 'missing-songs' : null,
+        missingSongCount, changed: true, document: built.document };
+    }
+  } catch { return warning('best-build-failed', missingSongCount); }
+  return warning('best-conflict-exhausted', missingSongCount);
+}
 const leaseKey = (id) => {
   if (typeof id !== 'string' || !/^[A-Za-z0-9]+$/.test(id)) throw new TypeError('invalid hist ID');
   return `meta/fast-hist-lease-${id}.json`;

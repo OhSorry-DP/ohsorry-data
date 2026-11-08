@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
-import { mergeActionsUser, mergeEdgeUser, mergeSlowUser, publishUserPatch, runCli } from './dump-fast-publish.mjs';
+import { mergeActionsUser, mergeEdgeUser, mergeSlowUser, publishBest, publishUserPatch, runCli } from './dump-fast-publish.mjs';
 import { HIST_LEASE_MS, histGuardEnabled, acquireHistLease, assertHistLease, releaseHistLease,
   publishHistWithLease, mergeHistUser, mergeHistPending } from './dump-fast-publish.mjs';
 import { replayScoreBuffer } from './score-history.mjs';
@@ -35,6 +35,67 @@ const prepareHist = ({ previousHistRows, restRows }) => {
   const histRows = replayScoreBuffer(previousHistRows, restRows);
   return { histRows, histBytes: new TextEncoder().encode(JSON.stringify(histRows)) };
 };
+const bestSongs = [{ song_id: 1 }, { song_id: 2 }];
+const bestRows = [1, 2].map((song) => [song, 3, 4, 100 * song, 34,
+  '2026-10-29T00:00:00.000Z', '2026-10-29', 1, 1, 100]);
+const bestArgs = (r2, extra = {}) => ({ r2, id: 'u1', histRows: bestRows, songs: bestSongs,
+  histRevision: 'diagnostic', ...extra });
+
+test('best publishes with conditional create/update and verifies exact readback', async () => {
+  for (const existing of [null, { body: '{}', etag: '"prior"' }]) {
+    const r2 = histStore({ 'hist/u1.json': { body: JSON.stringify(bestRows), etag: '"hist"' },
+      ...(existing ? { 'best/u1.json': existing } : {}) });
+    const result = await publishBest(bestArgs(r2));
+    assert.equal(result.ok, true);
+    const put = r2.calls.find(([op, key]) => op === 'put' && key === 'best/u1.json');
+    assert.equal(put[3], existing ? '"prior"' : null);
+    assert.deepEqual(JSON.parse(put[2]), result.document);
+    assert.deepEqual(r2.calls.filter(([op, key]) => op === 'read' && key === 'best/u1.json').length, 2);
+  }
+});
+
+test('best PUT and readback failures are warnings and do not change the hist success result', async () => {
+  const base = () => histStore({ 'hist/u1.json': { body: JSON.stringify(bestRows), etag: '"hist"' } });
+  const failedPut = base();
+  failedPut.put = async (key, body, etag) => { if (key.startsWith('best/')) throw new Error('offline'); return histStore.prototype?.put?.(key, body, etag); };
+  const putResult = await publishBest(bestArgs(failedPut));
+  assert.equal(putResult.ok, false); assert.equal(putResult.warning, true); assert.equal(putResult.reason, 'best-put-failed');
+  const mismatch = base(), put = mismatch.put.bind(mismatch);
+  mismatch.put = async (key, body, etag) => { await put(key, body, etag); if (key.startsWith('best/')) mismatch.objects.set(key, { body: '{}', etag: '"wrong"' }); };
+  const readResult = await publishBest(bestArgs(mismatch));
+  assert.equal(readResult.ok, false); assert.equal(readResult.warning, true); assert.equal(readResult.reason, 'best-readback-mismatch');
+});
+
+test('best 412 rereads and recomputes from current hist, and unchanged hist can publish best', async () => {
+  const r2 = histStore({ 'hist/u1.json': { body: JSON.stringify(bestRows), etag: '"hist"' } });
+  const put = r2.put.bind(r2); let raced = false, attempts = 0;
+  r2.put = async (key, body, etag) => {
+    if (key === 'best/u1.json') attempts++;
+    if (key === 'best/u1.json' && !raced) {
+      raced = true;
+      const changedRows = [...bestRows, [2, 3, 4, 500, 35, '2026-10-30T00:00:00.000Z', '2026-10-30', 0, 0, 100]];
+      r2.objects.set('hist/u1.json', { body: JSON.stringify(changedRows), etag: '"hist2"' });
+      r2.objects.set(key, { body: '{}', etag: '"race"' });
+      throw Object.assign(new Error('HTTP 412'), { status: 412 });
+    }
+    return put(key, body, etag);
+  };
+  const result = await publishBest(bestArgs(r2));
+  assert.equal(result.ok, true);
+  assert.ok(result.document.sp.some((row) => row.played_version === 35));
+  assert.equal(attempts, 2);
+  const unchanged = histStore({ 'hist/u1.json': { body: JSON.stringify(bestRows), etag: '"hist"' } });
+  const same = await publishBest(bestArgs(unchanged));
+  assert.equal(same.ok, true);
+});
+
+test('best missing songs warn by count and still publish', async () => {
+  const r2 = histStore({ 'hist/u1.json': { body: JSON.stringify(bestRows), etag: '"hist"' } });
+  const result = await publishBest(bestArgs(r2, { songs: [{ song_id: 1 }] }));
+  assert.equal(result.ok, true); assert.equal(result.warning, true);
+  assert.equal(result.reason, 'missing-songs'); assert.equal(result.missingSongCount, 1);
+  assert.equal(r2.objects.has('best/u1.json'), true);
+});
 const histArgs = (r2, extra = {}) => ({ r2, id: 'u1', restRows: [historyRow(1, 100)],
   prepare: prepareHist, enabled: true, now: () => Date.parse('2026-10-29T00:00:00.000Z'), token: 'writer-a', ...extra });
 
