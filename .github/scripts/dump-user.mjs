@@ -543,8 +543,8 @@ export async function updateHistFile(id, file) {
   let probe = null;
   try { probe = await histProbe(id); } catch (e) { console.error('hist 프로브 실패(' + id + '):', e.message); }
   if (histUnchanged(prev, probe)) {
-    const r2 = historyClient();
     try {
+      const r2 = historyClient(); // 자격 누락도 best 경고로만 끝나야 한다 — hist 무변경 반환을 막지 않는다
       const hist = await r2.read(`hist/${id}.json`);
       const songs = await r2.read('songs.json');
       if (hist && songs && hist.body === JSON.stringify(prev))
