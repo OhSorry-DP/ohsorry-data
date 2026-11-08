@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { filterScoreHistoryRows, mergeScoreHistory } from '../score-history.mjs';
+import { filterScoreHistoryRows, filterWebCrawlBestRows, filterWebCrawlHistoryRows, gridByVersionFromHistory, mergeScoreHistory } from '../score-history.mjs';
 
 const canonicalPath = new URL('../score-history.mjs', import.meta.url);
 const copies = [
@@ -201,4 +201,51 @@ test('merge conservation, order, reference identity, immutability and missing de
   assert.deepEqual(payload, { song_id: 100, iidx_id: '89388691', diff: 3, lamp: 5, ex_score: 2100,
     played_version: 33, play_style: 1, date: date2, bp: 0, note_count: 1500 });
   assert.throws(() => createRequire(new URL('../../../../INFOhSorry/package.json', import.meta.url))('typescript/missing-score-filter-test'));
+});
+
+test('best filter compares independent maxima, supplements, styles, versions and DBR', () => {
+  const hist = [row(1, 3, 5, 2000, 33, date, '2026-10-22', 1, null, null)];
+  const generated = gridByVersionFromHistory('89388691', hist, [{ song_id: 1 }]);
+  const best = { ...generated, dp: generated.dp, sp: generated.sp };
+  const rows = [row(1, 3, 5, 2001, 33, date2), row(2, 3, 6, 1900, 33, date2),
+    row(3, 3, 5, 2000, 33, date2, '2026-10-22', 1, 0),
+    row(1, 3, 5, 2000, 34, date2), row(1, 3, 5, 2000, 33, date2, '2026-10-22', 0),
+    row(9, 3, 0, null, 33, date2), row(9, 3, 0, null, 33, date2, '2026-10-22', 1, 0, 100),
+    row(9, 3, 0, null, -10, date2)];
+  const selected = filterWebCrawlBestRows(best, rows.slice(0, 6));
+  assert.deepEqual(selected, [rows[0], rows[1], rows[2], rows[3], rows[4], rows[5]]);
+  assert.equal(selected[0], rows[0]);
+  assert.ok(generated.flags['1:3:33:1']);
+  const bpOnly = row(1, 3, 5, 2000, 33, date2, '2026-10-22', 1, 0, 1500);
+  assert.deepEqual(filterWebCrawlBestRows(best, [bpOnly]), [bpOnly]);
+  const notesOnly = row(1, 3, 5, 2000, 33, date2, '2026-10-22', 1, null, 1500);
+  assert.deepEqual(filterWebCrawlBestRows(best, [notesOnly]), [notesOnly]);
+  const nullEx = row(8, 3, 5, null, 33, date2, '2026-10-22', 1, 0, 1500);
+  assert.deepEqual(filterWebCrawlBestRows(best, [nullEx]), [nullEx]);
+  const unregisteredNull = row(10, 3, 0, null, 33, date2);
+  assert.deepEqual(filterWebCrawlBestRows(best, [unregisteredNull]), [unregisteredNull]);
+  const lateBest = { ...best, dp: [{ ...best.dp[0], date: '2026-11-07T20:00:00.000+00:00' }] };
+  assert.doesNotThrow(() => filterWebCrawlBestRows(lateBest, [bpOnly]));
+});
+
+test('same snapshot best filtering never omits a row selected by history comparison', () => {
+  const hist = [row(1, 3, 5, 2000, 33, date, '2026-10-22', 1, null, null),
+    row(2, 4, 3, 900, 33, date, '2026-10-22', 0, null, 800)];
+  const songs = [{ song_id: 1 }, { song_id: 2 }];
+  const grid = gridByVersionFromHistory('89388691', hist, songs);
+  const best = { dp: grid.dp, sp: grid.sp, flags: grid.flags };
+  const incoming = [row(1, 3, 6, 1900, 33, date2, '2026-10-22', 1),
+    row(2, 4, 3, 900, 33, date2, '2026-10-22', 0, 0, 800)];
+  const oldSelected = filterWebCrawlHistoryRows(hist, incoming);
+  const bestSelected = filterWebCrawlBestRows(best, incoming);
+  assert.equal(oldSelected.filter((r) => !bestSelected.includes(r)).length, 0);
+});
+
+test('stale zero supplement flags defer metadata until best is refreshed', () => {
+  const base = row(1, 3, 5, 2000, 33, date, '2026-10-22', 1, 0, 1500);
+  const candidate = row(1, 3, 5, 2000, 33, date2, '2026-10-22', 1, null, 1500);
+  const stale = { ...gridByVersionFromHistory('89388691', [base], [{ song_id: 1 }]), flags: {} };
+  const fresh = gridByVersionFromHistory('89388691', [row(1, 3, 5, 2000, 33, date, '2026-10-22', 1, 0, null)], [{ song_id: 1 }]);
+  assert.deepEqual(filterWebCrawlBestRows(stale, [candidate]), []);
+  assert.deepEqual(filterWebCrawlBestRows(fresh, [candidate]), [candidate]);
 });

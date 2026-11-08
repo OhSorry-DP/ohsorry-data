@@ -183,6 +183,52 @@ export function filterWebCrawlHistoryRows(histRows, incomingRows) {
   return selected;
 }
 
+/** Filter web crawl rows against the published best snapshot, preserving input references. */
+export function filterWebCrawlBestRows(best, incomingRows) {
+  if (best === null || typeof best !== 'object' || Array.isArray(best)
+    || !Array.isArray(best.dp) || !Array.isArray(best.sp) || !best.flags || typeof best.flags !== 'object'
+    || Array.isArray(best.flags)) fail('best must contain dp, sp, and flags');
+  if (!Array.isArray(incomingRows)) fail('incomingRows must be an array');
+  const normalized = incomingRows.map((r, i) => {
+    if (Array.isArray(r) && r.length >= 5 && r[4] === -10) return { row: r };
+    return normalize(r, 'incoming', i);
+  });
+  mergeScoreHistory([], incomingRows.filter((r) => !(Array.isArray(r) && r.length >= 5 && r[4] === -10)));
+  const bestByChart = new Map();
+  for (const [style, rows] of [[1, best.dp], [0, best.sp]]) {
+    for (const r of rows) {
+      if (!r || typeof r !== 'object' || Array.isArray(r)) fail('best row must be an object');
+      for (const [value, label, nullable] of [[r.song_id, 'song_id', false], [r.diff, 'diff', false],
+        [r.played_version, 'played_version', false], [r.ex_score, 'ex_score', true], [r.lamp, 'lamp', true]]) {
+        integer(value, `best ${label}`, nullable);
+      }
+      if (r.played_version === -10) continue;
+      const row = [r.song_id, r.diff, r.lamp, r.ex_score, r.played_version, null, null, style];
+      const key = chartKey(row);
+      const old = bestByChart.get(key) ?? { ex: -1, lamp: 0 };
+      old.ex = Math.max(old.ex, ex(row)); old.lamp = Math.max(old.lamp, lamp(row));
+      bestByChart.set(key, old);
+    }
+  }
+  const selected = [];
+  for (let i = 0; i < normalized.length; i += 1) {
+    const r = normalized[i].row;
+    if (r[4] === -10) continue;
+    const key = chartKey(r), current = bestByChart.get(key);
+    const flagsKey = `${r[0]}:${r[1]}:${r[4]}:${r[7]}`;
+    const flags = best.flags[flagsKey] ?? [0, 0];
+    if (!Array.isArray(flags) || flags.length < 2) fail(`invalid best flags for ${key}`);
+    const accepted = !current || ex(r) > current.ex || lamp(r) > current.lamp
+      || (r[3] !== null && r[3] === current.ex && r[8] !== null && flags[0] === 1)
+      || (r[9] !== null && flags[1] === 1);
+    if (accepted) selected.push(incomingRows[i]);
+    // Under normal accumulation, a stale best has lower EX/lamp, so improvements are never suppressed.
+    // A delayed supplement can be recovered when the same candidate recurs after best is updated.
+    // This assumption does not apply to deletions or downward corrections.
+  }
+  return selected;
+}
+
 export { instant as historyInstant };
 
 /** Replay REST score rows in score_id order, preserving the existing history slots. */
