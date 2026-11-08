@@ -10,7 +10,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
 import { getText } from './r2-client.mjs';
 import { s3R2Client, conditionalR2Client } from './r2-client.mjs';
-import { histGuardEnabled, publishHistWithLease, acquireHistLease, assertHistLease, releaseHistLease, mergeHistUser, mergeHistPending, mergeSlowUser } from './dump-fast-publish.mjs';
+import { histGuardEnabled, publishHistWithLease, acquireHistLease, assertHistLease, releaseHistLease, mergeHistUser, mergeHistPending, mergeSlowUser, publishBest } from './dump-fast-publish.mjs';
 import { buildCandidate } from './score-buffer.mjs';
 import { replayScoreBuffer } from './score-history.mjs';
 import { normalizeAliasInputs } from './song-aliases.mjs';
@@ -405,7 +405,17 @@ export async function publishGuardedHistory(id, { r2, restRows, allowCreate = fa
   }
   const released = await releaseHistLease({ r2, id, lease });
   if (!released.ok) throw new Error(released.reason);
+  await publishBestWithWarning(id, prepared.histRows, prepared.songs, bytesHash(published.histBytes), r2);
   return published;
+}
+
+async function publishBestWithWarning(id, histRows, songs, histRevision, r2) {
+  try {
+    const result = await publishBest({ r2, id, histRows, songs, histRevision });
+    if (!result.ok || result.warning) console.warn(`::warning::best 게시 실패 또는 곡 메타 누락(${id}): ${result.reason || result.missingSongCount}`);
+  } catch (error) {
+    console.warn(`::warning::best 게시 실패(${id}): ${error?.message || error}`);
+  }
 }
 
 export async function publishGuardedActions(id, local, { r2, env = process.env } = {}) {
@@ -480,6 +490,8 @@ async function publishPreparedHist(id, { restRows, histBytes, previous, r2, prev
   started = performance.now();
   await r2.put(candidateKey, candidateBody, existingCandidate ? existingCandidate.etag : null);
   logTiming('publishCandidatePut', started);
+  if (histGuardEnabled(process.env) || process.env.SCORE_BUFFER_PREPARE === '1' || process.env.SCORE_BUFFER_CUMULATIVE === '1')
+    await publishBestWithWarning(id, JSON.parse(downloadedBytes.toString('utf8')), songs, bytesHash(downloadedBytes), r2);
   return { candidateKey, candidate };
 }
 
@@ -530,7 +542,16 @@ export async function updateHistFile(id, file) {
   try { prev = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* 없거나 깨짐 → 재생성 */ }
   let probe = null;
   try { probe = await histProbe(id); } catch (e) { console.error('hist 프로브 실패(' + id + '):', e.message); }
-  if (histUnchanged(prev, probe)) return { rebuilt: false, rows: prev.length };
+  if (histUnchanged(prev, probe)) {
+    const r2 = historyClient();
+    try {
+      const hist = await r2.read(`hist/${id}.json`);
+      const songs = await r2.read('songs.json');
+      if (hist && songs && hist.body === JSON.stringify(prev))
+        await publishBestWithWarning(id, prev, JSON.parse(songs.body), bytesHash(Buffer.from(hist.body)), r2);
+    } catch (error) { console.warn(`::warning::best 재시도 실패(${id}): ${error?.message || error}`); }
+    return { rebuilt: false, rows: prev.length };
+  }
   const rows = await fetchUserHist(id);
   // ⚠️ 있던 이력이 0 행으로 바뀌는 건 정상 상황이 아니다(supabase 일시 오류·필터 사고).
   //    덮어쓰면 R2 의 유일한 복원 원본이 빈 파일이 되므로 기존본을 남기고 실패로 알린다.

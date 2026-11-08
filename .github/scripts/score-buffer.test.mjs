@@ -216,6 +216,114 @@ test('hist guard 412 replays latest history into local file, returned calculatio
   }
 });
 
+test('hist guard publishes one best object from verified chart-by-version history', async () => {
+  const { publishGuardedHistory } = await guardedModule();
+  const old = { guard: process.env.FAST_DUMP_HIST_GUARD, prepare: process.env.SCORE_BUFFER_PREPARE,
+    cumulative: process.env.SCORE_BUFFER_CUMULATIVE };
+  process.env.FAST_DUMP_HIST_GUARD = '1';
+  process.env.SCORE_BUFFER_PREPARE = '1';
+  process.env.SCORE_BUFFER_CUMULATIVE = '0';
+  const run = async (failBest) => {
+    const store = histStore();
+    if (failBest) store.beforePut = (key) => { if (key === `best/${iidxId}.json`) throw new Error('best unavailable'); };
+    const result = await publishGuardedHistory(iidxId, { r2: store, restRows: fixtureRest });
+    return { result, store, candidate: store.objects.get(`meta/scores-delete-${iidxId}.json`) };
+  };
+  const warn = console.warn; console.warn = () => {};
+  try {
+    const success = await run(false), failed = await run(true);
+    for (const { result, store } of [success, failed]) {
+      assert.equal(result.histRows.length, 1);
+      const bestPuts = store.calls.filter(([op, key]) => op === 'put' && key === `best/${iidxId}.json`);
+      assert.equal(bestPuts.length, 1);
+      const best = JSON.parse(bestPuts[0][2]);
+      assert.equal(best.v, 1); assert.equal(best.id, iidxId);
+      assert.deepEqual(best.dp, [{ song_id: 100, diff: 3, lamp: 5, ex_score: 2000,
+        played_version: 33, date: fixtureDate, bp: null, note_count: 1500 }]);
+    }
+    assert.deepEqual(failed.result.histRows, success.result.histRows);
+    assert.deepEqual(failed.result.histBytes, success.result.histBytes);
+    assert.equal(failed.candidate, success.candidate);
+    for (const pair of [success, failed]) {
+      assert.equal(pair.store.calls.filter(([op, key]) => op === 'put' && key.startsWith('hist/')).length, 1);
+      assert.equal(pair.store.calls.filter(([op, key]) => op === 'put' && key.includes('scores-delete')).length, 1);
+    }
+  } finally {
+    console.warn = warn;
+    for (const [key, name] of [['guard', 'FAST_DUMP_HIST_GUARD'], ['prepare', 'SCORE_BUFFER_PREPARE'], ['cumulative', 'SCORE_BUFFER_CUMULATIVE']]) {
+      if (old[key] === undefined) delete process.env[name]; else process.env[name] = old[key];
+    }
+  }
+});
+
+test('PREPARE publishes best after verified hist and best failure preserves result and candidate', async () => {
+  const { prepareOfficialHistory } = await guardedModule();
+  const old = { guard: process.env.FAST_DUMP_HIST_GUARD, prepare: process.env.SCORE_BUFFER_PREPARE,
+    cumulative: process.env.SCORE_BUFFER_CUMULATIVE, fetch: globalThis.fetch };
+  delete process.env.FAST_DUMP_HIST_GUARD;
+  process.env.SCORE_BUFFER_PREPARE = '1';
+  process.env.SCORE_BUFFER_CUMULATIVE = '0';
+  globalThis.fetch = async () => new Response(JSON.stringify(fixtureRest));
+  const run = async (failBest) => {
+    const store = histStore();
+    if (failBest) store.beforePut = (key) => { if (key === `best/${iidxId}.json`) throw new Error('best unavailable'); };
+    const dir = await import('node:os'), path = await import('node:path'), fs = await import('node:fs');
+    const root = fs.mkdtempSync(path.join(dir.tmpdir(), 'best-prepare-'));
+    try {
+      const result = await prepareOfficialHistory(iidxId, undefined, { r2: store, histFile: path.join(root, 'hist.json') });
+      return { result, store, candidate: store.objects.get(`meta/scores-delete-${iidxId}.json`) };
+    } finally { fs.rmSync(root, { recursive: true }); }
+  };
+  const warn = console.warn; console.warn = () => {};
+  try {
+    const success = await run(false), failed = await run(true);
+    for (const { result, store } of [success, failed]) {
+      assert.equal(result.histRows.length, 1);
+      const bestPut = store.calls.filter(([op, key]) => op === 'put' && key === `best/${iidxId}.json`);
+      assert.equal(bestPut.length, 1);
+      const best = JSON.parse(bestPut[0][2]);
+      assert.equal(best.v, 1); assert.equal(best.id, iidxId);
+      assert.deepEqual(best.dp, [{ song_id: 100, diff: 3, lamp: 5, ex_score: 2000,
+        played_version: 33, date: fixtureDate, bp: null, note_count: 1500 }]);
+    }
+    assert.deepEqual(failed.result.histRows, success.result.histRows);
+    assert.deepEqual(failed.result.histBytes, success.result.histBytes);
+    assert.equal(failed.candidate, success.candidate);
+    for (const pair of [success, failed]) {
+      assert.equal(pair.store.calls.filter(([op, key]) => op === 'put' && key.startsWith('hist/')).length, 1);
+      assert.equal(pair.store.calls.filter(([op, key]) => op === 'put' && key.includes('scores-delete')).length, 1);
+    }
+  } finally {
+    console.warn = warn; globalThis.fetch = old.fetch;
+    for (const [key, name] of [['guard', 'FAST_DUMP_HIST_GUARD'], ['prepare', 'SCORE_BUFFER_PREPARE'], ['cumulative', 'SCORE_BUFFER_CUMULATIVE']]) {
+      if (old[key] === undefined) delete process.env[name]; else process.env[name] = old[key];
+    }
+  }
+});
+
+test('same published history retries best on the next PREPARE run', async () => {
+  const { prepareOfficialHistory } = await guardedModule();
+  const old = { guard: process.env.FAST_DUMP_HIST_GUARD, prepare: process.env.SCORE_BUFFER_PREPARE,
+    cumulative: process.env.SCORE_BUFFER_CUMULATIVE, fetch: globalThis.fetch };
+  delete process.env.FAST_DUMP_HIST_GUARD;
+  process.env.SCORE_BUFFER_PREPARE = '1'; process.env.SCORE_BUFFER_CUMULATIVE = '0';
+  globalThis.fetch = async () => new Response(JSON.stringify(fixtureRest));
+  const store = histStore(), fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'best-retry-')), histFile = path.join(dir, 'hist.json');
+  try {
+    await prepareOfficialHistory(iidxId, undefined, { r2: store, histFile });
+    store.calls.length = 0;
+    await prepareOfficialHistory(iidxId, undefined, { r2: store, histFile });
+    assert.equal(store.calls.filter(([op, key]) => op === 'put' && key === `best/${iidxId}.json`).length, 1);
+    assert.equal(store.calls.filter(([op, key]) => op === 'put' && key.startsWith('hist/')).length, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true }); globalThis.fetch = old.fetch;
+    for (const [key, name] of [['guard', 'FAST_DUMP_HIST_GUARD'], ['prepare', 'SCORE_BUFFER_PREPARE'], ['cumulative', 'SCORE_BUFFER_CUMULATIVE']]) {
+      if (old[key] === undefined) delete process.env[name]; else process.env[name] = old[key];
+    }
+  }
+});
+
 test('hist guard busy lease, exhausted 412, uncertain PUT and readback mismatch never publish candidate or completion', async () => {
   const { publishGuardedHistory } = await guardedModule();
   const noCandidate = histStore();
