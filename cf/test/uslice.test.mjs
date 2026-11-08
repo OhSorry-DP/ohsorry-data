@@ -81,6 +81,27 @@ test('vec-dp 허용·fresh 우회·열거 한도·HEAD와 비계약 vec 거부',
   }
 });
 
+test('best 공개 경로는 R2 객체를 반환하고 ID·확장자·traversal을 거부한다', async () => {
+  const d = fixture();
+  const response = await d.fetch('best/A1.json');
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), '{}');
+  for (const key of ['best/A_1.json', 'best/A1.txt', 'best/A1.json/extra', 'best//A1.json', 'best/%2e%2e%2Fsecret.json']) {
+    assert.equal((await d.fetch(key)).status, 404, key);
+  }
+  assert.deepEqual(d.calls.get, ['best/A1.json']);
+});
+
+test('best fresh=1은 ETag 메모를 우회하고 열거 감속 대상이다', async () => {
+  const d = fixture(), key = 'best/A1.json';
+  await d.cache.put(new Request('https://local.invalid/__etag/' + key), new Response(JSON.stringify({ etag: '"old"', t: Date.now() })));
+  const response = await d.fetch(key + '?fresh=1', { headers: { 'CF-Connecting-IP': '127.0.0.1' } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('etag'), '"new"');
+  assert.equal(d.calls.head.at(-1), key);
+  assert.deepEqual(d.calls.limit, ['127.0.0.1']);
+});
+
 
 test('물리 유저 파일만 공개하고 기존 ETag·캐시·CORS 정책을 적용한다', async () => {
   const d = fixture();

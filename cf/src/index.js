@@ -20,6 +20,7 @@ const USER_RE = /^user\/[A-Za-z0-9]+\.json$/;
 //   user/ 슬림 덤프로는 불가능한 supabase 복원의 원본이다.
 //   user/ 와 분리한 이유: 카드 첫 로딩에 딸려오면 응답이 느려지는데, 정작 필요한 건 모달을 열 때뿐이다.
 const HIST_RE = /^hist\/[A-Za-z0-9]+\.json$/;
+const BEST_RE = /^best\/[A-Za-z0-9]+\.json$/;
 // 코치 auth.js의 validIidxId와 같은 AC 8자리·INF 대문자 1자+12자리 검사다.
 const PHYS_USER_RE = /^phys\/user\/(\d{8}|[A-Z]\d{12})\.json$/;
 // SP 코치 공개 자산은 DP 물리 유저 자산과 같은 ID 검사를 사용하되 별도 경로로 한정한다.
@@ -139,6 +140,7 @@ function keyOf(pathname) {
   if (PHYS_USER_RE.test(key)) return key;
   if (PHYS_USER_SP_RE.test(key)) return key;
   if (HIST_RE.test(key)) return key;
+  if (BEST_RE.test(key)) return key;
   if (USLICE_RE.test(key)) return key;
   if (ARRANGE_RE.test(key)) return key;
   if (DBR_RE.test(key)) return key;
@@ -210,7 +212,7 @@ function ipOf(req) {
 function isEnumerationKey(key) {
   // 🔴 `arrange/`·`dbr/` 는 넣지 않는다(2026-09-29) — 프로필 1회에 `user/` 와 함께 요청되고 Rival 은 라이벌 수만큼 곱해져
   //    사람도 20건/분(RL_ENUM)에 닿는다. 옮기기 전엔 Supabase anon 으로 한도 없이 공개였으므로 빼도 후퇴가 아니다.
-  return USER_RE.test(key) || HIST_RE.test(key) || USLICE_RE.test(key)
+  return USER_RE.test(key) || HIST_RE.test(key) || BEST_RE.test(key) || USLICE_RE.test(key)
       || key === 'users-list.json' || key === 'users-list-slim.json';
 }
 
@@ -250,7 +252,7 @@ export default {
     // purge는 콜로별 Cache API에서 URL 단위로 지원되지 않으므로, R2 원본을 직접 읽어 우회한다.
     // R2 Class B 읽기와 egress 폭증을 막기 위해 고회전·소용량인 user/hist·arrange/dbr(저장 직후 본인 재조회)·pending(폴링 판정용, 소용량)과 users-list만 허용한다.
     const fresh = url.searchParams.get('fresh') === '1'
-      && (USER_RE.test(key) || HIST_RE.test(key) || USLICE_RE.test(key) || ARRANGE_RE.test(key) || DBR_RE.test(key) || PENDING_RE.test(key) || key === 'users-list.json' || key === 'users-list-slim.json');
+      && (USER_RE.test(key) || HIST_RE.test(key) || BEST_RE.test(key) || USLICE_RE.test(key) || ARRANGE_RE.test(key) || DBR_RE.test(key) || PENDING_RE.test(key) || key === 'users-list.json' || key === 'users-list-slim.json');
     const origin = url.origin;
     // 외부에서 /__etag/... 로 요청해도 keyOf 가 허용하지 않으므로 ETag 메모를 오염시킬 수 없다.
     const etagReq = new Request(origin + '/__etag/' + key);
