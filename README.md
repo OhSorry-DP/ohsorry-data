@@ -124,6 +124,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-11-08 — best/ 버전별 최고값 문서 신설
+
+- `gridFromHistory` 경로를 재사용해 readback된 hist에서 채보×버전 최고값 `best/{id}.json`을 생성한다. slimRow 8필드의 `dp`·`sp`와 희소 flags를 담으며 histRevision은 진단용이다.
+- Actions GUARD·누적/PREPARE·비누적 hist 무변경 실행과 Edge hist 게시 모드에서 CAS 및 readback으로 게시한다. 412면 현재 hist로 재계산하며 실패는 경고만 남긴다. Edge 경량 미게시 REST 합성과 repersona는 생성하지 않고 전용 백필은 없다.
+- CF Worker에 best 경로와 user·hist와 같은 열거 감속, `fresh=1` 우회, 캐시 헤더·CORS를 적용했다. 비교 입력 검증을 선형 Set 검사로 바꿔 5,385행 실측을 6.5초에서 32ms로 줄였다.
+- 테스트와 변이 확인을 완료했다. 로컬 커밋이며 push·배포 전이다.
+
 ### 2026-11-07 — SP 클리어 추천 자동 구간표
 
 - `.github/scripts/dump-sp-clear-map.mjs`와 시험, `.github/workflows/dump-chart-dist.yml`의 별도 단계로 저장된 유저 sp★와 유저별 채보 최고 램프를 사용해 SP11 표 4개와 SP12 표 3개를 계산한다. 자산은 `data/sp-clear-map.json`이며 최초 게시 전이다.
