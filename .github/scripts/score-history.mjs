@@ -375,3 +375,60 @@ export function gridFromHistory(iidxId, histRows, songs, playStyle = 1) {
     };
   }).sort((a, b) => a.song_id - b.song_id || a.diff - b.diff);
 }
+
+/** Build independent chart grids for each played version and play style. */
+export function gridByVersionFromHistory(iidxId, histRows, songs) {
+  if (!Array.isArray(histRows) || !Array.isArray(songs)) fail('histRows and songs must be arrays');
+
+  const songIds = new Set();
+  for (let i = 0; i < songs.length; i += 1) {
+    const song = songs[i];
+    if (song === null || typeof song !== 'object' || Array.isArray(song)) fail(`song at index ${i} must be an object`);
+    integer(song.song_id, `song at index ${i} song_id`);
+    if (songIds.has(song.song_id)) fail(`duplicate song_id at index ${i}: ${song.song_id}`);
+    songIds.add(song.song_id);
+  }
+
+  const buckets = new Map();
+  const flagRows = new Map();
+  let missingSongCount = 0;
+  for (let i = 0; i < histRows.length; i += 1) {
+    const { row } = normalize(histRows[i], 'hist', i);
+    if (row[4] === -10) continue;
+    if (!songIds.has(row[0])) {
+      missingSongCount += 1;
+      continue;
+    }
+    const key = JSON.stringify([row[4], row[7]]);
+    const bucket = buckets.get(key) ?? { version: row[4], style: row[7], rows: [] };
+    bucket.rows.push(histRows[i]);
+    buckets.set(key, bucket);
+
+    const flagKey = JSON.stringify([row[0], row[1], row[4], row[7]]);
+    const records = flagRows.get(flagKey) ?? [];
+    records.push(row);
+    flagRows.set(flagKey, records);
+  }
+
+  const dp = [];
+  const sp = [];
+  for (const bucket of buckets.values()) {
+    const rows = gridFromHistory(iidxId, bucket.rows, songs, bucket.style);
+    const versionRows = rows.map((item) => ({ ...item, played_version: bucket.version }));
+    (bucket.style === 1 ? dp : sp).push(...versionRows);
+  }
+  const sortRows = (a, b) => a.song_id - b.song_id || a.diff - b.diff
+    || a.played_version - b.played_version;
+  dp.sort(sortRows);
+  sp.sort(sortRows);
+
+  const flags = {};
+  for (const [key, rows] of flagRows) {
+    const bestEx = Math.max(...rows.map(ex));
+    const bestRows = rows.filter((r) => ex(r) === bestEx);
+    const bpNullAtBestEx = bestRows.some((r) => r[8] === null);
+    const noteNull = rows.some((r) => r[9] === null);
+    if (bpNullAtBestEx || noteNull) flags[key.slice(1, -1).replaceAll(',', ':')] = [Number(bpNullAtBestEx), Number(noteNull)];
+  }
+  return { dp, sp, flags, missingSongCount };
+}

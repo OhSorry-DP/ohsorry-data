@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { gridFromHistory } from './score-history.mjs';
+import { gridByVersionFromHistory, gridFromHistory } from './score-history.mjs';
 
 const d0 = '2026-10-20T03:12:45.123456+00:00';
 const d1 = '2026-10-20T03:12:45.123457+00:00';
@@ -91,4 +91,38 @@ test('전체 출력 필드, 입력 불변, 중복 song_id 거부, 빈 결과를 
   assert.deepEqual(songs, beforeSongs);
   assert.throws(() => gridFromHistory('player', hist, [song(1), song(1)]));
   assert.deepEqual(gridFromHistory('player', [], songs), []);
+});
+
+test('버전별 집계는 버전과 스타일별 행을 분리하고 flags 최고 EX 및 null을 집계한다', () => {
+  const hist = [
+    row(1, 0, 4, 100, 30, d0, '2026-10-20', 1, null, 90),
+    row(1, 0, 5, 100, 30, d1, '2026-10-20', 1, 3, 90),
+    row(1, 0, 6, 100, 31, d0, '2026-10-20', 1, null, 80),
+    row(1, 0, 5, 90, 31, d1, '2026-10-20', 1, 2, null),
+    row(1, 0, 4, 80, 30, d0, '2026-10-20', 0, 2, null),
+    row(1, 0, 7, 90, 30, d1, '2026-10-20', 0, 1, 80),
+    row(1, 0, 7, 95, -10, d0, '2026-10-20', 1, null, null),
+    row(99, 0, 7, 99, 30, d0),
+    row(2, 0, 7, 10, 30, d0),
+  ];
+  const before = structuredClone(hist);
+  const result = gridByVersionFromHistory('player', hist, [song(1)]);
+  assert.deepEqual(result.dp.map((r) => [r.song_id, r.played_version]), [[1, 30], [1, 31]]);
+  assert.deepEqual(result.sp.map((r) => [r.song_id, r.played_version]), [[1, 30]]);
+  assert.deepEqual(result.flags, {
+    '1:0:30:1': [1, 0],
+    '1:0:30:0': [0, 1],
+    '1:0:31:1': [1, 1],
+  });
+  assert.equal(result.missingSongCount, 2);
+  assert.deepEqual(hist, before);
+});
+
+test('버전별 집계는 null 없는 flags를 생략하고 DBR 및 누락 곡을 행과 경고에서 제외한다', () => {
+  const hist = [row(1, 0, 7, 100, 30, d0, '2026-10-20', 1, 0, 80),
+    row(1, 0, 8, 100, -10, d0), row(99, 0, 8, 100, 30, d0)];
+  const result = gridByVersionFromHistory('player', hist, [song(1)]);
+  assert.equal(result.dp.length, 1);
+  assert.deepEqual(result.flags, {});
+  assert.equal(result.missingSongCount, 1);
 });
