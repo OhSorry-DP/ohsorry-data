@@ -1,4 +1,4 @@
-import { publishHistWithLease, assertHistLease, releaseHistLease, mergeHistUser, mergeHistPending, mergeEdgeUser } from '../../../.github/scripts/dump-fast-publish.mjs';
+import { publishHistWithLease, publishBest, assertHistLease, releaseHistLease, mergeHistUser, mergeHistPending, mergeEdgeUser } from '../../../.github/scripts/dump-fast-publish.mjs';
 import { mergeFastPending } from '../../../.github/scripts/pending-marker.mjs';
 
 const FAST_FIELDS = ['dp', 'sp', 'dpRecent', 'spRecent'] as const;
@@ -138,6 +138,7 @@ async function runHistDump<Row>({ id, G, since, deps }: {
     catch (error) { if (timing) timing('bufferRead', performance.now() - started); throw error; }
   };
   let heldLease: { key: string; token: string; expiresAt: string } | undefined;
+  let bestSongs: unknown;
   const leaseKey = `meta/fast-hist-lease-${id}.json`;
   const check = () => {
     if (deps.deadline !== undefined && nowMs() >= deps.deadline) throw new Error('deadline');
@@ -193,6 +194,7 @@ async function runHistDump<Row>({ id, G, since, deps }: {
         try { await assertHistLease({ r2, id, lease: heldLease, now: nowMs }); }
         finally { if (timing) timing('leaseCheck', performance.now() - started); }
         const aliases = JSON.parse(aliasesSource.body), songs = JSON.parse(songsSource.body);
+        bestSongs = songs;
         const input = { iidxId: id, previousHistRows, restRows, aliases, aliasesBytes: new TextEncoder().encode(aliasesSource.body), songs,
           previousUser: initialUser ?? {}, generation, nowMs: Date.parse(since) };
         started = timing ? performance.now() : 0;
@@ -249,6 +251,12 @@ async function runHistDump<Row>({ id, G, since, deps }: {
     catch { return { ok: true, changed: merged.changed, done: false, reason: 'done-put-failed' }; }
     finally { if (timing) timing('pendingDone', performance.now() - started); }
     await releaseHistLease({ r2, id, lease: published.lease, now: nowMs, timing });
+    try {
+      const best = await publishBest({ r2, id, histRows: published.histRows, songs: bestSongs, histRevision: published.histRevision });
+      if (!best.ok) console.warn('dump-fast best skipped', JSON.stringify({ id, reason: best.reason, missingSongCount: best.missingSongCount }));
+    } catch (error) {
+      console.warn('dump-fast best skipped', JSON.stringify({ id, reason: error instanceof Error ? error.message : 'best-failed' }));
+    }
     return { ok: true, changed: merged.changed, done: true, value: merged.value };
   } catch (error) {
     return { ok: false, reason: error instanceof Error && error.message === 'deadline' ? 'deadline' : 'read-or-calculation-failed' };

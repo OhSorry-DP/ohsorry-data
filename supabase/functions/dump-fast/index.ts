@@ -123,7 +123,7 @@ export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Om
         const histPublish = getEnv('FAST_DUMP_HIST_PUBLISH') === '1';
         const leaseKey = `meta/fast-hist-lease-${body.iidxId}.json`;
         const read = async (key: string) => {
-          if (!R2_KEYS(body.iidxId).includes(key) && key !== `pending/${body.iidxId}.json` && !(histPublish && key === leaseKey)) throw new Error('invalid R2 key');
+          if (!R2_KEYS(body.iidxId).includes(key) && key !== `pending/${body.iidxId}.json` && !(histPublish && (key === leaseKey || key === `best/${body.iidxId}.json`))) throw new Error('invalid R2 key');
           let result;
           try { result = await r2.get(key); } catch (error) {
             if (histPublish && (error as { status?: number }).status === 404) return null;
@@ -132,7 +132,7 @@ export function createDumpFastHandler(options: Pick<Deps, 'getEnv'> & Partial<Om
           return { body: new TextDecoder('utf-8', { fatal: true }).decode(result.value!), etag: result.etag ?? null };
         };
         const put = async (key: string, value: string, etag: string | null) => {
-          if (key !== `user/${body.iidxId}.json` && key !== `pending/${body.iidxId}.json` && !(histPublish && (key === leaseKey || key === `hist/${body.iidxId}.json`))) throw new Error('invalid R2 write key');
+          if (key !== `user/${body.iidxId}.json` && key !== `pending/${body.iidxId}.json` && !(histPublish && (key === leaseKey || key === `hist/${body.iidxId}.json` || key === `best/${body.iidxId}.json`))) throw new Error('invalid R2 write key');
           if (etag === null) {
             if (!histPublish) throw new Error('creation disabled');
             await r2.put(key, new TextEncoder().encode(value), { ifNoneMatch: '*' });

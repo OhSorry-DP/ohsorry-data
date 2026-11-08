@@ -137,10 +137,27 @@ const histFixture = () => {
   return f;
 };
 
-test('hist ON publishes readback, user, completion then releases; same G rerun is idempotent', async () => {
+const bestHistFixture = () => {
   const f = histFixture();
-  assert.equal((await f.run()).done, true);
-  assert.deepEqual(f.puts.map(x => x.key), ['meta/fast-hist-lease-u1.json', 'hist/u1.json', 'user/u1.json', 'pending/u1.json', 'meta/fast-hist-lease-u1.json']);
+  const rows = [[1, 3, 4, 123, 34, '2026-10-24T00:00:00.000Z', '2026-10-24', 1, null, 200]];
+  f.objects.set('songs.json', [{ song_id: 1, title: 'fixture song' }]);
+  f.deps.prepareFastDump = ({ generation, previousHistRows, restRows }) => {
+    const histRows = restRows.length ? rows : previousHistRows;
+    return { histRows, histBytes: new TextEncoder().encode(JSON.stringify(histRows)), candidate: null,
+    fastPatch: { dp: [], sp: [], dpRecent: [], spRecent: [], fastGeneration: generation } };
+  };
+  return f;
+};
+
+test('hist ON publishes readback, user, completion then releases; same G rerun is idempotent', async () => {
+  const f = bestHistFixture();
+  const first = await f.run(); assert.equal(first.done, true, JSON.stringify(first));
+  assert.deepEqual(f.puts.map(x => x.key), ['meta/fast-hist-lease-u1.json', 'hist/u1.json', 'user/u1.json', 'pending/u1.json', 'meta/fast-hist-lease-u1.json', 'best/u1.json']);
+  const best = f.objects.get('best/u1.json');
+  assert.match(best.histRevision, /^[a-f0-9]{64}$/);
+  assert.deepEqual(best.dp, [{ song_id: 1, diff: 3, lamp: 4, ex_score: 123, played_version: 34, date: '2026-10-24T00:00:00.000Z', bp: null, note_count: 200 }]);
+  assert.deepEqual(best.sp, []); assert.deepEqual(best.flags, { '1:3:34:1': [1, 0] });
+  assert.equal(best.v, 1); assert.equal(best.id, 'u1');
   const user = f.objects.get('user/u1.json'), marker = f.objects.get('pending/u1.json');
   assert.match(user.histRevision, /^[a-f0-9]{64}$/); assert.equal(marker.histRevision, user.histRevision); assert.equal(marker.viewGeneration, '5');
   assert.deepEqual(user.radars, [1]); assert.deepEqual(user.extension, { keep: true });
@@ -149,10 +166,44 @@ test('hist ON publishes readback, user, completion then releases; same G rerun i
   let gets = 0; const read = f.deps.read;
   f.deps.read = async (...args) => { gets++; return read(...args); };
   const again = await f.run(); assert.equal(again.done, true); assert.equal(again.changed, false);
-  assert.equal(gets, 27);
-  assert.deepEqual(f.puts.map(x => x.key), ['meta/fast-hist-lease-u1.json','pending/u1.json','meta/fast-hist-lease-u1.json']);
+  assert.equal(gets, 30); // Best retry adds origin and readback after the already verified hist read.
+  assert.deepEqual(f.puts.map(x => x.key), ['meta/fast-hist-lease-u1.json','pending/u1.json','meta/fast-hist-lease-u1.json','best/u1.json']);
   assert.deepEqual(f.objects.get('hist/u1.json'), JSON.parse(beforeHist)); assert.deepEqual(f.objects.get('user/u1.json'), JSON.parse(beforeUser));
   assert.ok(f.puts.every(x => !x.key.startsWith('hist/') && !x.key.startsWith('user/')));
+});
+
+test('best failure after verified hist keeps completion and lease release policy', async () => {
+  const f = bestHistFixture(), put = f.deps.put;
+  let bestAttempts = 0;
+  f.deps.put = async (key, body, match) => {
+    if (key === 'best/u1.json') { bestAttempts++; throw Error('best unavailable'); }
+    return put(key, body, match);
+  };
+  const result = await f.run();
+  assert.equal(result.ok, true);
+  assert.equal(result.done, true);
+  assert.ok(bestAttempts >= 1);
+  assert.equal(f.objects.get('pending/u1.json').viewGeneration, '5');
+  assert.equal(f.objects.get('meta/fast-hist-lease-u1.json').expiresAt, '2026-10-24T00:00:00.000Z');
+  assert.equal(f.puts.at(-1).key, 'meta/fast-hist-lease-u1.json');
+});
+
+test('best build failure is separately warned after hist completion', async () => {
+  const f = histFixture(), warnings = [], originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args);
+  try {
+    const result = await f.run();
+    assert.equal(result.ok, true); assert.equal(result.done, true);
+    assert.equal(f.puts.filter(({ key }) => key === 'best/u1.json').length, 0);
+    assert.ok(warnings.some(args => String(args[1]).includes('best-build-failed')));
+  } finally { console.warn = originalWarn; }
+});
+
+test('non history REST synthesis never attempts best publication', async () => {
+  const { deps, puts } = fixture();
+  const result = await runLightDump({ id: 'u1', G: '5', since, deps });
+  assert.equal(result.done, true);
+  assert.equal(puts.filter(({ key }) => key.startsWith('best/')).length, 0);
 });
 
 test('hist success / user failure leaves no completion; same G revision recovery follows expiry', async () => {
@@ -166,7 +217,7 @@ test('hist success / user failure leaves no completion; same G revision recovery
   assert.equal(f.objects.get('meta/fast-hist-lease-u1.json').expiresAt, '2026-10-24T00:00:15.000Z');
   assert.equal((await f.run()).reason, 'lease-busy');
   f.deps.nowMs = () => Date.parse(since) + 16000; f.deps.put = put;
-  assert.equal((await f.run()).done, true); assert.deepEqual(f.objects.get('user/u1.json').dp, [1]);
+  const first = await f.run(); assert.equal(first.done, true, JSON.stringify(first)); assert.deepEqual(f.objects.get('user/u1.json').dp, [1]);
 });
 
 test('higher generation and busy lease skip without histogram or user writes', async () => {
@@ -192,14 +243,14 @@ test('hist 412 reloads references and merges original buffer with winning histor
     }
     return put(key, body, match);
   };
-  assert.equal((await f.run()).done, true);
+  const first = await f.run(); assert.equal(first.done, true, JSON.stringify(first));
   assert.deepEqual(f.objects.get('hist/u1.json'), [{ score_id: 2 }, { score_id: 1 }]);
   assert.deepEqual(f.objects.get('user/u1.json').dp, [2]); assert.equal(aliasesReads, 4); assert.equal(songsReads, 4);
 });
 
 test('new user/hist creation requires both 404, matching pending and nonempty stable buffer', async () => {
   const f = histFixture(); f.remove('hist/u1.json'); f.remove('user/u1.json');
-  assert.equal((await f.run()).done, true);
+  const first = await f.run(); assert.equal(first.done, true, JSON.stringify(first));
   assert.equal(f.puts.find(x => x.key === 'hist/u1.json').match, null);
   assert.equal(f.puts.find(x => x.key === 'user/u1.json').match, null);
   assert.equal(f.objects.get('user/u1.json').user, null);
@@ -449,7 +500,7 @@ test('hist timing separates initial history read from readback and lease checks'
     const f = histFixture(), steps = {}, read = f.deps.read;
     f.deps.timing = (step, ms) => { steps[step] = (steps[step] ?? 0) + ms; };
     f.deps.read = async key => { if (key.startsWith('hist/')) advance(4); if (key.includes('lease')) advance(2); return read(key); };
-    assert.equal((await f.run()).done, true);
+    const first = await f.run(); assert.equal(first.done, true, JSON.stringify(first));
     assert.equal(steps.histVerify, 12);
     assert.equal(steps.histRead, 8);
     assert.ok(steps.leaseCheck > 0);
