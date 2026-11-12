@@ -120,3 +120,48 @@ test('uslice 412 is reported separately and SQL has transaction wrapper and empt
   assert.ok(sql.endsWith('COMMIT;\n'));
   assert.equal(makeSql([]).includes('UPDATE'), false);
 });
+
+test('default calculation receives previousUser with SP fields cleared and other fields preserved', async () => {
+  const data = fixture({});
+  const seen = [];
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'backfill-sp-star-previous-'));
+  await main(['--out=' + dir, '--only=A1'], {
+    client: data.client,
+    arrangeFor: data.arrangeFor,
+    mergeScoreHistory: data.mergeScoreHistory,
+    engine: { historyInputs: () => ({}) },
+    R: {},
+    calculateOfficialScores: args => {
+      seen.push(args);
+      return { userFields: { sp_cpi: 102, sp_star: 1.02 } };
+    },
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].previousUser.sp_cpi, null);
+  assert.equal(seen[0].previousUser.sp_star, null);
+  assert.equal(seen[0].previousUser.dj_name, 'DJ A1');
+});
+
+test('SQL excludes a changed user whose conditional PUT conflicts', async () => {
+  const data = fixture({ conflicts: ['user/A1.json'] });
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'backfill-sp-star-conflict-sql-'));
+  await main(['--out=' + dir, '--write'], data);
+  const sql = await fs.readFile(path.join(dir, 'backfill-sp-star.sql'), 'utf8');
+  assert.equal(sql.includes("'A1'"), false);
+  assert.equal(sql.includes("'C3'"), true);
+});
+
+test('a change to sp_cpi alone is classified as changed and included in SQL', async () => {
+  const data = fixture({});
+  data.expected.set('A1', [1000, 12.5]);
+  const user = JSON.parse(data.objects.get('user/A1.json').body);
+  user.user.sp_cpi = 1000;
+  user.user.sp_star = 12.5;
+  data.objects.set('user/A1.json', { ...data.objects.get('user/A1.json'), body: JSON.stringify(user) });
+  data.calculate = async ({ id }) => id === 'A1' ? { sp_cpi: 1001, sp_star: 12.5 } : ({ sp_cpi: 1, sp_star: 1 });
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'backfill-sp-star-cpi-only-'));
+  const report = await main(['--out=' + dir, '--only=A1'], data);
+  assert.equal(report.users[0].status, 'changed');
+  const sql = await fs.readFile(path.join(dir, 'backfill-sp-star.sql'), 'utf8');
+  assert.match(sql, /1001::integer/);
+});
