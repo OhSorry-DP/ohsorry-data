@@ -124,6 +124,15 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-11-12 — SP 유저★ 1회 백필 스크립트
+
+- [backfill-sp-star.mjs](.github/scripts/backfill-sp-star.mjs)는 ohsorry-data 커밋 `ca0028572`와 테스트 보강 `06ef2f7c2`에 포함됐다. 업로드 경로의 `historyInputs` → `calculateOfficialScores`를 그대로 써 `sp_cpi`·`sp_star`만 가져오고, 이전 값의 SP 두 필드는 null로 넘겨 새 모델의 보류를 구분한다.
+- 기본은 dry이며 `--write`일 때만 R2 `user/{id}.json`과 `uslice/{id}.json`을 If-Match로 고친다. 412 경합은 재시도 없이 기록하고 SQL에서 제외한다. `--null-policy=keep|clear`의 기본은 keep이다.
+- Supabase에는 직접 쓰지 않고 `BEGIN; SET LOCAL ohsorry_internal.official_user_write = '1'; UPDATE public.users … sp_cpi, sp_star …; COMMIT;` 형식의 SQL 파일만 만든다. `SET LOCAL`은 users 웹훅 트리거 조건을 꺼 유저별 덤프 생성을 막고, RPC `upsert_user_official`과 달리 `date`를 덮어쓰지 않는다.
+- 실행 명령은 `CLOUDFLARE_ACCOUNT_ID=607eea1b073bea6747e6e9b76f2d7b41 node --env-file=D:/work/ohSorryAdmin/.env .github/scripts/backfill-sp-star.mjs --out=<폴더> [--write]`다. Admin `.env`에는 계정 ID가 없다. 533명에 약 10분이 걸렸다. 테스트 8개가 통과했고 변이 10종(dry PUT, previousUser null, SET LOCAL, 412 SQL 제외, keep/clear, uslice, sp_cpi, 종료 코드, unchanged 판정, 412 기록)을 모두 검출했다.
+- 2026-11-12 dry는 533명 중 변경 256, 같음 22, 새 모델 보류 35, SP 없음 214, 오류 6이다. 변화(새−옛)는 중앙 −0.6, p10 −1.4, p90 +0.5, 최대 5.4다. 정본 스냅샷 302명 중 297명은 일치하고 5명은 스냅샷 뒤 기록 갱신으로 0.1 차이가 났다. write(keep)에서 R2 user 255·uslice 255를 갱신했고 경합은 0이다. Supabase 현재 값과 다른 255행에 관리 API로 위 SQL을 실행해 재비교 차이 0, 웹훅 덤프 0건, `date` 변경 0행이었다. `dump-users-list` 워크플로를 수동 실행해 users-list를 재생성했고 R2·CDN에서 255명이 일치했다. 재실행 dry의 변경은 0이다.
+- 보류 35명은 옛 값을 유지했고 그중 4명은 옛 값 9.7~12.4이며 R2 hist에 SP 기록이 없거나 hist가 비어 재계산할 수 없다. 오류 6명은 기존 데이터 이상으로 user 파일의 `user`가 null인 4명과 user 파일이 없는 2명이며 손대지 않았다. SP 클리어맵 집계 `dump-chart-dist`(KST 03:35)는 다음 정기 실행 때 새 값을 반영한다.
+
 ### 2026-11-08 — best/ 버전별 최고값 문서 신설
 
 - `gridFromHistory` 경로를 재사용해 readback된 hist에서 채보×버전 최고값 `best/{id}.json`을 생성한다. slimRow 8필드의 `dp`·`sp`와 희소 flags를 담으며 histRevision은 진단용이다.
