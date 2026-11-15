@@ -8,7 +8,7 @@ import { gzipSync } from 'node:zlib';
 import { produceUser, createClient, parseArgs, main, createDiskCache } from '../coach-precompute.mjs';
 import { conditionalR2Client, createRequestGate } from '../r2-client.mjs';
 import { collectGraph, digest } from '../uvec-lib.mjs';
-import { CELLS, validateIndex } from '../../../../ohSorryWeb/functions/_shared/coach-precompute-contract.js';
+import { CELLS, normalizeCellQuery, validateIndex } from '../../../../ohSorryWeb/functions/_shared/coach-precompute-contract.js';
 
 const webRoot = fileURLToPath(new URL('../../../../ohSorryWeb/', import.meta.url));
 const id = '12345678';
@@ -34,7 +34,9 @@ export async function onRequestCalculated({ request, env }) {
   await env.DATA.get('data/common.json');
   await env.DATA.get('data/missing.json');
   if ('${mode}' === 'transport') { try { await fetch('https://unexpected.invalid/asset'); } catch {} }
-  return new Response(JSON.stringify('${mode}' === 'error' ? {error:'failed'} : '${mode}' === 'no_star' ? {error:'no_star'} : '${mode}' === 'no_r_star' ? {error:'no_r_star'} : { query:new URL(request.url).search, fresh }),
+  const target = '${mode}'.startsWith('limit_') ? Number('${mode}'.slice(6)) : 0;
+  const body = target ? JSON.stringify('x'.repeat(target - 2)) : JSON.stringify('${mode}' === 'error' ? {error:'failed'} : '${mode}' === 'no_star' ? {error:'no_star'} : '${mode}' === 'no_r_star' ? {error:'no_r_star'} : { query:new URL(request.url).search, fresh });
+  return new Response(body,
     {status: '${mode}' === 'http' ? 500 : 200, headers:{'content-type':'application/json; charset=utf-8'}});
 }`);
   const objects = new Map([['user/12345678.json', gzipSync('{"v":1}')]]), puts = [];
@@ -66,6 +68,12 @@ test('32 route bytes·gzip raw/json 격리·2 PUT·index 검증과 REST raw 보�
     assert.equal(digest(bytes), index.cells[cell].body_sha256);
     assert.equal(bytes.length, index.cells[cell].byte_length);
     assert.equal(JSON.parse(bytes).fresh.v, 1);
+    const query = new URLSearchParams(JSON.parse(bytes).query);
+    const [group, layout, explain] = cell.split('.');
+    const expected = normalizeCellQuery(group, { layout, ...(explain === 'full' ? { explain } : {}) });
+    if (explain === 'summary') delete expected.explain;
+    expected.kind = group.startsWith('C-') ? 'clear' : group === 'P' ? 'practice' : 'ladder';
+    assert.deepEqual(Object.fromEntries(query), expected);
     const response = await onRequestCalculated({ request: new Request(`https://iidx.in/api/${id}/recommend${JSON.parse(bytes).query}`),
       env: { DATA: { async get() { return { json: async () => ({ v: 1 }), arrayBuffer: async () => Uint8Array.from(gzipSync('{"v":1}')).buffer }; }, async head() { return null; } } } });
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
@@ -74,6 +82,25 @@ test('32 route bytes·gzip raw/json 격리·2 PUT·index 검증과 REST raw 보�
   const client = createClient({ CLOUDFLARE_ACCOUNT_ID: 'fixture', CLOUDFLARE_API_TOKEN: 'fixture' }, async () =>
     new Response(raw, { headers: { etag: '"raw"' } }));
   assert.deepEqual((await client.read('data/a.gz')).bytes, raw);
+});
+
+test('셀별 바이트 상한은 524288 포함, 524289 거부하며 기존 index를 보존', async t => {
+  const accepted = await fixture(t, 'limit_524288');
+  const result = await accepted.run();
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.cells.length, 32);
+  const index = JSON.parse(accepted.objects.get(`uslice/${id}-coach-recs.json`));
+  assert.equal(index.cells[CELLS[0]].byte_length, 524288);
+  assert.equal(accepted.objects.get(`uslice/${id}-coach-recs-${result.generation}.bin`).subarray(index.cells[CELLS[0]].offset, index.cells[CELLS[0]].offset + index.cells[CELLS[0]].length).length, 524288);
+
+  const rejected = await fixture(t, 'limit_524289');
+  const oldIndex = Buffer.from('previous-index');
+  rejected.objects.set(`uslice/${id}-coach-recs.json`, oldIndex);
+  const tooLarge = await rejected.run();
+  assert.equal(tooLarge.ok, false);
+  assert.equal(tooLarge.reason, `body_too_large: ${CELLS[0]}`);
+  assert.deepEqual(rejected.objects.get(`uslice/${id}-coach-recs.json`), oldIndex);
+  assert.deepEqual(rejected.puts, []);
 });
 
 test('원본 변경 두 번이면 이전 index 보존·조건부 index 충돌도 보존', async t => {
