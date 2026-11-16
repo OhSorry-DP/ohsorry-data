@@ -115,6 +115,24 @@ function recoveryDeps({ values = { 'user/A1.json': '{"user":null}' }, listError,
   };
 }
 
+test('recovery checks final remaining users and rechecks before dispatch', async () => {
+  const remaining = recoveryDeps();
+  remaining.getText = async () => remaining.calls.filter(([kind]) => kind === 'list').length === 1
+    ? '{"user":{"iidx_id":"A1"}}' : '{"user":null}';
+  const remainingOut = await runUserRecovery(remaining);
+  assert.equal(remainingOut.failures.length, 0);
+  assert.equal(remainingOut.remaining, 1);
+  assert.equal(remainingOut.failed, true);
+  assert.equal(remaining.calls.filter(([kind, , init]) => kind === 'fetch' && init?.method === 'POST').length, 0);
+
+  const rechecked = recoveryDeps();
+  let reads = 0;
+  rechecked.getText = async () => ++reads === 1 ? '{"user":null}' : '{"user":{"iidx_id":"A1"}}';
+  const recheckedOut = await runUserRecovery(rechecked);
+  assert.equal(rechecked.calls.filter(([kind, , init]) => kind === 'fetch' && init?.method === 'POST').length, 0);
+  assert.equal(recheckedOut.failed, false);
+});
+
 test('복구 점검은 정상 user를 후보에서 제외한다', async () => {
   const d = recoveryDeps({ values: { 'user/A1.json': '{"user":{}}', 'user/B2.json': '{"user":null}' } });
   let fetches = 0;
