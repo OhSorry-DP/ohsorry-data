@@ -124,6 +124,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-11-16 — 신규 유저 Edge 골격 user.json 공식 덤프 통과
+
+- 첫 업로드 때 Edge 빠른 덤프(`supabase/functions/_shared/dump-fast-worker.ts`)가 만드는 골격 user.json(`user`·`radars`·`osPattern`·`persona`·`spPersona`·`reachNps` 가 null, `fastGeneration` 있음)을 Actions `dump-user` 공식 경로의 `readPreviousDump` 가 「이전 공식 user 덤프 형식 오류」로 거부했다. 그래서 `이전 공식 덤프 상태 모름` 으로 매번 실패했고, 해당 유저의 이름·단위·★·r★·persona 가 영구히 비었다. 11월 실패 로그 기준 영향 유저는 5명이다.
+- [dump-fast-publish.mjs](.github/scripts/dump-fast-publish.mjs)에 `isEdgeSkeletonUser` 를 추가했다. 느린 필드 6개가 모두 자기 속성이면서 정확히 null 이고 `fastGeneration` 이 유효할 때만 골격으로 본다. [dump-user.mjs](.github/scripts/dump-user.mjs)는 골격이면 `prevOk: true` 로 통과시키고, `calculateOfficialScores` 의 `previousUser` 에는 신규 유저와 같이 DB users 행을 넘긴다. 골격이 아닌 `user: null` 과 깨진 JSON 은 기존대로 중단한다. hist 없이 골격만 있으면 `missing hist` 로 중단하는 동작도 유지한다.
+- 검증: 관련 시험 `dump-fast-publish` 31건, `dump-official-score` 11건이 통과했다. 전체 717건 중 실패 2건은 둘 다 이번 변경과 무관하다. `tests/dump-persona-split` 1건은 수정 전에도 실패했고, `snapshot-r2` 는 러너 직렬화 오류로 단독 실행하면 통과한다. 변이 4종 중 3종을 검출했다. 놓친 1종은 `=== null` 을 `== null` 로 바꾼 것으로, JSON 입력에서는 결과가 같다.
+- 이미 골격으로 막혀 있는 유저는 push 뒤 `dump-user` 를 다시 디스패치해야 채워진다.
+
 ### 2026-11-12 — SP 유저★ 1회 백필 스크립트
 
 - [backfill-sp-star.mjs](.github/scripts/backfill-sp-star.mjs)는 ohsorry-data 커밋 `ca0028572`와 테스트 보강 `06ef2f7c2`에 포함됐다. 업로드 경로의 `historyInputs` → `calculateOfficialScores`를 그대로 써 `sp_cpi`·`sp_star`만 가져오고, 이전 값의 SP 두 필드는 null로 넘겨 새 모델의 보류를 구분한다.
