@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDist, distKey, noteCountFor, run, serializeDist } from './dump-chart-dist.mjs';
+import { buildDist, distKey, noteCountFor, run, runUserRecovery, serializeDist } from './dump-chart-dist.mjs';
 import { md5 } from './r2-client.mjs';
 
 function 기초자료() {
@@ -98,4 +98,76 @@ test('PUT 실패 응답을 실패 수에 포함', async () => {
   const d = 의존성({ getText: async (key) => key === 'user/A1.json' ? JSON.stringify({ user: { iidx_id: 'A1' }, dp: [], sp: [{ song_id: 10, diff: 2, ex_score: 80 }] }) : 의존성().getText(key), putText: async () => ({ ok: false }) });
   const result = await run(d);
   assert.equal(result.failures, 1);
+});
+
+function recoveryDeps({ values = { 'user/A1.json': '{"user":null}' }, listError, readError, fetch: fetchFn, clock = { value: Date.parse('2026-01-01T00:00:00.789Z') } } = {}) {
+  const calls = [];
+  return {
+    calls, values, clock,
+    list: async (prefix) => { calls.push(['list', prefix]); if (listError) throw listError; return Object.keys(values); },
+    getText: async (key) => { calls.push(['get', key]); if (readError) throw readError; return values[key] ?? null; },
+    now: () => clock.value,
+    sleep: async (ms) => { calls.push(['sleep', ms]); clock.value += ms; },
+    fetch: fetchFn ?? (async (...args) => { calls.push(['fetch', ...args]); return { status: 204, ok: true }; }),
+    env: { GITHUB_REPOSITORY: 'owner/repo', GITHUB_TOKEN: 'token' },
+    log: { log() {}, error() {} },
+  };
+}
+
+test('복구 점검은 정상 user를 후보에서 제외한다', async () => {
+  const d = recoveryDeps({ values: { 'user/A1.json': '{"user":{}}', 'user/B2.json': '{"user":null}' } });
+  let fetches = 0;
+  d.fetch = async () => { fetches++; return { status: 204, ok: true }; };
+  const out = await runUserRecovery(d);
+  assert.equal(out.anomalies, 1);
+  assert.equal(fetches, 2); // POST plus new-run polling; the healthy user was not dispatched.
+  assert.equal(d.calls.filter(([kind]) => kind === 'list').length, 2);
+});
+
+test('최초 점검의 JSON, R2 읽기 및 목록 오류는 POST를 막는다', async () => {
+  for (const opts of [{ values: { 'user/A1.json': '{' } }, { readError: new Error('read') }, { listError: new Error('list') }]) {
+    const d = recoveryDeps(opts);
+    const out = await runUserRecovery(d);
+    assert.equal(out.failed, true);
+    assert.equal(d.calls.filter(([kind]) => kind === 'fetch').length, 0);
+  }
+});
+
+test('204 dispatch 뒤 신규 run과 두 정숙 조회 후 R2 상태로 복구 판정', async () => {
+  const values = { 'user/A1.json': '{"user":null}' };
+  const calls = [];
+  let clock = Date.parse('2026-01-01T00:00:00.789Z');
+  const fetchFn = async (url, init) => {
+    calls.push({ url, init });
+    if (init.method === 'POST') { values['user/A1.json'] = '{"user":{"iidx_id":"A1"}}'; return { status: 204, ok: true }; }
+    const search = new URL(url).searchParams;
+    if (search.has('created')) return { status: 200, ok: true, json: async () => ({ workflow_runs: [{ conclusion: 'failure' }] }) };
+    return { status: 200, ok: true, json: async () => ({ workflow_runs: [] }) };
+  };
+  const d = recoveryDeps({ values, fetch: fetchFn, clock: { get value() { return clock; }, set value(v) { clock = v; } } });
+  const out = await runUserRecovery(d);
+  assert.equal(out.recovered, 1);
+  assert.equal(out.failed, false);
+  assert.equal(calls[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[0].init.body), { event_type: 'dump-user', client_payload: { iidx_id: 'A1' } });
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer token');
+  assert.equal(calls[1].url, 'https://api.github.com/repos/owner/repo/actions/workflows/dump-user.yml/runs?event=repository_dispatch&created=%3E%3D2026-01-01T00%3A00%3A00.000Z&per_page=100&page=1');
+  assert.match(calls[2].url, /status=queued/);
+  assert.match(calls[3].url, /status=in_progress/);
+  assert.equal(calls.length, 4);
+});
+
+test('dispatch 오류는 재시도하지 않고 중단 후 전수 재점검한다', async () => {
+  let attempts = 0;
+  const d = recoveryDeps({ fetch: async () => { attempts++; return { status: 500, ok: false }; } });
+  const out = await runUserRecovery(d);
+  assert.equal(attempts, 1);
+  assert.equal(out.failures[0].stage, 'dispatch');
+  assert.equal(d.calls.filter(([kind]) => kind === 'list').length, 2);
+});
+
+test('기존 분포 run의 목록 404 스킵은 그대로 보존', async () => {
+  const d = 의존성({ list: async () => ['user/A1.json', 'user/B2.json'], getText: async (key) => key === 'user/A1.json' ? null : key === 'user/B2.json' ? JSON.stringify({ user: { iidx_id: 'B2' }, dp: [], sp: [] }) : 의존성().getText(key) });
+  const out = await run(d);
+  assert.equal(out.charts, 0);
 });
