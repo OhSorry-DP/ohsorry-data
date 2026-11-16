@@ -34,14 +34,14 @@ async function getUserState(key, read, now) {
   return { state: userState(value, now), value };
 }
 
-async function readUserSnapshot({ list: listFn, getText: read, now }) {
+async function readUserSnapshot({ list: listFn, getText: read, now, poolFn = pool }) {
   const at = now();
   const keys = (await listFn('user/')).filter((key) => USER_KEY_RE.test(key));
-  const entries = [];
-  for (const key of keys) {
+  const entries = new Array(keys.length);
+  await poolFn(keys, 8, async (key, index) => {
     const { state, value } = await getUserState(key, read, at);
-    entries.push({ key, id: recoveryId(key), state, since: strictSince(value?._v) });
-  }
+    entries[index] = { key, id: recoveryId(key), state, since: strictSince(value?._v) };
+  });
   return { at, entries };
 }
 
@@ -79,7 +79,7 @@ async function listWorkflowRuns(base, query, options) {
   }
 }
 
-export async function runUserRecovery({ list: listFn = list, getText: read = getText, fetch: fetchFn = globalThis.fetch, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), env = process.env, log = console } = {}) {
+export async function runUserRecovery({ list: listFn = list, getText: read = getText, fetch: fetchFn = globalThis.fetch, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), env = process.env, log = console, pool: poolFn = pool } = {}) {
   const counts = { checked: 0, pending: 0, anomalies: 0, dispatched: 0, recovered: 0, remaining: 0 };
   const failures = [];
   let stopped = false;
@@ -88,7 +88,7 @@ export async function runUserRecovery({ list: listFn = list, getText: read = get
   const fail = (id, stage, error) => failures.push({ id, stage, error: String(error?.message ?? error) });
   let initial;
   try {
-    initial = await readUserSnapshot({ list: listFn, getText: read, now });
+    initial = await readUserSnapshot({ list: listFn, getText: read, now, poolFn });
     counts.checked += initial.entries.length;
     counts.pending += initial.entries.filter((entry) => entry.state === 'pending').length;
     counts.anomalies += initial.entries.filter((entry) => entry.state === 'bad').length;
@@ -98,7 +98,7 @@ export async function runUserRecovery({ list: listFn = list, getText: read = get
     initial = { entries: [] };
   }
   const candidates = initial.entries.filter((entry) => entry.state === 'bad')
-    .sort((a, b) => (a.since === null) - (b.since === null) || (a.since ?? 0) - (b.since ?? 0) || a.id.localeCompare(b.id));
+    .sort((a, b) => (b.since === null) - (a.since === null) ||(a.since ?? 0) - (b.since ?? 0) || a.id.localeCompare(b.id));
   const ownerRepo = env.GITHUB_REPOSITORY;
   const token = env.GITHUB_TOKEN;
   if (!stopped && candidates.length && (!ownerRepo || !token)) { fail('-', 'configuration', 'GITHUB_REPOSITORY 또는 GITHUB_TOKEN 누락'); stopped = true; }
@@ -127,7 +127,7 @@ export async function runUserRecovery({ list: listFn = list, getText: read = get
       let response;
       posts++;
       try {
-        response = await fetchFn(dispatchUrl, { method: 'POST', headers, signal: controller.signal, body: JSON.stringify({ event_type: 'dump-user', client_payload: { iidx_id: entry.id } }) });
+        response = await fetchFn(dispatchUrl, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, signal: controller.signal, body: JSON.stringify({ event_type: 'dump-user', client_payload: { iidx_id: entry.id } }) });
       } finally { clearTimeout(timer); }
       if (response?.status !== 204) throw new Error(`dispatch HTTP ${response?.status ?? 'unknown'}`);
       counts.dispatched++;
@@ -162,7 +162,7 @@ export async function runUserRecovery({ list: listFn = list, getText: read = get
   }
 
   try {
-    const final = await readUserSnapshot({ list: listFn, getText: read, now });
+    const final = await readUserSnapshot({ list: listFn, getText: read, now, poolFn });
     counts.checked += final.entries.length;
     counts.pending += final.entries.filter((entry) => entry.state === 'pending').length;
     counts.remaining = final.entries.filter((entry) => entry.state === 'bad').length;

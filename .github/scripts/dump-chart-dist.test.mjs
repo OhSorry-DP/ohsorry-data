@@ -107,6 +107,7 @@ function recoveryDeps({ values = { 'user/A1.json': '{"user":null}' }, listError,
     list: async (prefix) => { calls.push(['list', prefix]); if (listError) throw listError; return Object.keys(values); },
     getText: async (key) => { calls.push(['get', key]); if (readError) throw readError; return values[key] ?? null; },
     now: () => clock.value,
+    pool: async (items, n, fn) => { calls.push(['pool', n, items.length]); for (const [i, item] of items.entries()) await fn(item, i); },
     sleep: async (ms) => { calls.push(['sleep', ms]); clock.value += ms; },
     fetch: fetchFn ?? (async (...args) => { calls.push(['fetch', ...args]); return { status: 204, ok: true }; }),
     env: { GITHUB_REPOSITORY: 'owner/repo', GITHUB_TOKEN: 'token' },
@@ -122,6 +123,7 @@ test('복구 점검은 정상 user를 후보에서 제외한다', async () => {
   assert.equal(out.anomalies, 1);
   assert.equal(fetches, 2); // POST plus new-run polling; the healthy user was not dispatched.
   assert.equal(d.calls.filter(([kind]) => kind === 'list').length, 2);
+  assert.deepEqual(d.calls.filter(([kind]) => kind === 'pool').map(([, n]) => n), [8, 8]);
 });
 
 test('최초 점검의 JSON, R2 읽기 및 목록 오류는 POST를 막는다', async () => {
@@ -151,10 +153,76 @@ test('204 dispatch 뒤 신규 run과 두 정숙 조회 후 R2 상태로 복구 �
   assert.equal(calls[0].init.method, 'POST');
   assert.deepEqual(JSON.parse(calls[0].init.body), { event_type: 'dump-user', client_payload: { iidx_id: 'A1' } });
   assert.equal(calls[0].init.headers.Authorization, 'Bearer token');
+  assert.equal(calls[0].init.headers['Content-Type'], 'application/json');
   assert.equal(calls[1].url, 'https://api.github.com/repos/owner/repo/actions/workflows/dump-user.yml/runs?event=repository_dispatch&created=%3E%3D2026-01-01T00%3A00%3A00.000Z&per_page=100&page=1');
   assert.match(calls[2].url, /status=queued/);
   assert.match(calls[3].url, /status=in_progress/);
   assert.equal(calls.length, 4);
+  assert.equal(calls[1].init?.headers?.['Content-Type'], undefined);
+});
+
+test('복구 경계와 정렬, quiet 대기, 페이지 넘김 및 20분 제한', async () => {
+  const base = Date.parse('2026-01-01T00:00:00.000Z');
+  const skeleton = (v) => JSON.stringify({ _v: v, user: null, radars: null, osPattern: null, persona: null, spPersona: null, reachNps: null, fastGeneration: '1' });
+  const runSingle = async (raw) => {
+    const d = recoveryDeps({ values: { 'user/A1.json': raw }, clock: { value: base } });
+    const out = await runUserRecovery(d);
+    return { out, posts: d.calls.filter(([kind]) => kind === 'fetch').filter(([, , init]) => init.method === 'POST').length };
+  };
+  assert.equal((await runSingle(skeleton(new Date(base - 2 * 60 * 60 * 1000).toISOString()))).posts, 1);
+  assert.equal((await runSingle(skeleton(new Date(base - 2 * 60 * 60 * 1000 + 1).toISOString()))).posts, 0);
+  assert.equal((await runSingle(skeleton(new Date(base + 1000).toISOString()))).posts, 1);
+  assert.equal((await runSingle(skeleton('bad'))).posts, 1);
+  assert.equal((await runSingle(JSON.stringify({ _v: new Date(base).toISOString(), user: null }))).posts, 1);
+
+  const values = {
+    'user/A1.json': '{"user":null}', 'user/B2.json': skeleton('2025-12-30T00:00:00.000Z'),
+    'user/C3.json': skeleton('2025-12-31T00:00:00.000Z'), 'user/D4.json': skeleton('2025-12-31T00:00:00.000Z'),
+  };
+  const posted = [];
+  const d = recoveryDeps({ values, clock: { value: base + 3 * 60 * 60 * 1000 }, pool: async (items, n, fn) => { for (const [i, item] of items.entries()) await fn(item, i); }, fetch: async (url, init) => { if (init.method === 'POST') { posted.push(JSON.parse(init.body).client_payload.iidx_id); return { status: 204, ok: true }; } return { status: 200, ok: true, json: async () => ({ workflow_runs: new URL(url).searchParams.has('created') ? [{}] : [] }) }; } });
+  const limited = await runUserRecovery(d);
+  assert.deepEqual(posted, ['A1', 'B2', 'C3']);
+  assert.equal(limited.unprocessed, 1);
+  assert.equal(limited.failed, true);
+
+  for (const status of ['queued', 'in_progress']) {
+    let clock = base;
+    const waits = [];
+    let createdChecks = 0;
+    const quiet = recoveryDeps({ values: { 'user/A1.json': '{"user":null}' }, clock: { get value() { return clock; }, set value(v) { clock = v; } }, fetch: async (url, init) => {
+      if (init.method === 'POST') return { status: 204, ok: true };
+      const q = new URL(url).searchParams;
+      if (q.has('created')) { createdChecks++; return { status: 200, ok: true, json: async () => ({ workflow_runs: [{}] }) }; }
+      return { status: 200, ok: true, json: async () => ({ workflow_runs: q.get('status') === status && createdChecks === 1 ? [{}] : [] }) };
+    } });
+    quiet.sleep = async (ms) => { waits.push(ms); clock += ms; };
+    await runUserRecovery(quiet);
+    assert.deepEqual(waits, [15000]);
+  }
+
+  let pageCalls = [];
+  const pageD = recoveryDeps({ values: { 'user/A1.json': '{"user":null}' }, fetch: async (url, init) => {
+    if (init.method === 'POST') return { status: 204, ok: true };
+    const q = new URL(url).searchParams;
+    if (q.has('created')) { pageCalls.push(q.get('page')); return { status: 200, ok: true, json: async () => ({ workflow_runs: q.get('page') === '1' ? Array(100).fill({}) : [] }) }; }
+    return { status: 200, ok: true, json: async () => ({ workflow_runs: [] }) };
+  } });
+  await runUserRecovery(pageD);
+  assert.deepEqual(pageCalls, ['1', '2']);
+
+  let clock = base, posts = 0, listsAtEnd = 0;
+  const timeoutD = recoveryDeps({ values: { 'user/A1.json': '{"user":null}' }, clock: { get value() { return clock; }, set value(v) { clock = v; } }, fetch: async (url, init) => {
+    if (init.method === 'POST') { posts++; return { status: 204, ok: true }; }
+    return { status: 200, ok: true, json: async () => ({ workflow_runs: [] }) };
+  } });
+  const originalList = timeoutD.list;
+  timeoutD.list = async (...args) => { listsAtEnd++; return originalList(...args); };
+  const timeout = await runUserRecovery(timeoutD);
+  assert.equal(clock, base + 20 * 60 * 1000);
+  assert.equal(timeout.failures.some((f) => f.stage === 'workflow-wait'), true);
+  assert.equal(posts, 1);
+  assert.equal(listsAtEnd, 2);
 });
 
 test('dispatch 오류는 재시도하지 않고 중단 후 전수 재점검한다', async () => {
