@@ -124,6 +124,15 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-11-16 — user.json 결손 매일 점검·순차 자동 복구
+
+- `dump-user` 가 조용히 반복 실패하면 user.json 의 `user` 가 비어도 아무도 몰랐다. 한 유저는 2주 동안 57회 실패했다. [dump-chart-dist.yml](.github/workflows/dump-chart-dist.yml)에 예약 실행 전용 job `check_user_recovery` 를 추가했다. 조건은 `needs: [dump]`, `if: !cancelled() && schedule` 이고, 권한은 이 job 에만 `contents: write`·`actions: read`, 제한 시간은 75분이다. 이 job 은 분포 게시가 끝난 뒤에 돌고, 앞 job 이 실패해도 돈다. 수동 실행에서는 돌지 않는다.
+- [dump-chart-dist.mjs](.github/scripts/dump-chart-dist.mjs)에 `--check-user-recovery` 모드(`runUserRecovery`)를 추가했다. 기존 분포 실행은 바뀌지 않았다.
+  - **판정**: R2 `user/` 전체를 8개씩 병렬로 읽는다. `user` 가 비배열 객체가 아니면 이상이다. 다만 Edge 골격(`isEdgeSkeletonUser`) 중 엄격한 ISO `_v` 가 0 이상 2시간 미만 전인 것은 유예한다. 깨진 JSON, 목록에 있는데 404, R2 오류는 검사 오류로 보고 디스패치하지 않은 채 실패한다.
+  - **복구**: 한 번 실행에 최대 3명까지 순서대로 처리한다. 순서는 `_v` 없음, 오래된 `_v`, ID 순이다. 디스패치 직전에 다시 확인하고 `dump-user` 를 디스패치한다(204 만 성공, 재시도 없음). 이어서 `created>=T` 인 새 런이 보일 때까지, 그다음 `dump-user` 의 queued·in_progress 가 모두 0이 될 때까지 15초 간격으로 기다리고, R2 를 다시 확인한다. 유저당 20분, 요청당 30초가 상한이다. 성공은 런 결과가 아니라 R2 의 `user` 객체로 판정한다. 동시 디스패치로 users-list 병합이 서로 덮이는 경합을 피하려고 순차로 처리한다.
+  - **종료**: 마지막에 전체를 다시 점검한다. 검사 오류, 디스패치·대기 오류, 복구 실패, 상한을 넘겨 처리 못 한 유저, 최종 잔존이 하나라도 있으면 `::error::` 를 남기고 실패한다.
+- 검증: `dump-chart-dist` 와 워크플로 시험 36건이 모두 통과했다. 변이는 유예 경계, 미래 `_v`, 3회 상한, 정숙 조건, 새 런 확인, 페이지 넘김, R2 재확인, 잔존 실패, 디스패치 직전 재확인, dump job 에 잘못 넣은 명령까지 전부 검출했다. 실제 R2 로 로컬 실행하니 532명을 두 번 점검해 이상 0명이었고 86초가 걸렸다.
+
 ### 2026-11-16 — 신규 유저 Edge 골격 user.json 공식 덤프 통과
 
 - 첫 업로드 때 Edge 빠른 덤프(`supabase/functions/_shared/dump-fast-worker.ts`)가 만드는 골격 user.json(`user`·`radars`·`osPattern`·`persona`·`spPersona`·`reachNps` 가 null, `fastGeneration` 있음)을 Actions `dump-user` 공식 경로의 `readPreviousDump` 가 「이전 공식 user 덤프 형식 오류」로 거부했다. 그래서 `이전 공식 덤프 상태 모름` 으로 매번 실패했고, 해당 유저의 이름·단위·★·r★·persona 가 영구히 비었다. 11월 실패 로그 기준 영향 유저는 5명이다.
