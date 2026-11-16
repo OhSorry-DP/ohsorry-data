@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildDist, distKey, noteCountFor, run, runUserRecovery, serializeDist } from './dump-chart-dist.mjs';
 import { md5 } from './r2-client.mjs';
+import { readFileSync } from 'node:fs';
 
 function 기초자료() {
   const songsById = new Map([[10, { textage_song_id: 'tx' }]]);
@@ -43,6 +44,40 @@ test('분포 집계의 제외와 중복 및 반올림 규칙', () => {
   const out = buildDist({ users, rStarById: new Map([['A1', 4.567]]), ...d });
   assert.deepEqual(out.get('dist/dp/10-2.json'), [[4.57, 0.515], [null, 0.5]]);
   assert.deepEqual(out.get('dist/sp/10-2.json'), [[null, 0.5]]);
+});
+
+test('scheduled recovery job is independent and uses required permissions and environment', () => {
+  const workflow = readFileSync(new URL('../workflows/dump-chart-dist.yml', import.meta.url), 'utf8');
+  const recovery = workflow.split('  check_user_recovery:\n')[1];
+  assert.ok(recovery);
+  assert.match(recovery, /^    needs: \[dump\]\n    if: \$\{\{ !cancelled\(\) && github\.event_name == 'schedule' \}\}\n/m);
+  assert.match(recovery, /    permissions:\n      contents: write\n      actions: read\n/);
+  assert.match(recovery, /    timeout-minutes: 75\n/);
+  assert.match(recovery, /CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}/);
+  assert.match(recovery, /CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41/);
+  assert.match(recovery, /GITHUB_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
+  assert.match(recovery, /node \.github\/scripts\/dump-chart-dist\.mjs --check-user-recovery/);
+});
+
+test('recovery condition admits failed predecessors and schedule reruns only', () => {
+  const applies = ({ cancelled, eventName }) => !cancelled && eventName === 'schedule';
+  assert.equal(applies({ cancelled: false, eventName: 'schedule' }), true);
+  assert.equal(applies({ cancelled: true, eventName: 'schedule' }), false);
+  assert.equal(applies({ cancelled: false, eventName: 'workflow_dispatch' }), false);
+});
+
+test('existing distribution configuration and step order are preserved', () => {
+  const workflow = readFileSync(new URL('../workflows/dump-chart-dist.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /  schedule:\n    - cron: '35 18 \* \* \*'/);
+  assert.match(workflow, /  workflow_dispatch:\n    inputs:/);
+  assert.match(workflow, /concurrency: \{ group: dump-chart-dist, cancel-in-progress: false \}/);
+  assert.match(workflow, /permissions: \{ contents: read \}/);
+  const dump = workflow.split('  dump:\n')[1].split('  check_user_recovery:\n')[0];
+  assert.doesNotMatch(dump, /--check-user-recovery/);
+  assert.ok(dump.indexOf('id: distribution') < dump.indexOf('id: sp_clear_map'));
+  assert.ok(dump.indexOf('id: sp_clear_map') < dump.indexOf('name: Summarize chart distribution and SP clear map'));
+  assert.match(dump, /CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}/);
+  assert.match(dump, /CLOUDFLARE_ACCOUNT_ID: 607eea1b073bea6747e6e9b76f2d7b41/);
 });
 test('표본 입력 순서가 달라도 같은 JSON', () => {
   const a = [[2, 0.7], [1, 0.7], [null, 0.8]];
