@@ -13,6 +13,13 @@ function generationOf(value) {
   try { return BigInt(value); } catch { return null; }
 }
 
+/** Identify the minimal user skeleton written by the Edge fast dump. */
+export function isEdgeSkeletonUser(value) {
+  return object(value)
+    && SLOW_FIELDS.filter((field) => field !== '_v').every((field) => own(value, field) && value[field] === null)
+    && own(value, 'fastGeneration') && generationOf(value.fastGeneration) !== null;
+}
+
 function copyFields(target, source, fields) {
   for (const field of fields) if (own(source, field)) target[field] = source[field];
   return target;

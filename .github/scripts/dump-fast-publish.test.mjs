@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
-import { mergeActionsUser, mergeEdgeUser, mergeSlowUser, publishBest, publishUserPatch, runCli } from './dump-fast-publish.mjs';
+import { mergeActionsUser, mergeEdgeUser, mergeSlowUser, publishBest, publishUserPatch, runCli, isEdgeSkeletonUser } from './dump-fast-publish.mjs';
 import { HIST_LEASE_MS, histGuardEnabled, acquireHistLease, assertHistLease, releaseHistLease,
   publishHistWithLease, mergeHistUser, mergeHistPending } from './dump-fast-publish.mjs';
 import { replayScoreBuffer } from './score-history.mjs';
@@ -11,6 +11,25 @@ import { replayScoreBuffer } from './score-history.mjs';
 const fast = (generation, value = 1) => ({ dp: [value], sp: [value], dpRecent: [], spRecent: [], fastGeneration: String(generation) });
 const origin = (generation = '1') => ({ _v: 'old', user: { iidx_id: 'u1', old: true }, ...fast(generation), unknown: { keep: true } });
 const patch = (generation = '2', value = 2) => fast(generation, value);
+
+test('Edge skeleton detection requires every owned null slow field and a valid generation', () => {
+  const skeleton = { _v: 1, user: null, radars: null, osPattern: null, persona: null, spPersona: null,
+    reachNps: null, fastGeneration: '1', dp: null, extra: true };
+  assert.equal(isEdgeSkeletonUser(skeleton), true);
+  assert.equal(isEdgeSkeletonUser({ ...skeleton, user: {} }), false);
+  assert.equal(isEdgeSkeletonUser({ ...skeleton, persona: {} }), false);
+  const missingSlow = { ...skeleton }; delete missingSlow.reachNps;
+  assert.equal(isEdgeSkeletonUser(missingSlow), false);
+  for (const generation of [undefined, '0', 'abc']) {
+    const invalid = { ...skeleton }; if (generation === undefined) delete invalid.fastGeneration;
+    else invalid.fastGeneration = generation;
+    assert.equal(isEdgeSkeletonUser(invalid), false);
+  }
+  assert.equal(isEdgeSkeletonUser(null), false);
+  assert.equal(isEdgeSkeletonUser([]), false);
+  const inherited = Object.create(skeleton); delete inherited.user;
+  assert.equal(isEdgeSkeletonUser(inherited), false);
+});
 
 function histStore(initial = {}) {
   const objects = new Map(Object.entries(initial));

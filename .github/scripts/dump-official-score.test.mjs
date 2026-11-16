@@ -54,7 +54,7 @@ async function fixture(options, fn) {
   const aliasesBytes = Buffer.from(JSON.stringify(emptyAliases), 'utf8');
   const objects = new Map([['hist/' + id + '.json', Buffer.from(JSON.stringify(options.oldRows ?? [h34]))],
     ['songs.json', Buffer.from(JSON.stringify(songs))], ['meta/song-aliases.json', aliasesBytes]]);
-  if (!options.newUser) objects.set('user/' + id + '.json', Buffer.from(JSON.stringify(previous)));
+  if (!options.newUser) objects.set('user/' + id + '.json', Buffer.from(JSON.stringify(options.previous ?? previous)));
   let histReads = 0;
   const r2 = {
     async read(key) {
@@ -91,7 +91,7 @@ async function fixture(options, fn) {
   globalThis.fetch = async (url, init = {}) => {
     calls.push([String(url), init]);
     if (url.includes('/scores?')) return response(restRows);
-    if (url.includes('/users?')) return response([{ iidx_id: id, star: 2, plays: ['keep'] }]);
+    if (url.includes('/users?')) return response([options.dbUser ?? { iidx_id: id, star: 2, plays: ['keep'] }]);
     if (url.includes('/user_radars?') || url.includes('/user_ohsorry_radars?') || url.includes('/chart_arrange?')) return response([]);
     if (url.includes('make_grid_data')) {
       if (options.spFailure && JSON.parse(init.body).p_play_style === 0) return { ok: false, status: 500 };
@@ -236,6 +236,21 @@ test('deferred persona calculates official values with R2 priority, new-user see
   await fixture({ newUser: true, rows: [], oldRows: [] }, async ({ run }) => {
     const result = await run(); assert.equal(result.user.sp_r_star, null); assert.equal(result.persona, null);
   });
+  const skeleton = { user: null, radars: null, osPattern: null, persona: null, spPersona: null, reachNps: null,
+    fastGeneration: '1' };
+  await fixture({ previous: skeleton, rows: [], oldRows: [], dbUser: { iidx_id: id, star: 73, plays: ['seed'] } }, async ({ run }) => {
+    const result = await run();
+    assert.equal(result.user.star, 73);
+    assert.deepEqual(result.user.plays, ['seed']);
+    assert.equal(result.persona, null);
+  });
+  await fixture({ previous: skeleton, rows: [], oldRows: [] }, async ({ run, objects }) => {
+    objects.delete('hist/' + id + '.json');
+    await assert.rejects(run(), /missing hist for existing or unknown user/);
+  });
+  for (const invalid of [{ user: null }, { ...skeleton, fastGeneration: undefined }]) {
+    await fixture({ previous: invalid }, async ({ run }) => { await assert.rejects(run(), /상태 모름/); });
+  }
   await fixture({ unknown: true }, async ({ run }) => { await assert.rejects(run(), /상태 모름/); });
   await fixture({ resourceError: true }, async ({ run }) => { await assert.rejects(run(), /official resource failure/); });
   await fixture({ recentError: true }, async ({ run }) => {

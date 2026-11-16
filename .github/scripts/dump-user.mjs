@@ -10,7 +10,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
 import { getText } from './r2-client.mjs';
 import { s3R2Client, conditionalR2Client } from './r2-client.mjs';
-import { histGuardEnabled, publishHistWithLease, acquireHistLease, assertHistLease, releaseHistLease, mergeHistUser, mergeHistPending, mergeSlowUser, publishBest } from './dump-fast-publish.mjs';
+import { histGuardEnabled, publishHistWithLease, acquireHistLease, assertHistLease, releaseHistLease, mergeHistUser, mergeHistPending, mergeSlowUser, publishBest, isEdgeSkeletonUser } from './dump-fast-publish.mjs';
 import { buildCandidate } from './score-buffer.mjs';
 import { replayScoreBuffer } from './score-history.mjs';
 import { normalizeAliasInputs } from './song-aliases.mjs';
@@ -80,6 +80,11 @@ async function readPreviousDump(id, r2, official = false) {
     }
     try {
       const prev = JSON.parse(text);
+      if (official && isEdgeSkeletonUser(prev)) {
+        logTiming('beforePreviousDumpLog', cliStarted);
+        console.log(`이전 덤프 = Edge 골격(신규 유저, ${id})`);
+        return { prevOk: true, prev };
+      }
       if (official && (!prev || typeof prev !== 'object' || Array.isArray(prev)
         || !prev.user || typeof prev.user !== 'object' || Array.isArray(prev.user))) {
         throw new Error('이전 공식 user 덤프 형식 오류');
@@ -147,7 +152,7 @@ export async function dumpUser(id, personaRes, opts = {}) {
     inputs = historyInputs(id, prepared.histRows, prepared.songs, dpArrange, personaRes);
     const officialStarted = performance.now();
     const official = calculateOfficialScores({ id, inputs, R: personaRes,
-      previousUser: prev ? prev.user : user[0], previousOsPattern: prev ? prev.osPattern : osPattern });
+      previousUser: prev && !isEdgeSkeletonUser(prev) ? prev.user : user[0], previousOsPattern: prev ? prev.osPattern : osPattern });
     logTiming('calculateOfficialScores', officialStarted);
     if (user[0]) user = [{ ...user[0], ...official.userFields }];
     osPattern = official.osPattern;
