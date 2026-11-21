@@ -124,6 +124,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-11-21 — persona 배치 16축 저장
+
+- `personaFor` 반환에 `layoutProfile` 배치 16축을 `{key,label,mean,n}` 으로 저장한다. 표본 미달 축은 null 이며 CN 6축은 제외한다.
+- 코치 `getSkillProfile` 의 배치 프로파일은 persona job 저장값을 사용하고, 아직 생성되지 않은 경우 `missing/not_generated` 로 표시한다.
+- 검증: `persona-arrange` 16/16 통과, 조각별 변이 검출 확인. 커밋 `1ed7f5973` 은 로컬 미push 상태다.
+- 남은 것: 배치 16축을 자연 갱신으로 채울지 `repersona-r2` 전체 실행(약 512명)으로 채울지 결정. 상세는 [페이즈 문서](../docs/phases/phase-coach-skill-profile-20261121/README.md) 참고.
+
 ### 2026-11-16 — user.json 결손 매일 점검·순차 자동 복구
 
 - `dump-user` 가 조용히 반복 실패하면 user.json 의 `user` 가 비어도 아무도 몰랐다. 한 유저는 2주 동안 57회 실패했다. [dump-chart-dist.yml](.github/workflows/dump-chart-dist.yml)에 예약 실행 전용 job `check_user_recovery` 를 추가했다. 조건은 `needs: [dump]`, `if: !cancelled() && schedule` 이고, 권한은 이 job 에만 `contents: write`·`actions: read`, 제한 시간은 75분이다. 이 job 은 분포 게시가 끝난 뒤에 돌고, 앞 job 이 실패해도 돈다. 수동 실행에서는 돌지 않는다.
