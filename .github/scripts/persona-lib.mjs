@@ -738,5 +738,9 @@ export function personaFor(allCharts, R, userRow = null) {
   return {
     head: rich.head, oneLiner: P.oneLiner, prose: P.prose, report: rich.report,
     tags: P.tags, rel: personaRelOf(P), nCharts: allCharts.length, _v: new Date().toISOString(), i18n,
+    layoutProfile: LAYOUT_DEFS.slice(0, 16).map((def) => {
+      const existing = layoutProfile?.find((item) => item.key === def.key);
+      return { key: def.key, label: def.label, mean: existing?.mean ?? null, n: existing?.n ?? null };
+    }),
   };
 }

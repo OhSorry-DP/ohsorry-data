@@ -143,7 +143,7 @@ test('랜덤 제외는 weakness의 entries에 맡기고 nCharts·MAX- 통계는 
   assert.equal(calls.profiles[0].nCharts, 30);
   assert.deepEqual(calls.profiles[0].maxMinusStats, { share: 1 / 3, tot: 30 });
   assert.equal(calls.profiles[0].overallResid, 0.5);
-  assert.deepEqual(Object.keys(result), ['head', 'oneLiner', 'prose', 'report', 'tags', 'rel', 'nCharts', '_v', 'i18n']);
+  assert.deepEqual(Object.keys(result), ['head', 'oneLiner', 'prose', 'report', 'tags', 'rel', 'nCharts', '_v', 'i18n', 'layoutProfile']);
 });
 
 test('reachNps는 배치 유무와 랜덤값에 무관하게 전체 차트를 전달한다', () => {
@@ -219,4 +219,72 @@ test('DP persona remains null below 30 charts', () => {
   const { rows, meta } = fixture();
   const { R } = relResources({ NOTES: 1 });
   assert.equal(personaFor(chartsFromGridRows(rows.slice(0, 29), meta), R), null);
+});
+
+test('layout 16 axes mapping', () => {
+  const { rows, meta } = fixture();
+  const { R, calls } = resources({ NOTES: 0.25, __entries: rows.map((r) => ({ chartId: `${r.textage_song_id}|DP_ANO`, residual: 1 })) });
+  for (const r of rows) R.featScores[r.textage_song_id] = { DP_ANO: { HANDS_LHAND: 80 } };
+  const result = personaFor(chartsFromGridRows(rows, meta), R);
+  assert.equal(result.layoutProfile.length, 16);
+  assert.deepEqual(result.layoutProfile.map(({ key }) => key), [
+    'HSTAIR_ONEHAND', 'HSTAIR_SYNC', 'HSTAIR_SYM', 'HSTAIR_ASYM', 'SPIRAL_UP', 'SPIRAL_DN',
+    'HANDS_LHAND', 'HANDS_RHAND', 'HANDS_SAME', 'HANDS_DIFF', 'HANDS_CROSS', 'HANDS_INDEP',
+    'HANDS_ROLE', 'JUMP_WIDE', 'PHRASE_LOOP_FAST', 'PEAK_CHORD_SIZE',
+  ]);
+  assert.equal(result.layoutProfile[6].label,
+    calls.profiles[0].layoutProfile.find(({ key }) => key === 'HANDS_LHAND').label);
+  assert.deepEqual(result.layoutProfile.map(({ key }) => key), [
+    'HSTAIR_ONEHAND', 'HSTAIR_SYNC', 'HSTAIR_SYM', 'HSTAIR_ASYM', 'SPIRAL_UP', 'SPIRAL_DN',
+    'HANDS_LHAND', 'HANDS_RHAND', 'HANDS_SAME', 'HANDS_DIFF', 'HANDS_CROSS', 'HANDS_INDEP',
+    'HANDS_ROLE', 'JUMP_WIDE', 'PHRASE_LOOP_FAST', 'PEAK_CHORD_SIZE',
+  ]);
+});
+
+test('layout ready values', () => {
+  const { rows, meta } = fixture();
+  const entries = rows.map((r) => ({ chartId: `${r.textage_song_id}|DP_ANO`, residual: 1 }));
+  const { R, calls } = resources({ NOTES: 0.25, __entries: entries });
+  for (const r of rows) R.featScores[r.textage_song_id] = { DP_ANO: { HANDS_LHAND: 80 } };
+  const result = personaFor(chartsFromGridRows(rows, meta), R);
+  const item = result.layoutProfile.find((axis) => axis.key === 'HANDS_LHAND');
+  const expected = calls.profiles[0].layoutProfile.find((axis) => axis.key === 'HANDS_LHAND');
+  assert.equal(item.mean, expected.mean);
+  assert.equal(item.n, expected.n);
+  assert.equal(item.mean, 0);
+  assert.equal(item.n, 30);
+});
+
+test('layout nine versus ten', () => {
+  const { rows, meta } = fixture();
+  const makeResult = (readyCount) => {
+    const entries = rows.slice(0, readyCount).map((r) => ({ chartId: `${r.textage_song_id}|DP_ANO`, residual: 1 }));
+    const { R } = resources({ NOTES: 0.25, __entries: entries });
+    for (const r of rows) R.featScores[r.textage_song_id] = { DP_ANO: { HANDS_LHAND: 80 } };
+    return personaFor(chartsFromGridRows(rows, meta), R).layoutProfile.find((axis) => axis.key === 'HANDS_LHAND');
+  };
+  const nine = makeResult(9), ten = makeResult(10);
+  assert.equal(nine.n, null);
+  assert.equal(typeof ten.mean, 'number');
+  assert.equal(ten.n, 10);
+});
+
+test('layout excludes CN', () => {
+  const { rows, meta } = fixture();
+  const { R } = resources();
+  const result = personaFor(chartsFromGridRows(rows, meta), R);
+  assert.equal(result.layoutProfile.some((axis) => axis.key.startsWith('CN_')), false);
+});
+
+test('persona existing fields unchanged', () => {
+  const { rows, meta } = fixture();
+  const { R, calls } = resources();
+  const result = personaFor(chartsFromGridRows(rows, meta), R);
+  const { head, oneLiner, prose, report, tags, rel, nCharts, _v, i18n } = result;
+  assert.deepEqual({ head, oneLiner, prose, report, tags, rel, nCharts, _v, i18n }, {
+    head: 'ko', oneLiner: '요약', prose: '본문', report: JSON.stringify(calls.profiles[0]), tags: ['태그'],
+    rel: { NOTES: null, CHORD: null, PEAK: null, CHARGE: null, SCRATCH: null, 'SOF-LAN': null,
+      PHRASE: null, JACK: null, TRILL: null, RAND: null }, nCharts: 30, _v,
+    i18n: { ja: { head: 'ja', report: JSON.stringify(calls.profiles[1]) }, en: { head: 'en', report: JSON.stringify(calls.profiles[2]) } },
+  });
 });
