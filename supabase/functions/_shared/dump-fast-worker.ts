@@ -233,7 +233,7 @@ async function runHistDump<Row>({ id, G, since, deps }: {
     const patch = Object.fromEntries(FAST_FIELDS.map(field => [field, published.prepared.fastPatch[field]]));
     patch.fastGeneration = G; patch.histRevision = published.histRevision;
     // Slow fields have no computed value yet on a first upload; Actions supplies them.
-    const merged = mergeHistUser(current ?? { _v: since, user: null, radars: null, osPattern: null, persona: null, spPersona: null, reachNps: null }, patch, G, published.histRevision);
+    const merged = mergeHistUser(current ?? { _v: since, user: null, radars: null, osPattern: null, persona: null, spPersona: null, reachNps: null, spReachNps: null }, patch, G, published.histRevision);
     if (!merged.ok) return merged;
     await verify();
     if (merged.changed) {
