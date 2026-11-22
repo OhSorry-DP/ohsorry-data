@@ -110,6 +110,7 @@ export async function runCoachOnly({ ids, options, producer = './coach-precomput
 const OFFICIAL_USER_FIELDS = ['star', 'native_star', 'r_star', 'sp_cpi', 'sp_star', 'sp_r_star', 'sp_r_star_model_id', 'sp_r_star_formula_version'];
 const officialSnapshot = (data) => JSON.stringify([
   data.persona, data.spPersona, [Object.hasOwn(data, 'reachNps'), data.reachNps],
+  [Object.hasOwn(data, 'spReachNps'), data.spReachNps],
   ...OFFICIAL_USER_FIELDS.map(field => [Object.hasOwn(data.user || {}, field), data.user?.[field]]),
   [Object.hasOwn(data, 'osPattern'), data.osPattern],
 ]);
@@ -130,18 +131,19 @@ export async function updateSinglePersona(id, { client, calculate, official = fa
       if (!Array.isArray(histRows)) throw new TypeError(`R2 hist must be an array: ${id}`);
       mergeScoreHistory(histRows, []);
     }
-    const before = official ? officialSnapshot(data) : JSON.stringify([data.persona, data.spPersona]);
+    const before = official ? officialSnapshot(data) : JSON.stringify([data.persona, data.spPersona, [Object.hasOwn(data, 'spReachNps'), data.spReachNps]]);
     const fields = official ? await calculate(data, { histRows }) : await calculate(data);
     // Null/failed calculations preserve the previous persona, as dumpUser does.
     if (fields.persona != null) data.persona = fields.persona;
     if (fields.spPersona != null) data.spPersona = fields.spPersona;
+    if (fields.spReachNps !== undefined) data.spReachNps = fields.spReachNps;
     if (official) {
       if (fields.reachNps !== undefined) data.reachNps = fields.reachNps;
       data.user = { ...data.user };
       for (const field of OFFICIAL_USER_FIELDS) if (Object.hasOwn(fields.userFields || {}, field)) data.user[field] = fields.userFields[field];
       if (fields.osPattern !== undefined) data.osPattern = fields.osPattern;
     }
-    const after = official ? officialSnapshot(data) : JSON.stringify([data.persona, data.spPersona]);
+    const after = official ? officialSnapshot(data) : JSON.stringify([data.persona, data.spPersona, [Object.hasOwn(data, 'spReachNps'), data.spReachNps]]);
     if (after === before) return dry ? { dry: true, changed: false } : { unchanged: true };
     if (dry) return { dry: true, changed: true };
     try {
@@ -166,20 +168,25 @@ export function personaFields(data, R, songById, arrange, engine, dpCharts) {
     return song ? { ...row, title: song.title, textage_song_id: song.textage_song_id } : null;
   }).filter(Boolean);
   dpCharts ??= engine.chartsFromGridRows(engine.attachArrange(rowsOf(data.dp), arrange), R.textageMeta);
+  const spCharts = engine.spChartsFromGridRows(rowsOf(data.sp), R.textageMeta);
+  const spNps = typeof engine.spReachNpsFor === 'function' ? engine.spReachNpsFor(spCharts, R) : null;
   return {
     persona: engine.personaFor(dpCharts, R, data.user),
-    spPersona: engine.spPersonaFor(engine.spChartsFromGridRows(rowsOf(data.sp), R.textageMeta), R),
+    spPersona: engine.spPersonaFor(spCharts, R),
+    ...(spNps?.ok ? { spReachNps: spNps.value } : {}),
   };
 }
 
 export function historyPersonaFields(id, data, histRows, songs, arrange, R, engine) {
-  const { historyInputs, personaFor, spPersonaFor, reachNpsFor } = engine;
+  const { historyInputs, personaFor, spPersonaFor, reachNpsFor, spReachNpsFor } = engine;
   const inputs = historyInputs(id, histRows, songs, arrange, R);
   const official = calculateOfficialScores({ id, inputs, R, previousUser: data.user, previousOsPattern: data.osPattern });
   const user = { ...data.user, ...official.userFields };
+  const spNps = typeof spReachNpsFor === 'function' ? spReachNpsFor(inputs.spCharts, R) : null;
   return {
     persona: personaFor(inputs.dpCharts, R, user),
     spPersona: spPersonaFor(inputs.spCharts, R),
+    ...(spNps?.ok ? { spReachNps: spNps.value } : {}),
     reachNps: reachNpsFor(inputs.dpCharts, R),
     userFields: official.userFields,
     osPattern: official.osPattern,
@@ -278,7 +285,7 @@ export async function main(args = process.argv.slice(2), deps = {}) {
     if (failed.length) process.exitCode = 1;
     return results;
   }
-  const { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } = await import('./persona-lib.mjs');
+  const { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor, spReachNpsFor } = await import('./persona-lib.mjs');
   const { fetchDpArrangeByUser } = await import('./dp-arrange.mjs');
   // 자격 누락/조회 실패/불완전한 페이지는 R2 작업 전에 중단한다. 배치 없음으로 대체하지 않는다.
   const arrangeByUser = await fetchDpArrangeByUser();
@@ -432,17 +439,19 @@ export async function main(args = process.argv.slice(2), deps = {}) {
     let data;
     try { data = JSON.parse(text); } catch (e) { fail++; console.error('파싱 실패', id, e.message); return; }
     // 🔴 비교 대상에 reachNps 를 꼭 넣는다 — 빼면 persona 가 같은 유저는 도달 NPS 가 새로 생겨도 PUT 이 생략된다.
-    const snap = () => JSON.stringify([data.persona, data.spPersona, data.reachNps ?? null]);
+    const snap = () => JSON.stringify([data.persona, data.spPersona, [Object.hasOwn(data, 'reachNps'), data.reachNps], [Object.hasOwn(data, 'spReachNps'), data.spReachNps]]);
     const before = snap();
     try {
       const dpCharts = chartsFromGridRows(attachArrange(rowsOf(data.dp), arrangeByUser.get(String(id)) || []), R.textageMeta);
       const fields = personaFields(data, R, songById, arrangeByUser.get(String(id)) || [],
-        { attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor }, dpCharts);
+        { attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, spReachNpsFor }, dpCharts);
       data.persona = fields.persona;
       if (data.persona) dpOk++;
       // 도달 NPS — dump-user 와 같은 helper·같은 차트 배열로 재산출해 값을 일치시킨다(nps-reach.md §8.1).
       data.reachNps = reachNpsFor(dpCharts, R);
       data.spPersona = fields.spPersona;
+      const spNps = spReachNpsFor(spChartsFromGridRows(rowsOf(data.sp), R.textageMeta), R);
+      if (spNps.ok) data.spReachNps = spNps.value;
       if (data.spPersona) spOk++;
     } catch (e) { fail++; console.error('persona 실패', id, e.message); return; }
     if (snap() === before) { same++; return; }   // 변화 없으면 PUT 생략
