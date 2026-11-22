@@ -5,7 +5,8 @@
 > ⚠️ **자동 생성 — 직접 편집 금지.** ohSorryAdmin `scripts/dump-data-repo.js` 가 supabase 에서 덤프.
 
 ## 구조
-- `user/{iidx_id}.json` — 유저별 데이터. `{ _v, user, radars, osPattern, persona, spPersona, reachNps, dp[], sp[] }` + RPC 성공 시 `dpRecent`·`spRecent`(최근 92일 갱신 이력).
+- `user/{iidx_id}.json` — 유저별 데이터. `{ _v, user, radars, osPattern, persona, spPersona, reachNps, spReachNps, dp[], sp[] }` + RPC 성공 시 `dpRecent`·`spRecent`(최근 92일 갱신 이력).
+  - `spReachNps` = SP 건반·스크 도달 NPS와 레벨 9-12 대역. 실패 시 이전 값을 보존한다. 구현·배포 대기: [공통 페이즈](../docs/phases/phase-sp-reach-nps-20261122/README.md).
   - dp/sp = **슬림 score row** `{ song_id, diff, lamp, ex_score, played_version, date, bp, note_count }` — 원본에 없는 필드는 생략한다. 곡메타(title/textage_song_id/series_no/ac/legen)는 중복 제거하고 아래 `songs.json` 으로 분리. 웹이 `song_id` 로 조인.
   - persona = **DP 성향 리포트** `{ head, oneLiner, prose, report, tags[], nCharts, _v, i18n }` — 웹훅 덤프 시 [persona-lib.mjs](.github/scripts/persona-lib.mjs) 가 gist 해석엔진(persona.js/calcWeakness.js)으로 즉시 생성. `i18n`은 ja/en의 head·report이며 `spPersona`도 같은 리포트 구조다. 표기용: head=헤드라인 한 줄, prose=서사 요약(X/OG 카드 ≤200자), report=상세 리포트 전문(🎯🎲⚡🛠✋📝). 생성 함수는 표본 30차트 미만이면 null을 반환하지만, 덤프는 null·생성 실패 시 R2 이전값을 보존한다. 이전 상태 조회까지 실패하면 덤프를 중단한다.
 - `hist/{iidx_id}.json` — **값·자연키 기준 복원용 점수 이력**(git 에 없음 · R2 전용). `scores` 전 행을 명시 필드 배열형으로 담지만 `score_id` 는 정렬에만 쓰고 저장하지 않아 DB 행을 식별자까지 무손실 복원할 수는 없다:
@@ -123,6 +124,10 @@ https://data.iidx.in/version.json
 > 오리진이 구본을 재캐시하고 최대 12h 고착된다 — 아래 변경 이력의 두 사고가 모두 이것이다.
 
 ## 변경 이력
+
+### 2026-11-23 — SP 도달 NPS (배포 대기)
+
+- `spReachNpsFor`와 덤프·백필에 SP 건반·스크 도달 NPS를 연결하고 실패 시 이전 값을 보존한다. SLOW 필드와 Edge 골격 null도 대응한다. 전체 테스트 735/735. 상세는 [공통 페이즈](../docs/phases/phase-sp-reach-nps-20261122/README.md).
 
 ### 2026-11-22 — user.json 에 동결된 users.plays 를 싣지 않음
 
