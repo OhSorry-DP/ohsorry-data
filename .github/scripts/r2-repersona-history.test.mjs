@@ -10,10 +10,11 @@ const late33 = [101, 3, 4, 1900, 33, '2026-10-22T01:02:03.123457+00:00', '2026-1
 const sp34 = [101, 3, 4, 1500, 34, '2026-10-21T01:02:03.123456+00:00', '2026-10-21', 0, 10, 1000];
 const song = { song_id: 101, title: 'TEST', textage_song_id: 'test', series_no: 34, ac: true, legen: false };
 const meta = { songs: { test: { title: 'TEST', notes: { DA: 1000, SA: 1000 }, levels: { DA: 12, SA: 12 } } } };
+const spReach = { keyboard: { avg: {}, peak: {}, meta: { avg: {}, peak: {} } }, scratch: { avg: {}, peak: {}, meta: { avg: {}, peak: {} } }, bands: {} };
 const baseData = () => ({ user: { iidx_id: id, dj_name: 'OLD', star: 1, native_star: 2, r_star: 3,
   sp_cpi: 4, sp_star: 5, sp_r_star: 6, sp_r_star_model_id: 'old', sp_r_star_formula_version: 1 },
   dp: [{ old: 'dp' }], sp: [{ old: 'sp' }], plays: 77, date: 'kept', persona: { p: 1 },
-  spPersona: { s: 1 }, reachNps: { n: 1 }, osPattern: [{ play_style: 1, notes: 1 }] });
+  spPersona: { s: 1 }, spReachNps: { old: true }, reachNps: { n: 1 }, osPattern: [{ play_style: 1, notes: 1 }] });
 
 function officialResources(capture = {}) {
   return { textageMeta: meta, ratingJson: { ratings: {}, rateStar: { scale: 1 }, spRateStar: {} },
@@ -34,7 +35,8 @@ function officialResources(capture = {}) {
     } } };
 }
 const historyEngine = (capture) => ({ historyInputs, personaFor(_charts, _R, user) { capture.personaUser = user; return { from: 'hist' }; },
-  spPersonaFor() { return { sp: 'hist' }; }, reachNpsFor(charts) { capture.reachCharts = charts; return { count: charts.length }; } });
+  spPersonaFor() { return { sp: 'hist' }; }, reachNpsFor(charts) { capture.reachCharts = charts; return { count: charts.length }; },
+  spReachNpsFor(charts) { capture.spReachCharts = charts; return capture.spReachFailure ? { ok: false } : { ok: true, value: spReach }; } });
 const officialFields = (R, capture, data = baseData(), rows = [h34, late33]) =>
   historyPersonaFields(id, data, rows, [song], [], R, historyEngine(capture));
 
@@ -390,4 +392,33 @@ test('hist guard covers default and official entry paths', async () => {
       engine: historyEngine({}), arrangeFor: async () => [], concurrency: 1, dry: true });
     assert.equal(dryR[0].dry, true); assert.equal(dryS3.state().puts, 0);
   } finally { if (old === undefined) delete process.env.FAST_DUMP_HIST_GUARD; else process.env.FAST_DUMP_HIST_GUARD = old; }
+});
+
+test('SP reach NPS official snapshot, batch, preserve, and dry behavior', async () => {
+  const data = baseData(), capture = {}, R = officialResources(capture);
+  const fields = officialFields(R, capture, data);
+  assert.deepEqual(fields.spReachNps, spReach);
+  const changedClient = makeClient(data);
+  assert.deepEqual(await updateSinglePersona(id, { client: changedClient, official: true, calculate: async () => ({ ...fields }) }), { updated: true });
+  assert.deepEqual(changedClient.puts[0].data.spReachNps, spReach);
+  const sameData = { ...data, persona: fields.persona, spPersona: fields.spPersona, spReachNps: spReach,
+    reachNps: fields.reachNps, osPattern: fields.osPattern, user: { ...data.user, ...fields.userFields } };
+  const sameClient = makeClient(sameData);
+  assert.deepEqual(await updateSinglePersona(id, { client: sameClient, official: true, calculate: async () => ({ ...fields }) }), { unchanged: true });
+  assert.equal(sameClient.puts.length, 0);
+  const absent = { ...data }; delete absent.spReachNps;
+  const failedCapture = { spReachFailure: true };
+  const failed = officialFields(officialResources(failedCapture), failedCapture, absent);
+  assert.equal(Object.hasOwn(failed, 'spReachNps'), false);
+  const preservedClient = makeClient(absent);
+  assert.deepEqual(await updateSinglePersona(id, { client: preservedClient, official: true,
+    calculate: async () => ({ ...failed, persona: { progressed: true } }) }), { updated: true });
+  assert.equal(Object.hasOwn(preservedClient.puts[0].data, 'spReachNps'), false);
+  assert.deepEqual(preservedClient.puts[0].data.persona, { progressed: true });
+  const batchClient = makeClient(baseData());
+  const batch = await runHistoryBatch({ ids: [id], client: batchClient, R, songs: [song], engine: historyEngine({}), arrangeFor: async () => [], concurrency: 1 });
+  assert.equal(batch[0].updated, true); assert.deepEqual(batchClient.puts[0].data.spReachNps, spReach);
+  const dryClient = makeClient(baseData()); let dryPuts = 0; dryClient.put = async () => { dryPuts++; };
+  const dry = await runHistoryBatch({ ids: [id], client: dryClient, R, songs: [song], engine: historyEngine({}), arrangeFor: async () => [], concurrency: 1, dry: true });
+  assert.equal(dry[0].dry, true); assert.equal(dry[0].changed, true); assert.equal(dryPuts, 0);
 });
