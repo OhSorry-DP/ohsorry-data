@@ -32,7 +32,7 @@ const cumulativeHash = (bytes) => createHash('sha256').update(bytes).digest('hex
 const sp34 = [101, 3, 4, 1500, 34, '2026-10-21T01:02:03.123456+00:00', '2026-10-21', 0, 10, 1000];
 const songs = [{ song_id: 101, title: 'TEST', textage_song_id: 'test', series_no: 34, ac: true, legen: false }];
 const oldUser = { star: 8, sp_r_star: 9, sp_r_star_model_id: 'old', sp_r_star_formula_version: 'v1' };
-const previous = { user: oldUser, dpRecent: [], spRecent: [{ song_id: 101 }], persona: { old: true }, spPersona: { old: true }, sp: [] };
+const previous = { user: oldUser, dpRecent: [], spRecent: [{ song_id: 101 }], persona: { old: true }, spPersona: { old: true }, spReachNps: null, sp: [] };
 const recent = {
   1: [{ song_id: 101, diff: 3, date_kst: '2026-10-22' }],
   0: [{ song_id: 101, diff: 3, date_kst: '2026-10-21' }],
@@ -130,6 +130,8 @@ test('late33 confirmed ten-column history is published and verified before offic
     ]);
     assert.deepEqual(result.dpRecent, recent[1]);
     assert.deepEqual(result.spRecent, recent[0]);
+    assert.equal(Object.hasOwn(result, 'spReachNps'), true);
+    assert.equal(result.spReachNps, null);
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), [late33, h34]);
     assert.ok(events.indexOf('put:meta/scores-delete-' + id + '.json') < events.indexOf('calculate'));
     assert.deepEqual([seen.dp[0].exScore, seen.dp[0].lampNum, seen.dp[0].noteCount], [1900, 6, 1000]);
@@ -157,6 +159,8 @@ test('unset and zero switches preserve legacy requests, fields and SP failure fa
     const result = await run();
     assert.deepEqual(result.sp, previous.sp);
     assert.deepEqual(result.spPersona, previous.spPersona);
+    assert.equal(Object.hasOwn(result, 'spReachNps'), true);
+    assert.equal(result.spReachNps, previous.spReachNps);
     assert.equal(result.user.star, 2);
     assert.deepEqual(calls.slice(0, 3).map(([url]) => new URL(url).pathname), ['/rest/v1/users', '/rest/v1/user_radars', '/rest/v1/user_ohsorry_radars']);
     assert.equal(calls.filter(([url]) => url.includes('make_grid_data')).length, 2);
@@ -236,7 +240,7 @@ test('deferred persona calculates official values with R2 priority, new-user see
   await fixture({ newUser: true, rows: [], oldRows: [] }, async ({ run }) => {
     const result = await run(); assert.equal(result.user.sp_r_star, null); assert.equal(result.persona, null);
   });
-  const skeleton = { user: null, radars: null, osPattern: null, persona: null, spPersona: null, reachNps: null,
+  const skeleton = { user: null, radars: null, osPattern: null, persona: null, spPersona: null, reachNps: null, spReachNps: null,
     fastGeneration: '1' };
   await fixture({ previous: skeleton, rows: [], oldRows: [], dbUser: { iidx_id: id, star: 73, plays: ['seed'] } }, async ({ run }) => {
     const result = await run();

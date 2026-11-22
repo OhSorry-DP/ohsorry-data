@@ -28,6 +28,14 @@ function 의존성(변경 = {}) {
 }
 
 test('분포 키 모양', () => assert.equal(distKey('dp', 10, 2), 'dist/dp/10-2.json'));
+test('SP 도달 NPS는 분포 샘플에 영향을 주지 않음', () => {
+  const d = 기초자료();
+  const out = buildDist({ users: [{ user: { iidx_id: 'A1' }, dp: [],
+    sp: [{ song_id: 10, diff: 2, ex_score: 80 }],
+    spReachNps: { keyboard: { avg: { ec: 1 }, peak: { ec: 2 } } } }],
+  rStarById: new Map(), ...d });
+  assert.deepEqual(out.get('dist/sp/10-2.json'), [[null, 0.5]]);
+});
 test('노트 수는 textage 메타를 사용', () => { const d = 기초자료(); assert.equal(noteCountFor({ song_id: 10, diff: 2 }, 'dp', d.songsById, d.textageMeta), 100); });
 test('INF 기록은 note_count를 우선', () => { const d = 기초자료(); assert.equal(noteCountFor({ song_id: 10, diff: 2, played_version: 0, note_count: 55 }, 'dp', d.songsById, d.textageMeta), 55); });
 test('노트 수 원천이 없으면 null', () => { const d = 기초자료(); assert.equal(noteCountFor({ song_id: 99, diff: 2 }, 'dp', d.songsById, d.textageMeta), null); });
@@ -47,7 +55,7 @@ test('분포 집계의 제외와 중복 및 반올림 규칙', () => {
 });
 
 test('scheduled recovery job is independent and uses required permissions and environment', () => {
-  const workflow = readFileSync(new URL('../workflows/dump-chart-dist.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../workflows/dump-chart-dist.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const recovery = workflow.split('  check_user_recovery:\n')[1];
   assert.ok(recovery);
   assert.match(recovery, /^    needs: \[dump\]\n    if: \$\{\{ !cancelled\(\) && github\.event_name == 'schedule' \}\}\n/m);
@@ -67,7 +75,7 @@ test('recovery condition admits failed predecessors and schedule reruns only', (
 });
 
 test('existing distribution configuration and step order are preserved', () => {
-  const workflow = readFileSync(new URL('../workflows/dump-chart-dist.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../workflows/dump-chart-dist.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(workflow, /  schedule:\n    - cron: '35 18 \* \* \*'/);
   assert.match(workflow, /  workflow_dispatch:\n    inputs:/);
   assert.match(workflow, /concurrency: \{ group: dump-chart-dist, cancel-in-progress: false \}/);
