@@ -124,6 +124,13 @@ https://data.iidx.in/version.json
 
 ## 변경 이력
 
+### 2026-11-22 — user.json 에 동결된 users.plays 를 싣지 않음
+
+- 증상: `user/{id}.json` 의 `user.plays` 가 2026-10-25 21:49 KST 판에서 멈춰 있었다(코치 `/api/{id}/plays` 는 최신).
+- 원인: INF `c5a7ec5`(10-25)부터 최근 플레이는 프로필 RPC `p_plays` 대신 R2 `plays/{id}.json` 에 직접 쓴다. 그 뒤 DB `users.plays` 가 갱신되지 않는데 `dump-user` 가 계속 그 열을 select 해 옛 값을 실었다.
+- 수정: `dump-user.mjs` users select 에서 `plays` 를 뺐다. 다음 공식 덤프부터 user.json 에 `user.plays` 가 없다(옛 user.json 의 값도 남기지 않음). 코치는 R2 `plays/` 를 먼저 읽고, 리모트 Play Log 는 INF 응답의 plays 를 쓰므로 바뀌는 것은 낡은 값이 사라지는 것뿐이다.
+- 검증: `dump-user-plays` 11/11, 구코드로 되돌리면 새 테스트만 실패. 스크립트 전체에서 실패 4건(`dump-chart-dist`·`dump-fast-publish`·`refresh-missing-songs`)은 수정 전 HEAD 에서도 같다.
+
 ### 2026-11-21 — persona 배치 16축 저장
 
 - `personaFor` 반환에 `layoutProfile` 배치 16축을 `{key,label,mean,n}` 으로 저장한다. 표본 미달 축은 null 이며 CN 6축은 제외한다.
