@@ -54,9 +54,9 @@ export async function onRequestCalculated({ request, env }) {
     run: (options = {}) => produceUser({ webRoot: root, id, client, env: { COACH_RECS_ENGINE_SHA256: fingerprint }, ...options }) };
 }
 
-test('40 route bytes·gzip raw/json 격리·2 PUT·index 검증과 REST raw 보존', async t => {
+test('48 route bytes·gzip raw/json 격리·2 PUT·index 검증과 REST raw 보존', async t => {
   const f = await fixture(t), result = await f.run();
-  assert.equal(result.ok, true, result.reason); assert.equal(result.cells.length, 40); assert.equal(result.puts, 2);
+  assert.equal(result.ok, true, result.reason); assert.equal(result.cells.length, 48); assert.equal(result.puts, 2);
   const index = JSON.parse(f.objects.get(`uslice/${id}-coach-recs.json`));
   assert.equal(validateIndex(index, { id, engine_sha256: f.fingerprint }), true);
   const graph = await collectGraph(f.root, fetch, { mode: 'coach' });
@@ -88,7 +88,7 @@ test('셀별 바이트 상한은 524288 포함, 524289 거부하며 기존 index
   const accepted = await fixture(t, 'limit_524288');
   const result = await accepted.run();
   assert.equal(result.ok, true, result.reason);
-  assert.equal(result.cells.length, 40);
+  assert.equal(result.cells.length, 48);
   const index = JSON.parse(accepted.objects.get(`uslice/${id}-coach-recs.json`));
   assert.equal(index.cells[CELLS[0]].byte_length, 524288);
   assert.equal(accepted.objects.get(`uslice/${id}-coach-recs-${result.generation}.bin`).subarray(index.cells[CELLS[0]].offset, index.cells[CELLS[0]].offset + index.cells[CELLS[0]].length).length, 524288);
@@ -134,9 +134,9 @@ test('에러 응답·삼켜진 통신 실패는 게시 금지', async t => {
   assert.equal(deterministic.puts.length, 2);
 });
 
-test('dry 40칸 계산·PUT 0 및 CLI 옵션 검증', async t => {
+test('dry 48칸 계산·PUT 0 및 CLI 옵션 검증', async t => {
   const f = await fixture(t), result = await f.run({ dry: true });
-  assert.equal(result.ok, true, result.reason); assert.equal(result.cells.length, 40);
+  assert.equal(result.ok, true, result.reason); assert.equal(result.cells.length, 48);
   assert.equal(result.puts, 0); assert.equal(f.puts.length, 0);
   assert.equal(parseArgs(['--web-root', webRoot, '--only', id, '--dry']).concurrency, 2);
   assert.deepEqual(parseArgs([]), { dry: false, concurrency: 2, requestsPerSecond: 3 });
@@ -151,7 +151,7 @@ test('dry 40칸 계산·PUT 0 및 CLI 옵션 검증', async t => {
     async read(key) { const bytes = objects.get(key); return bytes ? { bytes, etag: `"${digest(bytes)}"` } : null; },
     async put() { assert.fail('dry PUT'); },
   } });
-  assert.equal(actual.ok, true, actual.reason); assert.equal(actual.cells.length, 40); assert.equal(actual.puts, 0);
+  assert.equal(actual.ok, true, actual.reason); assert.equal(actual.cells.length, 48); assert.equal(actual.puts, 0);
   console.log(JSON.stringify({ fixture: 'actual web route / synthetic empty charts, not production user', ...actual }));
 });
 
@@ -203,7 +203,7 @@ test('parent passes original R2 UMD sources to strict-module child with original
   assert.equal(results.length, 1);
   assert.equal(results[0].ok, true, results[0].reason);
   assert.equal(results[0].engine_sha256, f.fingerprint);
-  assert.equal(results[0].cells.length, 40);
+  assert.equal(results[0].cells.length, 48);
   assert.equal(results[0].puts, 2);
   assert.equal(JSON.parse(f.objects.get(`uslice/${id}-coach-recs.json`)).engine_sha256, f.fingerprint);
 });
