@@ -7,7 +7,7 @@ const { conditionalR2Client, md5 } = await import('../r2-client.mjs');
 import * as engine from '../persona-lib.mjs';
 
 const original = () => ({ _v: '2026-10-09T00:00:00.000Z', user: { iidx_id: '123' },
-  dp: [{ song_id: 1, ex_score: 10 }], sp: [], persona: { old: 'dp' }, spPersona: { old: 'sp' }, reachNps: { old: true } });
+  dp: [{ song_id: 1, ex_score: 10 }], sp: [], persona: { old: 'dp' }, spPersona: { old: 'sp' }, reachNps: { old: true }, spReachNps: { old: 'sp-nps' } });
 
 test('single persona uses If-Match and recomputes fresh data once; second contention abandons PUT', async () => {
   for (const conflicts of [1, 2]) {
@@ -50,16 +50,18 @@ test('deferred dump preserves both previous personas and fails closed on unreada
   const { dumpUser } = await import('../dump-user.mjs');
   const saved = globalThis.fetch; t.after(() => { globalThis.fetch = saved; });
   let unavailable = false;
+  const r2 = { read: async () => ({ body: unavailable ? '{invalid' : JSON.stringify(original()) }) };
   globalThis.fetch = async url => {
     if (url.includes('/objects/user/')) return new Response(unavailable ? '{invalid' : JSON.stringify(original()));
     if (url.includes('chart_arrange')) return Response.json([], { headers: { 'content-range': '*/0' } });
     if (url.includes('/rest/v1/users?')) return Response.json([{ iidx_id: '123' }]);
     return Response.json([]);
   };
-  const data = await dumpUser('123', { textageMeta: { songs: {} } }, { deferPersona: true });
+  const data = await dumpUser('123', { textageMeta: { songs: {} } }, { deferPersona: true, r2 });
   assert.deepEqual(data.persona, { old: 'dp' }); assert.deepEqual(data.spPersona, { old: 'sp' });
+  assert.deepEqual(data.spReachNps, { old: 'sp-nps' });
   unavailable = true;
-  await assert.rejects(dumpUser('123', { textageMeta: { songs: {} } }, { deferPersona: true }));
+  await assert.rejects(dumpUser('123', { textageMeta: { songs: {} } }, { deferPersona: true, r2 }));
   let puts = 0;
   assert.deepEqual(await updateSinglePersona('123', { client: { read: async () => ({ body: JSON.stringify(original()), etag: '"x"' }),
     put: async () => { puts++; } }, calculate: async () => ({ persona: null, spPersona: null }) }), { unchanged: true });
@@ -100,6 +102,45 @@ test('workflow uses per-user cancellation in every mode and keeps 33/34 uploads 
   assert.notEqual(a33, b33);
   assert.equal(new Set([a33, a34, b33]).size, 2);
   assert.doesNotMatch(workflow, /played_version[^\n]*(?:reject|deny|dispatch)/i);
+});
+
+test('deferred SP NPS failures and RPC failures preserve prior value; successful RPC stays on existing path without DP work', async t => {
+  process.env.SUPABASE_URL = 'https://supabase.invalid';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'test';
+  const { dumpUser } = await import('../dump-user.mjs');
+  const saved = globalThis.fetch; t.after(() => { globalThis.fetch = saved; });
+  const prior = { old: 'sp-nps' };
+  const r2 = { read: async () => ({ body: JSON.stringify({ ...original(), spReachNps: prior }) }) };
+  let rpcFails = false, scoreRows = [], calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push(String(url));
+    if (String(url).includes('/objects/user/')) return Response.json({ ...original(), spReachNps: prior });
+    if (String(url).includes('/rest/v1/users?')) return Response.json([{ iidx_id: '123' }]);
+    if (String(url).includes('/rest/v1/rpc/make_grid_data')) {
+      const body = JSON.parse(init.body);
+      if (body.p_play_style === 1) return Response.json([{ song_id: 11, ex_score: 50, lamp: 5, diff: 3 }]);
+      if (rpcFails) return new Response('failed', { status: 500 });
+      return Response.json(scoreRows);
+    }
+    if (String(url).includes('chart_arrange')) return Response.json([], { headers: { 'content-range': '*/0' } });
+    return Response.json([]);
+  };
+  const R = { textageMeta: { songs: {} }, spNpsSchemaVersion: 1, spNpsScores: {},
+    reachNpsLib: () => { throw new Error('unexpected engine call'); } };
+  rpcFails = true;
+  const rpcFailure = await dumpUser('123', R, { deferPersona: true, r2 });
+  assert.deepEqual(rpcFailure.spReachNps, prior);
+  assert.equal(calls.some(url => url.includes('make_grid_data')), true);
+
+  calls = []; rpcFails = false; scoreRows = [{ song_id: 7, title: 'missing', textage_song_id: 'absent', diff: 3, ex_score: 50, lamp: 5 }];
+  const calcFailure = await dumpUser('123', R, { deferPersona: true, r2 });
+  assert.deepEqual(calcFailure.spReachNps, prior);
+  assert.equal(calls.filter(url => url.includes('make_grid_data')).length, 2);
+
+  calls = []; scoreRows = [];
+  const noPlays = await dumpUser('123', R, { deferPersona: true, r2 });
+  assert.deepEqual(noPlays.spReachNps, prior);
+  assert.equal(calls.filter(url => url.includes('make_grid_data')).length, 2);
 });
 
 test('workflow keeps early upload, Node guard and dump-persona-coach order', () => {
