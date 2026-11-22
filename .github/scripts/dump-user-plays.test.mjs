@@ -50,27 +50,17 @@ function textResponse(value, headers = {}) {
   return { ok: true, status: 200, text: async () => value, headers: { get: (name) => headers[name.toLowerCase()] ?? headers[name] ?? null } };
 }
 
-test('dumpUser selects and passes plays unchanged in user object', async () => {
-  const { result, calls } = await run({ ...baseUser, plays });
-  assert.deepEqual(result.user, { ...baseUser, plays });
-  assert.deepEqual(result.user.plays, plays);
-  assert.equal(result.user.plays[0].columns.length, 18);
-  assert.equal(result.user.plays[1].columns.length, 18);
-  assert.equal(result.user.plays[0].columns[0], '오래됨');
-  assert.equal(result.user.plays[0].columns[1], '한글');
-  assert.equal(result.user.plays[0].columns[2], '"quoted"');
-  assert.equal(result.user.plays[1].columns[0], 'new');
-  assert.equal(result.user.plays[1].columns[1], '새판');
-  assert.equal(result.user.plays[1].columns[2], '따옴표 "유지"');
+test('dumpUser no longer selects frozen users.plays', async () => {
+  const { result, calls } = await run({ ...baseUser });
   const usersRequest = calls.find(({ target }) => target.includes('/rest/v1/users?'));
   assert.ok(usersRequest, 'users REST request was made');
-  assert.match(usersRequest.target, /select=[^&]*sp_star,sp_r_star,sp_r_star_model_id,sp_r_star_formula_version,plays(?:&|$)/);
+  const select = usersRequest.target.match(/[?&]select=([^&]*)/)[1];
+  const cols = select.split(',');
+  assert.equal(cols.includes('plays'), false);
+  assert.equal(cols.at(-1), 'sp_r_star_formula_version');
+  assert.equal(Object.hasOwn(result.user, 'plays'), false);
+  assert.deepEqual(result.user, baseUser);
   assert.equal(calls.some(({ options }) => options.method === 'PUT'), false);
-});
-
-test('dumpUser preserves null plays', async () => {
-  const { result } = await run({ ...baseUser, plays: null });
-  assert.deepEqual(result.user, { ...baseUser, plays: null });
 });
 
 test('dumpUser preserves absent plays as absent', async () => {
