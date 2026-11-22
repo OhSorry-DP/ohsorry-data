@@ -39,7 +39,7 @@ export function recentHistoryFromRows(rows, playStyle, nowMs = Date.now()) {
 }
 
 // Preserve the original object literal's property insertion order and JSON bytes.
-export function assembleUserDump({ timestamp, userRows, radars, osPattern, persona, spPersona, reachNps, dpRows, sp, cumulative, dpRecent, spRecent }) {
+export function assembleUserDump({ timestamp, userRows, radars, osPattern, persona, spPersona, reachNps, spReachNps = null, dpRows, sp, cumulative, dpRecent, spRecent }) {
   return {
     _v: timestamp, user: userRows[0] ? {
       ...userRows[0],
@@ -47,6 +47,7 @@ export function assembleUserDump({ timestamp, userRows, radars, osPattern, perso
       sp_r_star_model_id: userRows[0].sp_r_star_model_id ?? null,
       sp_r_star_formula_version: userRows[0].sp_r_star_formula_version ?? null,
     } : null, radars, osPattern, persona, spPersona, reachNps,
+    spReachNps,
     dp: dpRows.map(slimRow), sp,
     ...(cumulative ? { dpRecent: dpRecent ?? [], spRecent: spRecent ?? [] } : {}),
     ...(!cumulative && dpRecent ? { dpRecent } : {}),

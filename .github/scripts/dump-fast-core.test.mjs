@@ -59,11 +59,19 @@ test('user assembly preserves nulls, omission rules, property order and JSON byt
     radars: null, osPattern: {}, persona: null, spPersona: null, reachNps: null,
     dpRows: [{ song_id: 1, diff: 2, date: null }], sp: [{ song_id: 3 }], cumulative: false, dpRecent: null, spRecent: undefined };
   const output = assembleUserDump(fields);
-  assert.deepEqual(Object.keys(output), ['_v', 'user', 'radars', 'osPattern', 'persona', 'spPersona', 'reachNps', 'dp', 'sp']);
+  assert.equal(Object.hasOwn(output, 'spReachNps'), true);
+  assert.equal(output.spReachNps, null);
+  const originalKeys = ['_v', 'user', 'radars', 'osPattern', 'persona', 'spPersona', 'reachNps', 'dp', 'sp'];
+  assert.deepEqual(Object.keys(output).filter((key) => key !== 'spReachNps'), originalKeys);
+  assert.deepEqual(Object.keys(output), [...originalKeys.slice(0, 7), 'spReachNps', ...originalKeys.slice(7)]);
   assert.deepEqual(Object.keys(output.user), ['iidx_id', 'sp_r_star', 'sp_r_star_model_id', 'sp_r_star_formula_version']);
-  assert.equal(JSON.stringify(output), '{"_v":"2026-10-24T03:00:00.000Z","user":{"iidx_id":"abc","sp_r_star":null,"sp_r_star_model_id":null,"sp_r_star_formula_version":null},"radars":null,"osPattern":{},"persona":null,"spPersona":null,"reachNps":null,"dp":[{"song_id":1,"diff":2,"date":null}],"sp":[{"song_id":3}]}');
+  assert.equal(JSON.stringify(output), '{"_v":"2026-10-24T03:00:00.000Z","user":{"iidx_id":"abc","sp_r_star":null,"sp_r_star_model_id":null,"sp_r_star_formula_version":null},"radars":null,"osPattern":{},"persona":null,"spPersona":null,"reachNps":null,"spReachNps":null,"dp":[{"song_id":1,"diff":2,"date":null}],"sp":[{"song_id":3}]}');
   assert.deepEqual(Object.keys(assembleUserDump({ ...fields, cumulative: true })),
-    ['_v', 'user', 'radars', 'osPattern', 'persona', 'spPersona', 'reachNps', 'dp', 'sp', 'dpRecent', 'spRecent']);
+    ['_v', 'user', 'radars', 'osPattern', 'persona', 'spPersona', 'reachNps', 'spReachNps', 'dp', 'sp', 'dpRecent', 'spRecent']);
+  const spReachNps = { keyboard: { avg: {}, peak: {}, meta: { avg: {}, peak: {} } }, scratch: null, bands: {} };
+  const withSpReachNps = assembleUserDump({ ...fields, spReachNps });
+  assert.equal(withSpReachNps.spReachNps, spReachNps);
+  assert.deepEqual(withSpReachNps.spReachNps, spReachNps);
   assert.equal(assembleUserDump({ ...fields, sp: [{ old: true }], cumulative: false }).sp[0].old, true);
 });
 
