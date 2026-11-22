@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { buildBestDocument } from './dump-fast-core.mjs';
 const FAST_FIELDS = ['dp', 'sp', 'dpRecent', 'spRecent'];
 const FAST_KEYS = [...FAST_FIELDS, 'fastGeneration'];
-const SLOW_FIELDS = ['_v', 'user', 'radars', 'osPattern', 'persona', 'spPersona', 'reachNps'];
+const SLOW_FIELDS = ['_v', 'user', 'radars', 'osPattern', 'persona', 'spPersona', 'reachNps', 'spReachNps'];
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -16,7 +16,9 @@ function generationOf(value) {
 /** Identify the minimal user skeleton written by the Edge fast dump. */
 export function isEdgeSkeletonUser(value) {
   return object(value)
-    && SLOW_FIELDS.filter((field) => field !== '_v').every((field) => own(value, field) && value[field] === null)
+    && SLOW_FIELDS.filter((field) => field !== '_v' && field !== 'spReachNps')
+      .every((field) => own(value, field) && value[field] === null)
+    && (!own(value, 'spReachNps') || value.spReachNps === null)
     && own(value, 'fastGeneration') && generationOf(value.fastGeneration) !== null;
 }
 

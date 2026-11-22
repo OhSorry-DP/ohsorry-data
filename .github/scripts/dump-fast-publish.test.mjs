@@ -16,6 +16,9 @@ test('Edge skeleton detection requires every owned null slow field and a valid g
   const skeleton = { _v: 1, user: null, radars: null, osPattern: null, persona: null, spPersona: null,
     reachNps: null, fastGeneration: '1', dp: null, extra: true };
   assert.equal(isEdgeSkeletonUser(skeleton), true);
+  const oldSkeleton = { ...skeleton }; delete oldSkeleton.spReachNps;
+  assert.equal(isEdgeSkeletonUser(oldSkeleton), true);
+  assert.equal(isEdgeSkeletonUser({ ...oldSkeleton, spReachNps: { stale: true } }), false);
   assert.equal(isEdgeSkeletonUser({ ...skeleton, user: {} }), false);
   assert.equal(isEdgeSkeletonUser({ ...skeleton, persona: {} }), false);
   const missingSlow = { ...skeleton }; delete missingSlow.reachNps;
@@ -395,6 +398,22 @@ test('Actions captured generation preserves newer current scores and slow merge 
   assert.deepEqual(slow.dp, current.dp);
   assert.deepEqual(slow.user, { ...current.user, name: 'n' });
   assert.equal(slow.extension, 9);
+  const spReachNps = { keyboard: { avg: { ec: 1 }, peak: { ec: 2 } } };
+  assert.deepEqual(mergeSlowUser(current, { spReachNps }).spReachNps, spReachNps);
+  assert.equal(mergeSlowUser(current, {}).spReachNps, undefined);
+  assert.equal(mergeActionsUser({ ...current, spReachNps }, { ...fast('7', 7), spReachNps: null }, '7').spReachNps, null);
+  assert.deepEqual(mergeActionsUser({ ...current, spReachNps }, { ...fast('7', 7) }, '7').spReachNps, spReachNps);
+  const newerFast = mergeActionsUser({ ...current, ...fast('9', 90), spReachNps },
+    { ...fast('7', 7), spReachNps: null }, '7');
+  assert.equal(newerFast.dp[0], 90);
+  const edgeSkeleton = { user: null, radars: null, osPattern: null, persona: null, spPersona: null,
+    reachNps: null, fastGeneration: '1' };
+  console.log('SP NPS merge checks:', JSON.stringify({
+    mergeSlowUser: mergeSlowUser(current, { spReachNps }).spReachNps,
+    mergeActionsUser: mergeActionsUser({ ...current, spReachNps }, { ...fast('7', 7), spReachNps: null }, '7').spReachNps,
+    oldSkeleton: isEdgeSkeletonUser(edgeSkeleton), newSkeleton: isEdgeSkeletonUser({ ...edgeSkeleton, spReachNps: null }),
+    ordinaryUser: isEdgeSkeletonUser(current), newestFastValue: newerFast.dp[0],
+  }));
 });
 
 test('user CAS conflict stops without retries or a pending done write', async () => {
