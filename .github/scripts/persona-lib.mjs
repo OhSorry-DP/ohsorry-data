@@ -86,6 +86,7 @@ export async function loadPersonaResources(opts = {}) {
     fetchJson(`${GIST_RAW}/sp-arrange.json${bust}`).catch(() => null),
     fetchJson(`${GIST_RAW}/sp-rate-reference.json${bust}`).catch(() => null),   // SP 스코어링 마스터용 인구 rate 기준(gameLevel별). 없으면 SP overallResid null
   ]);
+  const spNpsSlimRaw = await fetchJson(`${GIST_RAW}/sp-feature-scores-slim.json${bust}`).catch(() => null);
   if (official) {
     const [ereterRaw, cpiRaw, spFeaturesRaw] = await Promise.all([
       fetchJson(`${GIST_RAW}/ereter-data.json${bust}`),
@@ -171,6 +172,7 @@ export async function loadPersonaResources(opts = {}) {
     rateStarScale: ratingJson.rateStar && ratingJson.rateStar.scale,
     zasaData: Array.isArray(zasaRaw.charts) ? zasaRaw.charts : zasaRaw,
     patternsMap, featScores: featScoresJson.scores, rateRef, spKeymaps, spRateRef, pop, popmean, popmeanSp, reachNpsLib,
+    spNpsScores: spNpsSlimRaw?.scores ?? null, spNpsSchemaVersion: spNpsSlimRaw?._meta?.npsSchemaVersion ?? null,
   };
   if (official) Object.assign(result, {
     ratingJson, ereterData, cpiData, spFeatScores,
@@ -333,11 +335,74 @@ export function spChartsFromGridRows(rows, textageMeta) {
   for (const r of rows) {
     const diff = DIFF_INT_TO_STR[r.diff];
     if (!diff || diff === 'BEGINNER' || !r.title) continue;
-    const m = r.textage_song_id ? textageMeta.songs[r.textage_song_id] : null;
+    const id = r.textage_song_id ?? null;
+    const m = id != null ? textageMeta?.songs?.[id] : null;
     const gl = m && m.levels ? (m.levels[SP_TKEY[diff]] || 0) : 0;
-    out.push({ title: r.title, diff, exScore: r.ex_score || 0, lampNum: r.lamp || 0, gameLevel: gl });
+    const rawNotes = m?.notes?.[SP_TKEY[diff]];
+    const noteCount = Number.isFinite(rawNotes) && rawNotes > 0 ? rawNotes : null;
+    out.push({ title: r.title, textageSongId: id, diff, exScore: r.ex_score || 0, lampNum: r.lamp || 0, gameLevel: gl, noteCount });
   }
   return out;
+}
+
+const SP_NPS_CRITERIA = ['ec', 'hc', 'exh', 'a', 'aa', 'aaa'];
+const SP_NPS_BANDS = [9, 10, 11, 12];
+const SP_NPS_DIFF = { NORMAL: 'SP_NOR', HYPER: 'SP_HYP', ANOTHER: 'SP_ANO', LEGGENDARIA: 'SP_LEG' };
+const SP_NPS_TKEY = { NORMAL: 'SN', HYPER: 'SH', ANOTHER: 'SA', LEGGENDARIA: 'SX' };
+const spEmptyRulers = () => ({
+  avg: Object.fromEntries(SP_NPS_CRITERIA.map((k) => [k, null])),
+  peak: Object.fromEntries(SP_NPS_CRITERIA.map((k) => [k, null])),
+  meta: Object.fromEntries(['avg', 'peak'].map((r) => [r, Object.fromEntries(SP_NPS_CRITERIA.map((k) => [k, { fallback: false, total: 0, gate: null }]))])),
+});
+
+export function spReachNpsFor(ownSp, R) {
+  const bad = (reason) => ({ ok: false, reason });
+  if (R.spNpsSchemaVersion !== 1 || !R.spNpsScores || typeof R.spNpsScores !== 'object' || typeof R.reachNpsLib !== 'function') return bad('sp_nps_asset_missing');
+  const records = [];
+  let excluded = 0;
+  for (const c of ownSp) {
+    const key = SP_NPS_DIFF[c?.diff];
+    const asset = c?.textageSongId != null && key ? R.spNpsScores[c.textageSongId]?.[key] : null;
+    const noteKey = SP_NPS_TKEY[c?.diff];
+    const notes = c?.textageSongId != null ? R.textageMeta?.songs?.[c.textageSongId]?.notes?.[noteKey] : null;
+    if (!key) { excluded++; continue; }
+    if (c?.textageSongId == null || !R.spNpsScores[c.textageSongId] || !Object.hasOwn(R.spNpsScores[c.textageSongId], key)
+      || !Number.isFinite(notes) || notes <= 0) { excluded++; continue; }
+    if (!asset || ![asset.nps?.a, asset.nps?.p, asset.scratchNps?.a, asset.scratchNps?.p].every((v) => Number.isFinite(v) && v >= 0)
+      || !Number.isFinite(c.lampNum) || !Number.isFinite(c.exScore)) return bad('sp_nps_invalid');
+    records.push({ keyboardAvg: asset.nps.a, keyboardPeak: asset.nps.p, scratchAvg: asset.scratchNps.a, scratchPeak: asset.scratchNps.p,
+      lamp: c.lampNum, exScore: c.exScore, notes, gameLevel: c.gameLevel });
+  }
+  if (!records.some((r) => r.lamp > 0)) return bad('sp_nps_no_plays');
+  const ruler = (subset, avgField, peakField, emptyTotal) => {
+    if (!subset.length) {
+      const e = spEmptyRulers();
+      for (const k of SP_NPS_CRITERIA) for (const n of ['avg', 'peak']) e.meta[n][k].total = emptyTotal;
+      return e;
+    }
+    const input = subset.map((r) => ({ avgNps: r[avgField], peakNps: r[peakField], lamp: r.lamp, exScore: r.exScore, noteCount: r.notes }));
+    const res = R.reachNpsLib(input);
+    const meta = Object.fromEntries(['avg', 'peak'].map((side) => [side, Object.fromEntries(SP_NPS_CRITERIA.map((k) => [k, {
+      fallback: res.meta[side][k].fallback, total: res.meta[side][k].total, gate: res.meta[side][k].gate,
+    }]))]));
+    return { avg: Object.fromEntries(SP_NPS_CRITERIA.map((k) => [k, res.avg[k]])), peak: Object.fromEntries(SP_NPS_CRITERIA.map((k) => [k, res.peak[k]])), meta };
+  };
+  const keyboard = ruler(records, 'keyboardAvg', 'keyboardPeak', 0);
+  const scratch = ruler(records, 'scratchAvg', 'scratchPeak', 0);
+  const bands = Object.fromEntries(SP_NPS_BANDS.map((level) => {
+    const all = records.filter((r) => r.gameLevel === level);
+    const played = all.filter((r) => r.lamp > 0);
+    if (played.length < 80) {
+      const blank = () => {
+        const e = spEmptyRulers();
+        for (const side of ['avg', 'peak']) for (const k of SP_NPS_CRITERIA) e.meta[side][k] = { fallback: false, total: played.length, gate: null };
+        return e;
+      };
+      return [String(level), { played: played.length, status: 'NPS_REACH_SAMPLE_INSUFFICIENT', keyboard: blank(), scratch: blank() }];
+    }
+    return [String(level), { played: played.length, status: 'ok', keyboard: ruler(played, 'keyboardAvg', 'keyboardPeak', played.length), scratch: ruler(played, 'scratchAvg', 'scratchPeak', played.length) }];
+  }));
+  return { ok: true, value: { keyboard, scratch, bands }, excluded };
 }
 
 function spResidRows(ownSp, R) {
