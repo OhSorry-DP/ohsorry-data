@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { calculateOfficialScores } from './official-score.mjs';
 import { historyInputs } from './persona-lib.mjs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor } from './persona-lib.mjs';
+import { loadPersonaResources, attachArrange, chartsFromGridRows, personaFor, spChartsFromGridRows, spPersonaFor, reachNpsFor, spReachNpsFor } from './persona-lib.mjs';
 import { getText } from './r2-client.mjs';
 import { s3R2Client, conditionalR2Client } from './r2-client.mjs';
 import { histGuardEnabled, publishHistWithLease, acquireHistLease, assertHistLease, releaseHistLease, mergeHistUser, mergeHistPending, mergeSlowUser, publishBest, isEdgeSkeletonUser } from './dump-fast-publish.mjs';
@@ -199,6 +199,9 @@ export async function dumpUser(id, personaRes, opts = {}) {
   // 🔴 반드시 null 로 시작한다 — undefined 로 두면 spPersonaFor 가 throw 했을 때
   //    아래 `=== null` 가드가 안 걸리고, JSON.stringify 가 키를 빼서 필드가 통째로 사라진다.
   let sp = null, spPersona = null;
+  let spCharts = null;
+  let spReachNps = null;
+  let spReachNpsError = null;
   if (!spResult.ok) {
     const reason = spResult.error && spResult.error.message ? spResult.error.message : String(spResult.error);
     if (!prevOk || !prev) {
@@ -212,14 +215,29 @@ export async function dumpUser(id, personaRes, opts = {}) {
     }
     sp = prev.sp;
     spPersona = prev.spPersona || null;
+    spReachNps = prev.spReachNps ?? null;
   } else {
     sp = spResult.rows.map(slimRow);
     let spPersonaError = null;
     try {
-      if (!opts.deferPersona || !prevOk) spPersona = spPersonaFor(spChartsFromGridRows(spResult.rows, personaRes.textageMeta), personaRes);
+      spCharts = spChartsFromGridRows(spResult.rows, personaRes.textageMeta);
+      if (!opts.deferPersona || !prevOk) spPersona = spPersonaFor(spCharts, personaRes);
     } catch (e) {
       spPersonaError = e;
     }
+    try {
+      if (spCharts === null) spCharts = spChartsFromGridRows(spResult.rows, personaRes.textageMeta);
+      const computed = spReachNpsFor(spCharts, personaRes);
+      if (computed?.ok) spReachNps = computed.value;
+      else {
+        spReachNpsError = computed?.reason || 'SP NPS 산출 실패';
+        spReachNps = prev?.spReachNps ?? null;
+      }
+    } catch (e) {
+      spReachNpsError = e;
+      spReachNps = prev?.spReachNps ?? null;
+    }
+    if (spReachNpsError) console.warn('::warning::spReachNps 산출 실패, 이전 값 유지(' + id + '): ' + (spReachNpsError.message || spReachNpsError));
     if (spPersona === null) {
       const reason = opts.deferPersona ? 'deferred to persona job' : spPersonaError ? spPersonaError.message : '산출값 null';
       if (!prevOk) {
@@ -231,8 +249,12 @@ export async function dumpUser(id, personaRes, opts = {}) {
       spPersona = (prev && prev.spPersona) || null;
     }
   }
+  if (!prevOk && spReachNps === null && spResult.ok) {
+    console.error('::error::spReachNps 이전 상태를 확인할 수 없음(' + id + ')');
+    throw new Error('spReachNps 보존 불가(' + id + ')');
+  }
   const result = assembleUserDump({ timestamp: new Date().toISOString(), userRows: user, radars, osPattern,
-    persona, spPersona, reachNps, dpRows: dp, sp, cumulative, dpRecent, spRecent });
+    persona, spPersona, reachNps, spReachNps, dpRows: dp, sp, cumulative, dpRecent, spRecent });
   if (histGuardEnabled(process.env)) result.histRevision = bytesHash(prepared.histBytes);
   return result;
 }
